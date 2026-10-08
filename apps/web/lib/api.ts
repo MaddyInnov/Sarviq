@@ -70,7 +70,13 @@ export type StreamEvent =
   | { type: 'tool_result'; call: ToolCall; result: unknown; denied?: boolean }
   | { type: 'done'; usage: TokenUsage | null }
   | { type: 'error'; message: string }
-  | { type: 'approval_required'; approvalId: string; call: ToolCall };
+  | { type: 'approval_required'; approvalId: string; call: ToolCall }
+  /**
+   * Rich inline card. `widget` is validated client-side against the widget
+   * schema (components/widgets) — invalid payloads render as an error block,
+   * never raw.
+   */
+  | { type: 'widget'; widget: unknown };
 
 export interface ApprovalRecord {
   id: string;

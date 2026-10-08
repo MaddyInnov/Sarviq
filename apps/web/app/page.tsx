@@ -4,6 +4,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   decideApproval,
+  getApiBase,
   getBots,
   getModels,
   getProviders,
@@ -11,6 +12,8 @@ import {
 } from '../lib/api';
 import type { BotConfig, ModelPriceInfo, ProviderInfo, StreamEvent, TokenUsage, ToolCall } from '../lib/api';
 import { COST_ESTIMATE_TOOLTIP, contextMeter, costOfUsage, formatTokens, formatUsd } from '../lib/usage';
+import { WidgetRenderer, validateWidget } from '../components/widgets';
+import type { Widget, WidgetAction } from '../components/widgets';
 
 type ChatBlock =
   | { kind: 'user'; id: string; text: string }
@@ -23,6 +26,7 @@ type ChatBlock =
       call: ToolCall;
       status: 'pending' | 'approved' | 'denied';
     }
+  | { kind: 'widget'; id: string; widget: Widget }
   | { kind: 'error'; id: string; text: string };
 
 let blockSeq = 0;
@@ -274,6 +278,19 @@ export default function ChatPage() {
           next.push({ kind: 'error', id: nextId(), text: event.message });
           break;
         }
+        case 'widget': {
+          const validated = validateWidget(event.widget);
+          if (validated.ok) {
+            next.push({ kind: 'widget', id: nextId(), widget: validated.widget });
+          } else {
+            next.push({
+              kind: 'error',
+              id: nextId(),
+              text: `Widget failed validation: ${validated.error}`,
+            });
+          }
+          break;
+        }
       }
       return next;
     });
@@ -321,6 +338,44 @@ export default function ChatPage() {
       setBlocks((prev) => [
         ...prev,
         { kind: 'error', id: nextId(), text: err instanceof Error ? err.message : String(err) },
+      ]);
+    }
+  };
+
+  /** POST a widget action button back to the API, then note the outcome in chat. */
+  const handleWidgetAction = async (action: WidgetAction, widget: Widget) => {
+    const endpoint = action.endpoint ?? '/api/widget-action';
+    try {
+      const res = await fetch(`${getApiBase()}${endpoint}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          actionId: action.id,
+          widgetKind: widget.kind,
+          payload: action.payload ?? {},
+        }),
+      });
+      if (!res.ok) {
+        let detail = '';
+        try {
+          detail = ((await res.json()) as { error?: string }).error ?? '';
+        } catch {
+          // ignore
+        }
+        throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+      }
+      setBlocks((prev) => [
+        ...prev,
+        { kind: 'assistant', id: nextId(), text: `✓ ${action.label}`, streaming: false },
+      ]);
+    } catch (err) {
+      setBlocks((prev) => [
+        ...prev,
+        {
+          kind: 'error',
+          id: nextId(),
+          text: `Action "${action.label}" failed: ${err instanceof Error ? err.message : String(err)}`,
+        },
       ]);
     }
   };
@@ -436,6 +491,7 @@ export default function ChatPage() {
         <div className="chat-messages" ref={messagesRef}>
           {blocks.length === 0 && (
             <div className="empty-state">
+              <div className="empty-icon" aria-hidden="true">✨</div>
               <p>
                 <strong>{selectedBot ? selectedBot.name : 'Select a bot'}</strong>
               </p>
@@ -456,12 +512,30 @@ export default function ChatPage() {
               case 'assistant':
                 return (
                   <div key={b.id} className="msg assistant">
-                    {b.text}
-                    {b.streaming && <span className="typing"> ▍</span>}
+                    {b.streaming && b.text.length === 0 ? (
+                      <span className="typing-dots" aria-label="Thinking">
+                        <i />
+                        <i />
+                        <i />
+                      </span>
+                    ) : (
+                      <>
+                        {b.text}
+                        {b.streaming && <span className="stream-caret" aria-hidden="true" />}
+                      </>
+                    )}
                     {b.usage && (
                       <UsageFooter usage={b.usage} contextLength={contextLength} costUsd={b.costUsd} />
                     )}
                   </div>
+                );
+              case 'widget':
+                return (
+                  <WidgetRenderer
+                    key={b.id}
+                    widget={b.widget}
+                    onAction={(a, w) => void handleWidgetAction(a, w)}
+                  />
                 );
               case 'tool':
                 return (

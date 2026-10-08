@@ -1,0 +1,17 @@
+{
+  "name": "@mvp/billing",
+  "version": "0.1.0",
+  "private": true,
+  "license": "Apache-2.0",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "devDependencies": {
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3",
+    "vitest": "^2.1.5"
+  }
+}

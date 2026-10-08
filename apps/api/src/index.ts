@@ -20,6 +20,7 @@ import { AgentRuntime } from '@mvp/agent-runtime';
 import type { BotConfig } from '@mvp/agent-runtime';
 import { DEFAULT_POLICY, GovernanceGateway } from '@mvp/governance';
 import { Scheduler, TriggerStore, WorkflowRunner } from '@mvp/workflows';
+import type { WorkflowRun } from '@mvp/workflows';
 import { loadConfig } from './config.js';
 import { GovernanceAdapter } from './governance-adapter.js';
 import { SEED_FILES } from './generated/seed.js';
@@ -37,6 +38,20 @@ import { runChatCli } from './cli.js';
 // own tools as an MCP server (two-way MCP).
 import { makeTaskCreator } from './tasks.js';
 import { PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime';
+// Phase 4: computer-use + muse-module agent tools, policy rules, protocols,
+// and the reminders module (scheduler routing). The computer.ts subpath is
+// imported directly (not re-exported from the agent-runtime index — index
+// untouched), following the pricing.ts precedent in routes.ts.
+import { computerUsePolicyRules, registerComputerUseTool } from '@mvp/agent-runtime/dist/tools/computer.js';
+import {
+  ModuleDb,
+  ReminderStore,
+  fireReminder,
+  registerMuseModuleTools,
+  museModuleToolPolicies,
+} from '@mvp/muse-modules';
+import { defaultAgentCard } from '@mvp/protocols';
+import type { Policy } from '@mvp/governance';
 
 // Pipe/JSON chat mode: `mvp-server chat --bot <id> [--json]`. Parsed at the
 // very top, before boot(), so `chat` never starts the HTTP server.
@@ -128,9 +143,17 @@ async function boot(): Promise<void> {
   const botsById = new Map<string, BotConfig>(seed.bots.map((b) => [b.id, b]));
 
   // 2. Governance + tools.
+  // Phase 4: prepend approval-gating rules for the new agent tools
+  // (computer use, browser automation). First match wins; these are
+  // require-approval — strictly stronger than the defaults they precede,
+  // so deny-by-default is preserved and extended.
+  const globalPolicy: Policy = {
+    ...DEFAULT_POLICY,
+    rules: [...computerUsePolicyRules(), ...museModuleToolPolicies(), ...DEFAULT_POLICY.rules],
+  };
   const governance = new GovernanceGateway({
     dbPath: `${config.dataDir}/governance.db`,
-    policy: DEFAULT_POLICY,
+    policy: globalPolicy,
   });
   // The runtime expects its own governance surface (agent-runtime documents
   // it as a local interface); the adapter bridges it to the real gateway.
@@ -141,6 +164,7 @@ async function boot(): Promise<void> {
   // policy overrides (bot rules prepended, first match wins).
   const governanceAdapter = new GovernanceAdapter(governance, {
     getBotConfig: (id) => botsById.get(id),
+    globalPolicy,
   });
 
   const { registry: toolRegistry, connections: mcpConnections, close: closeMcp } =
@@ -153,6 +177,13 @@ async function boot(): Promise<void> {
       // MCP schema drift at (re)connect raises a human approval here.
       approvalBroker: governance,
     });
+
+  // Phase 4: computer-use tools (sandboxed GUI automation; mutating actions
+  // are approval-gated via computerUsePolicyRules above; the default OS
+  // layer is the mock — no real input) and Muse-module tools (research_deep,
+  // browser_action — browser_action approval-gated via museModuleToolPolicies).
+  registerComputerUseTool(toolRegistry);
+  registerMuseModuleTools(toolRegistry, { dataDir: config.dataDir });
 
   // 3. Agent runtime + workflows.
   const agentRuntime = new AgentRuntime({
@@ -239,11 +270,31 @@ async function boot(): Promise<void> {
   }
   const triggerStore = new TriggerStore(path.join(config.dataDir, 'triggers.db'));
   const scheduler = new Scheduler();
+  // Phase 4: route muse-reminder:* triggers to the reminders module instead
+  // of the workflow runner (their workflowId is a reminder id, not a
+  // registered workflow). fireReminder is idempotent; the onFire callback
+  // below still records a task so the reminder is visible in Activity.
+  const reminderStore = new ReminderStore(new ModuleDb(path.join(config.dataDir, 'muse-modules.db')));
+  const schedulerRunner = {
+    getRunByIdempotencyKey: (key: string) => workflowRunner.getRunByIdempotencyKey(key),
+    startRun: async (
+      workflowId: string,
+      input: unknown,
+      opts?: { idempotencyKey?: string },
+    ): Promise<WorkflowRun> => {
+      if (workflowId.startsWith('muse-reminder:')) {
+        const reminderId = workflowId.slice('muse-reminder:'.length);
+        fireReminder(reminderStore, reminderId);
+        return { id: `reminder:${reminderId}:${Date.now()}` } as WorkflowRun;
+      }
+      return workflowRunner.startRun(workflowId, input, opts);
+    },
+  } as unknown as WorkflowRunner;
   // Phase 3: every scheduled workflow run leaves a task so the user can see
   // what ran and when (wired via the tasks module; failures never break the
   // scheduler tick).
   const createTask = makeTaskCreator({ dataDir: config.dataDir });
-  scheduler.start(workflowRunner, triggerStore, (trigger, runId) => {
+  scheduler.start(schedulerRunner, triggerStore, (trigger, runId) => {
     try {
       createTask({
         title: `Scheduled workflow ran: ${trigger.workflowId}`,
@@ -280,6 +331,10 @@ async function boot(): Promise<void> {
   // auth/multi-user ships.
   app.use(cors({ origin: '*' }));
   app.use(express.json({ limit: '1mb' }));
+  // Phase 4: A2A agent-card discovery (spec-correct location).
+  app.get('/.well-known/agent-card.json', (_req, res) => {
+    res.json(defaultAgentCard(`http://127.0.0.1:${config.port}/api/protocols/a2a`));
+  });
   // Phase 2: workflow webhook triggers (shared-secret authenticated).
   app.use('/webhooks', createWebhookRouter({ runner: workflowRunner, triggerStore }));
   app.use(

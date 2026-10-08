@@ -1,10 +1,17 @@
 {
   "dependencies": {
     "@mvp/agent-runtime": "*",
+    "@mvp/billing": "*",
     "@mvp/governance": "*",
+    "@mvp/marketplace": "*",
     "@mvp/workflows": "*",
     "cors": "^2.8.5",
-    "express": "^4.21.2"
+    "express": "^4.21.2",
+    "@mvp/tenancy": "*",
+    "@mvp/vault": "*",
+    "@mvp/protocols": "*",
+    "@mvp/voice": "*",
+    "@mvp/muse-modules": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

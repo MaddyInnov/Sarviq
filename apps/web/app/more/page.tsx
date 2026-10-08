@@ -1,0 +1,193 @@
+// SPDX-License-Identifier: Apache-2.0
+'use client';
+
+// Modules hub (Phase 4, Workstream E): lists the 13 Muse-parity modules with
+// live data from the modules API. The UI workstream wires nav + per-module
+// pages; this page only lists/links (module cards link to their REST roots).
+
+import { useCallback, useEffect, useState } from 'react';
+import { getApiBase } from '../../lib/api';
+
+// Mount point the integrator uses for registerMuseModuleRoutes().
+const MODULES_BASE = '/api/modules';
+
+interface ModuleDef {
+  key: string;
+  name: string;
+  blurb: string;
+  path: string;
+  stat: (o: Overview | null) => string;
+}
+
+interface Overview {
+  feed: { briefSet: boolean; posts: number };
+  reminders: { scheduled: number };
+  goals: { active: number; completed: number };
+  artifacts: { count: number };
+  threads: { count: number };
+  ideas: { total: number; active: number };
+  calls: { count: number };
+  research: { reports: number };
+  social: { watchlist: number };
+}
+
+const MODULES: ModuleDef[] = [
+  {
+    key: 'feed',
+    name: 'Feed',
+    blurb: 'Proactive feed: a stored user brief plus background-generated posts.',
+    path: '/feed/posts',
+    stat: (o) => (o ? `${o.feed.posts} posts · brief ${o.feed.briefSet ? 'set' : 'not set'}` : '—'),
+  },
+  {
+    key: 'reminders',
+    name: 'Reminders',
+    blurb: 'User reminders (title, when, channel) with due-checking and cron firing.',
+    path: '/reminders',
+    stat: (o) => (o ? `${o.reminders.scheduled} scheduled` : '—'),
+  },
+  {
+    key: 'goals',
+    name: 'Goals',
+    blurb: 'User goals with progress tracking and history.',
+    path: '/goals',
+    stat: (o) => (o ? `${o.goals.active} active · ${o.goals.completed} completed` : '—'),
+  },
+  {
+    key: 'artifacts',
+    name: 'Artifacts',
+    blurb: 'Durable titled documents with full version history.',
+    path: '/artifacts',
+    stat: (o) => (o ? `${o.artifacts.count} artifacts` : '—'),
+  },
+  {
+    key: 'media',
+    name: 'Media',
+    blurb: 'Image / video / audio generation hooks (mock provider until founder keys).',
+    path: '/media/generate',
+    stat: () => 'mock provider',
+  },
+  {
+    key: 'calls',
+    name: 'Calls',
+    blurb: 'Voice call log. Real telephony is out of scope — simulated records only.',
+    path: '/calls',
+    stat: (o) => (o ? `${o.calls.count} logged` : '—'),
+  },
+  {
+    key: 'threads',
+    name: 'Threads',
+    blurb: 'Side chats: separate persistent conversations, independent of main sessions.',
+    path: '/threads',
+    stat: (o) => (o ? `${o.threads.count} threads` : '—'),
+  },
+  {
+    key: 'research',
+    name: 'Research',
+    blurb: 'Deep-research agent: plan → gather → synthesize, with cited sources.',
+    path: '/research',
+    stat: (o) => (o ? `${o.research.reports} reports` : '—'),
+  },
+  {
+    key: 'browser',
+    name: 'Browser',
+    blurb: 'Approval-gated web actions: navigate, extract text, screenshot.',
+    path: '/browser/approvals',
+    stat: () => 'approval-gated',
+  },
+  {
+    key: 'ideas',
+    name: 'Ideas',
+    blurb: 'Idea cards with status tracking: new → active → done / dismissed.',
+    path: '/ideas',
+    stat: (o) => (o ? `${o.ideas.total} total · ${o.ideas.active} active` : '—'),
+  },
+  {
+    key: 'shopping',
+    name: 'Shopping',
+    blurb: 'Product search plus an approval-gated mock purchase flow.',
+    path: '/shopping/products',
+    stat: () => 'mock catalog',
+  },
+  {
+    key: 'places',
+    name: 'Places',
+    blurb: 'Place search with map widget payloads (lat/lng + pins).',
+    path: '/places/search?q=coffee',
+    stat: () => 'mock geo data',
+  },
+  {
+    key: 'social',
+    name: 'Social',
+    blurb: 'Social listening: keyword watchlist, mock social search, digest.',
+    path: '/social/digest',
+    stat: (o) => (o ? `${o.social.watchlist} keywords watched` : '—'),
+  },
+];
+
+const api = (path: string): Promise<unknown> =>
+  fetch(`${getApiBase()}${path}`).then(async (res) => {
+    if (!res.ok) {
+      const detail = await res.text().catch(() => res.statusText);
+      throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+    }
+    return res.json() as Promise<unknown>;
+  });
+
+export default function ModulesPage() {
+  const [overview, setOverview] = useState<Overview | null>(null);
+  const [error, setError] = useState('');
+
+  const refresh = useCallback(async () => {
+    try {
+      setOverview((await api(`${MODULES_BASE}/overview`)) as Overview);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }, []);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
+  return (
+    <div>
+      <div className="row-between">
+        <div>
+          <h1 className="page-title">Modules</h1>
+          <p className="page-sub">
+            The 13 Muse-parity modules. Live counts come from the modules API; card links open the
+            module&apos;s REST endpoint (per-module UI pages are wired separately).
+          </p>
+        </div>
+        <button className="btn" onClick={() => void refresh()}>
+          Refresh
+        </button>
+      </div>
+      {error && <div className="error-box">{error}</div>}
+
+      <div className="grid-2">
+        {MODULES.map((m) => (
+          <div className="card" key={m.key}>
+            <div className="row-between">
+              <strong>{m.name}</strong>
+              <span className="small muted">{m.stat(overview)}</span>
+            </div>
+            <p className="small muted mt">{m.blurb}</p>
+            <div className="mt">
+              <a
+                className="btn btn-sm"
+                href={`${getApiBase()}${MODULES_BASE}${m.path}`}
+                target="_blank"
+                rel="noreferrer"
+              >
+                Open API →
+              </a>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}

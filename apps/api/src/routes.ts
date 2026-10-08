@@ -25,6 +25,21 @@ import { registerOAuthRoutes } from './oauth.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { registerNotesRoutes } from './notes.js';
 import { registerTasksRoutes } from './tasks.js';
+// Phase 4: marketplace + billing + tenancy/vault + protocols/voice + muse modules.
+import { registerMarketplaceRoutes } from './marketplace.js';
+import { registerBillingRoutes } from './billing.js';
+import { registerTenancyRoutes } from './tenancy.js';
+import { registerVaultRoutes } from './vault.js';
+import { registerProtocolRoutes } from './protocols.js';
+import { registerVoiceRoutes } from './voice.js';
+import { registerMuseModuleRoutes } from './muse-modules.js';
+import { MarketplaceRegistry, MarketplaceInstaller, RevenueLedger } from '@mvp/marketplace';
+import { UsageMeter, BillingLedger, MockBillingProvider } from '@mvp/billing';
+// The marketplace registry ships inside the compiled binary via this JSON
+// import (resolveJsonModule); it is seeded into the data dir at boot.
+import marketplaceRegistryJson from '@mvp/marketplace/registry/registry.json' with { type: 'json' };
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   connectBridge,
   disconnectBridge,
@@ -563,6 +578,54 @@ export function createRouter(deps: RouteDeps): express.Router {
   registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
   router.use('/notes', notesRouter);
   registerTasksRoutes(router, { dataDir: config.dataDir });
+
+  // ---- Phase 4: marketplace + billing ---------------------------------
+  // The registry JSON is bundled into the binary; seed it into the data dir
+  // on first boot (or when the bundled copy changes) so fromFile works
+  // identically in dev and in the single-file binary.
+  const marketplaceRouter = express.Router();
+  const registrySeedPath = join(config.dataDir, 'marketplace-registry.json');
+  const registrySeedText = JSON.stringify(marketplaceRegistryJson);
+  if (!existsSync(registrySeedPath) || readFileSync(registrySeedPath, 'utf8') !== registrySeedText) {
+    writeFileSync(registrySeedPath, registrySeedText);
+  }
+  registerMarketplaceRoutes(marketplaceRouter, {
+    config,
+    governance,
+    dataDir: config.dataDir,
+    registry: MarketplaceRegistry.fromFile(registrySeedPath),
+    installer: new MarketplaceInstaller(join(config.dataDir, 'marketplace')),
+    revenue: new RevenueLedger(join(config.dataDir, 'marketplace.db')),
+  });
+  router.use('/marketplace', marketplaceRouter);
+
+  const billingRouter = express.Router();
+  registerBillingRoutes(billingRouter, {
+    dataDir: config.dataDir,
+    meter: new UsageMeter(join(config.dataDir, 'billing.db')),
+    ledger: new BillingLedger(join(config.dataDir, 'billing.db')),
+    // MVP: mock billing provider only — real Stripe keys are the founder's step.
+    provider: new MockBillingProvider(),
+  });
+  router.use('/billing', billingRouter);
+
+  // ---- Phase 4: tenancy + vault (mounted at /api) ----------------------
+  registerTenancyRoutes(router, { config, governance });
+  registerVaultRoutes(router, { config, governance });
+
+  // ---- Phase 4: protocols + voice --------------------------------------
+  const protocolsRouter = express.Router();
+  registerProtocolRoutes(protocolsRouter, {});
+  router.use('/protocols', protocolsRouter);
+
+  const voiceRouter = express.Router();
+  registerVoiceRoutes(voiceRouter, {});
+  router.use('/voice', voiceRouter);
+
+  // ---- Phase 4: muse-parity modules -------------------------------------
+  const modulesRouter = express.Router();
+  registerMuseModuleRoutes(modulesRouter, deps);
+  router.use('/modules', modulesRouter);
 
   return router;
 }
