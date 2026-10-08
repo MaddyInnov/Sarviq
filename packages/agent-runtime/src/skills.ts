@@ -1,10 +1,104 @@
 // SPDX-License-Identifier: Apache-2.0
 
+import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import matter from 'gray-matter';
+import type { SchemaDriftApprovalBroker } from './mcp.js';
+import type { ToolDefinition } from './types.js';
+
+// vitest (Vite 5.4.21) cannot statically resolve the `node:sqlite` specifier,
+// so load it at runtime via the builtin-module API instead of a top-level import.
+const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
+type DatabaseSyncType = InstanceType<typeof DatabaseSync>;
+
+/**
+ * Progressive disclosure: the system prompt carries only name+description
+ * summaries (cheap); the model pulls full skill content on demand through
+ * the `read_skill` tool (see createSkillTools). Full loads are TOFU-pinned:
+ * the content hash is pinned at first load and later drift is gated behind
+ * a human approval — same pattern Phase 1 used for MCP schema pinning.
+ */
+
+export interface SkillSummary {
+  name: string;
+  description: string;
+}
 
 export interface LoadedSkill {
+  name: string;
+  description: string;
+  content: string;
+  /** sha256 of the trimmed content, for provenance pinning. */
+  sha256: string;
+}
+
+export interface SkillPin {
+  name: string;
+  contentSha256: string;
+  pinnedAt: string;
+}
+
+export interface SkillLoaderOptions {
+  /**
+   * SQLite path for the TOFU pin store (`<dataDir>/skill-pins.db`). When
+   * set, skill content is pinned at first loadFull and drift is gated
+   * behind approval. When unset, pinning is disabled and behaviour is
+   * unchanged from before.
+   */
+  pinDbPath?: string;
+  /** Broker used to request human approval on skill drift. Without one, drifted skills fail closed. */
+  approvalBroker?: SchemaDriftApprovalBroker;
+  /** Identity attached to drift approval records. */
+  sessionId?: string;
+  botId?: string;
+  actor?: string;
+  /** Timeout for awaiting a drift approval decision; broker default applies when unset. */
+  approvalTimeoutMs?: number;
+}
+
+/** SQLite TOFU pin store for skill content hashes (one row per skill name). */
+export class SkillPinStore {
+  private readonly db: DatabaseSyncType;
+
+  constructor(dbPath: string) {
+    this.db = new DatabaseSync(dbPath);
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS skill_pins (
+        skill_name TEXT PRIMARY KEY,
+        content_sha256 TEXT NOT NULL,
+        pinned_at TEXT NOT NULL
+      );
+    `);
+  }
+
+  getPin(name: string): SkillPin | undefined {
+    const row = this.db
+      .prepare('SELECT skill_name, content_sha256, pinned_at FROM skill_pins WHERE skill_name = ?')
+      .get(name) as
+      | { skill_name: string; content_sha256: string; pinned_at: string }
+      | undefined;
+    if (!row) return undefined;
+    return { name: row.skill_name, contentSha256: row.content_sha256, pinnedAt: row.pinned_at };
+  }
+
+  /** Insert a new pin or replace the existing one (first pin and approved drift). */
+  upsertPin(name: string, sha256: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO skill_pins (skill_name, content_sha256, pinned_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(skill_name) DO UPDATE SET content_sha256 = excluded.content_sha256, pinned_at = excluded.pinned_at`,
+      )
+      .run(name, sha256, new Date().toISOString());
+  }
+
+  close(): void {
+    this.db.close();
+  }
+}
+
+interface RawSkill {
   name: string;
   description: string;
   content: string;
@@ -16,7 +110,19 @@ export interface LoadedSkill {
  * with YAML frontmatter (name, description) parsed via gray-matter.
  */
 export class SkillLoader {
-  constructor(private readonly skillsDir: string) {}
+  private readonly pinStore: SkillPinStore | null;
+
+  constructor(
+    private readonly skillsDir: string,
+    private readonly options: SkillLoaderOptions = {},
+  ) {
+    this.pinStore = options.pinDbPath ? new SkillPinStore(options.pinDbPath) : null;
+  }
+
+  /** Release the pin-store SQLite connection (no-op when pinning is off). */
+  close(): void {
+    this.pinStore?.close();
+  }
 
   list(): string[] {
     if (!existsSync(this.skillsDir)) return [];
@@ -31,7 +137,39 @@ export class SkillLoader {
     return [...names].sort();
   }
 
+  /**
+   * Cheap summary for system-prompt disclosure: name + description only,
+   * no full content. (The file is still read for frontmatter — "cheap"
+   * means nothing but the summary enters the prompt.)
+   */
+  async getSummary(name: string): Promise<SkillSummary> {
+    const raw = this.readSkill(name);
+    return { name: raw.name, description: raw.description };
+  }
+
+  /**
+   * Full skill load with TOFU provenance pinning. First load pins the
+   * content hash; later drift requests human approval through the injected
+   * broker — approved drift re-pins, denied/timed-out/broker-less drift
+   * fails closed (throws).
+   */
+  async loadFull(name: string): Promise<LoadedSkill> {
+    const raw = this.readSkill(name);
+    const sha256 = createHash('sha256').update(raw.content, 'utf8').digest('hex');
+    await this.checkPin(raw.name, sha256);
+    return { ...raw, sha256 };
+  }
+
+  /**
+   * Backward-compatible full load. Delegates to loadFull (so pinning
+   * applies when a pin store is configured); the returned sha256 is new
+   * but purely additive for existing callers.
+   */
   async load(name: string): Promise<LoadedSkill> {
+    return this.loadFull(name);
+  }
+
+  private readSkill(name: string): RawSkill {
     const candidates = [join(this.skillsDir, name, 'SKILL.md'), join(this.skillsDir, `${name}.md`)];
     const file = candidates.find((c) => existsSync(c));
     if (!file) throw new Error(`Skill not found: "${name}" (looked in ${this.skillsDir})`);
@@ -43,4 +181,93 @@ export class SkillLoader {
       content: parsed.content.trim(),
     };
   }
+
+  private async checkPin(name: string, sha256: string): Promise<void> {
+    if (!this.pinStore) return; // pinning disabled: behaviour unchanged
+    const pin = this.pinStore.getPin(name);
+    if (!pin) {
+      this.pinStore.upsertPin(name, sha256);
+      return;
+    }
+    if (pin.contentSha256 === sha256) return;
+
+    // Drift: the skill file changed since it was pinned.
+    const broker = this.options.approvalBroker;
+    if (!broker) {
+      throw new Error(
+        `Skill "${name}" changed since it was pinned (drift) and no approval broker is configured — failing closed. ` +
+          `Approve the change via the pin store or delete the pin to re-pin at next load.`,
+      );
+    }
+    const ctx = {
+      sessionId: this.options.sessionId ?? 'skill-pinning',
+      botId: this.options.botId ?? 'system',
+      actor: this.options.actor ?? 'system',
+    };
+    const approvalId = broker.requestApproval(
+      `skill:${name}`,
+      { skill: name, pinnedSha256: pin.contentSha256, currentSha256: sha256 },
+      ctx,
+    );
+    let verdict: 'approved' | 'denied';
+    try {
+      verdict = await broker.awaitDecision(approvalId, this.options.approvalTimeoutMs);
+    } catch {
+      verdict = 'denied'; // timeout / broker error: fail closed
+    }
+    if (verdict !== 'approved') {
+      throw new Error(
+        `Skill "${name}" changed since it was pinned and the change was not approved — failing closed.`,
+      );
+    }
+    this.pinStore.upsertPin(name, sha256);
+  }
+}
+
+/**
+ * On-demand skill disclosure tool. The host wires the returned definitions
+ * into the tool registry (top-coordinator wiring); the runtime mentions
+ * `read_skill` in the system prompt when it is registered, so the model
+ * pulls full skill content only when it needs it.
+ *
+ * Governance note: under the default deny-by-default policy this tool
+ * requires human approval like any non-read tool; add a `^read_skill$`
+ * allow rule (global or per-bot) if you want it to auto-run. Skill files
+ * are local, human-authored content — tool results still carry the
+ * untrusted-output tags per the Phase 1 injection floor.
+ */
+export function createSkillTools(skillLoader: SkillLoader): ToolDefinition[] {
+  return [
+    {
+      name: 'read_skill',
+      description:
+        'Read the full content of a skill by name. Skill summaries (name + description) are ' +
+        'listed in your system prompt; call this tool to load a skill\u2019s full instructions ' +
+        'before relying on it.',
+      parameters: {
+        type: 'object',
+        properties: {
+          name: {
+            type: 'string',
+            description: 'Skill name, exactly as shown in the system prompt summaries.',
+          },
+        },
+        required: ['name'],
+        additionalProperties: false,
+      },
+      handler: async (args) => {
+        const name = args['name'];
+        if (typeof name !== 'string' || !name.trim()) {
+          throw new Error('read_skill: "name" is required');
+        }
+        const skill = await skillLoader.loadFull(name.trim());
+        return {
+          name: skill.name,
+          description: skill.description,
+          content: skill.content,
+          sha256: skill.sha256,
+        };
+      },
+    },
+  ];
 }

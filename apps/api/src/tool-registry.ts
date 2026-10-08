@@ -7,7 +7,15 @@
 // logged and skipped — the bot keeps working with the remaining tools.
 
 import path from 'node:path';
-import { MCPClient, createBuiltInTools } from '@mvp/agent-runtime';
+import {
+  BotMemoryStore,
+  MCPClient,
+  SkillLoader,
+  createBuiltInTools,
+  createCodingTools,
+  createMemoryTools,
+  createSkillTools,
+} from '@mvp/agent-runtime';
 import type { SchemaDriftApprovalBroker, ToolDefinition } from '@mvp/agent-runtime';
 import type { McpServerConfig } from './seed.js';
 
@@ -28,12 +36,31 @@ export async function buildToolRegistry(opts: {
   workspaceDir: string;
   /** Directory for the TOFU schema-pin database (mcp-pins.db). */
   dataDir: string;
+  /** Seed skills dir (for the read_skill tool's SkillLoader). */
+  skillsDir: string;
   mcpServers: Record<string, McpServerConfig>;
   /** Broker used to request human approval when an MCP tool's schema drifts. */
   approvalBroker?: SchemaDriftApprovalBroker;
 }): Promise<BuiltRegistry> {
   const registry = new Map<string, ToolDefinition>();
   for (const tool of createBuiltInTools({ workspaceDir: opts.workspaceDir })) {
+    registry.set(tool.name, tool);
+  }
+  // Phase 2: coding tools (patch/edit/glob/grep/LSP), per-bot memory tools,
+  // and read_skill (progressive skill disclosure). All are ordinary registry
+  // tools, so deny-by-default governance applies to each of them.
+  for (const tool of createCodingTools({ workspaceDir: opts.workspaceDir })) {
+    registry.set(tool.name, tool);
+  }
+  for (const tool of createMemoryTools({ store: new BotMemoryStore(opts.dataDir) })) {
+    registry.set(tool.name, tool);
+  }
+  for (const tool of createSkillTools(
+    new SkillLoader(opts.skillsDir, {
+      pinDbPath: path.join(opts.dataDir, 'skill-pins.db'),
+      approvalBroker: opts.approvalBroker,
+    }),
+  )) {
     registry.set(tool.name, tool);
   }
 

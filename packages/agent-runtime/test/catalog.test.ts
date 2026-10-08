@@ -5,8 +5,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import {
+  assertModelAllowed,
   getDefaultModel,
   getProviderPreset,
+  isFreeModel,
   listProviderPresets,
   resolveApiKey,
   resolveBaseUrl,
@@ -119,5 +121,68 @@ describe('omnirush bring-your-own preset', () => {
     const provider = createProvider('omnirush');
     expect(provider).toBeInstanceOf(OpenAICompatibleProvider);
     expect(provider.providerId).toBe('omnirush');
+  });
+});
+
+describe('isFreeModel', () => {
+  it('is true for catalog models pinned free:true', () => {
+    // opencode-zen roster pinned 2026-10-09 (free:true in catalog.json).
+    expect(isFreeModel('opencode-zen', 'big-pickle')).toBe(true);
+    expect(isFreeModel('opencode-zen', 'jev-1.13-free')).toBe(true);
+  });
+
+  it('is false for catalog models without the free flag', () => {
+    expect(isFreeModel('groq', 'gpt-oss-120b')).toBe(false);
+    expect(isFreeModel('openai', 'gpt-4o')).toBe(false);
+  });
+
+  it('is true for OpenRouter :free and Zen -free suffixes', () => {
+    expect(isFreeModel('openrouter', 'deepseek/deepseek-chat:free')).toBe(true);
+    expect(isFreeModel('opencode-zen', 'some-new-model-free')).toBe(true);
+  });
+
+  it('is false for unknown providers/models', () => {
+    expect(isFreeModel('nope', 'nope')).toBe(false);
+  });
+});
+
+describe('assertModelAllowed (FREE_MODELS_ONLY)', () => {
+  const KEY = 'FREE_MODELS_ONLY';
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env[KEY];
+    delete process.env[KEY];
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[KEY];
+    else process.env[KEY] = saved;
+  });
+
+  it('is a no-op when the guard is off', () => {
+    expect(() => assertModelAllowed('openai', 'gpt-4o')).not.toThrow();
+  });
+
+  it('throws for paid models when enabled with "1"', () => {
+    process.env[KEY] = '1';
+    expect(() => assertModelAllowed('openai', 'gpt-4o')).toThrow(/FREE_MODELS_ONLY/);
+    expect(() => assertModelAllowed('openai', 'gpt-4o')).toThrow(/openai\/gpt-4o/);
+  });
+
+  it('accepts "true" (any case) as enabled', () => {
+    process.env[KEY] = 'TRUE';
+    expect(() => assertModelAllowed('groq', 'gpt-oss-120b')).toThrow(/FREE_MODELS_ONLY/);
+  });
+
+  it('passes free models when the guard is on', () => {
+    process.env[KEY] = '1';
+    expect(() => assertModelAllowed('opencode-zen', 'big-pickle')).not.toThrow();
+    expect(() => assertModelAllowed('openrouter', 'x:free')).not.toThrow();
+  });
+
+  it('ignores unrelated values', () => {
+    process.env[KEY] = '0';
+    expect(() => assertModelAllowed('openai', 'gpt-4o')).not.toThrow();
   });
 });

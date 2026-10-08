@@ -9,13 +9,17 @@
 //   id → real approval id translation.
 
 import express from 'express';
-import { resolveApiKey } from '@mvp/agent-runtime';
+import { BotMemoryStore, isFreeModel, listProviderPresets, resolveApiKey } from '@mvp/agent-runtime';
 import type { AgentRuntime, BotConfig, StreamEvent } from '@mvp/agent-runtime';
+// pricing.ts is not re-exported from the agent-runtime index (index untouched);
+// import the built subpath directly.
+import { priceOfModel } from '@mvp/agent-runtime/dist/pricing.js';
 import type { ApprovalStatus, GovernanceGateway } from '@mvp/governance';
 import type { WorkflowRun, WorkflowRunner } from '@mvp/workflows';
 import type { AppConfig } from './config.js';
 import type { GovernanceAdapter } from './governance-adapter.js';
 import type { McpConnection } from './tool-registry.js';
+import { saveBotPolicy } from './bot-policies.js';
 import {
   connectBridge,
   disconnectBridge,
@@ -100,6 +104,50 @@ export function createRouter(deps: RouteDeps): express.Router {
   router.get('/bots', (_req, res) => {
     // Bot configs carry no secrets (system prompts are content, not keys).
     res.json(bots);
+  });
+
+  // ---- Per-bot governance policy ------------------------------------------
+  // PUT body: { rules: [{ id, toolPattern, effect: 'allow'|'deny'|'require-approval', reason? }] }.
+  // Persisted to <dataDir>/bot-policies.json and applied to the in-memory
+  // bot immediately; also applied at boot (see bot-policies.ts).
+  router.put('/bots/:id/policy', (req, res) => {
+    const body = (req.body ?? {}) as { rules?: unknown };
+    try {
+      const policy = saveBotPolicy(config.dataDir, bots, req.params.id, body.rules);
+      res.json({ ok: true, botId: req.params.id, policy });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot') ? 404 : 400;
+      res.status(status).json(errorBody('Failed to save bot policy', message));
+    }
+  });
+
+  // ---- Per-bot persistent memory ----------------------------------------
+  // Phase 2: each bot's long-term memory lives at <dataDir>/memories/<botId>.md
+  // (see BotMemoryStore). The bots also maintain it themselves via the
+  // memory_recall / memory_store tools; these endpoints back the Workspace UI.
+  router.get('/bots/:id/memory', (req, res) => {
+    const bot = bots.find((b) => b.id === req.params.id);
+    if (!bot) {
+      res.status(404).json(errorBody('Unknown bot', req.params.id));
+      return;
+    }
+    res.json({ botId: bot.id, content: new BotMemoryStore(config.dataDir).read(bot.id) });
+  });
+
+  router.put('/bots/:id/memory', (req, res) => {
+    const bot = bots.find((b) => b.id === req.params.id);
+    if (!bot) {
+      res.status(404).json(errorBody('Unknown bot', req.params.id));
+      return;
+    }
+    const body = (req.body ?? {}) as { content?: unknown };
+    if (typeof body.content !== 'string') {
+      res.status(400).json(errorBody('Body must be { content: string }'));
+      return;
+    }
+    new BotMemoryStore(config.dataDir).replace(bot.id, body.content);
+    res.json({ ok: true, botId: bot.id });
   });
 
   // ---- Chat (SSE) -------------------------------------------------------
@@ -224,6 +272,46 @@ export function createRouter(deps: RouteDeps): express.Router {
       res.json(governance.listAudit(limit));
     } catch (err) {
       res.status(500).json(errorBody('Failed to list audit entries', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  // ---- Models -------------------------------------------------------------
+  // Flat model catalog with free flags and (estimated) per-1M prices.
+  // ?freeOnly=1 filters to free models (powers the web UI "Free only" toggle).
+  // Prices are public-list-price estimates, not live billing — see pricing.ts.
+  router.get('/models', (_req, res) => {
+    try {
+      const freeOnly = _req.query.freeOnly === '1' || _req.query.freeOnly === 'true';
+      const models: Array<{
+        providerId: string;
+        id: string;
+        name: string;
+        contextLength?: number;
+        free: boolean;
+        inputPer1M?: number;
+        outputPer1M?: number;
+        estimated: boolean;
+      }> = [];
+      for (const preset of listProviderPresets()) {
+        for (const m of preset.models) {
+          const free = isFreeModel(preset.id, m.id);
+          if (freeOnly && !free) continue;
+          const price = priceOfModel(preset.id, m.id);
+          models.push({
+            providerId: preset.id,
+            id: m.id,
+            name: m.name,
+            contextLength: m.contextLength,
+            free,
+            inputPer1M: price?.inputPer1M,
+            outputPer1M: price?.outputPer1M,
+            estimated: price ? price.estimate : true,
+          });
+        }
+      }
+      res.json(models);
+    } catch (err) {
+      res.status(500).json(errorBody('Failed to list models', err instanceof Error ? err.message : String(err)));
     }
   });
 

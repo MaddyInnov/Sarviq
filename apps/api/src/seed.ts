@@ -11,7 +11,7 @@
 
 import fs from 'node:fs';
 import path from 'node:path';
-import type { BotConfig } from '@mvp/agent-runtime';
+import type { BotConfig, BotPolicy, BotPolicyRule } from '@mvp/agent-runtime';
 import type { WorkflowDefinition, WorkflowNode } from '@mvp/workflows';
 
 export interface StdioMcpServer {
@@ -49,12 +49,42 @@ function stringArray(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : [];
 }
 
+const POLICY_EFFECTS = new Set(['allow', 'deny', 'require-approval']);
+
+/** Lenient policy normalization for seed bots: drops invalid rules, keeps the rest. */
+function normalizeBotPolicy(value: unknown): BotPolicy | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const rulesRaw = (value as { rules?: unknown }).rules;
+  if (!Array.isArray(rulesRaw)) return undefined;
+  const rules: BotPolicyRule[] = [];
+  for (const raw of rulesRaw) {
+    if (typeof raw !== 'object' || raw === null) continue;
+    const r = raw as Record<string, unknown>;
+    if (typeof r.id !== 'string' || !r.id) continue;
+    if (typeof r.toolPattern !== 'string' || !r.toolPattern) continue;
+    if (typeof r.effect !== 'string' || !POLICY_EFFECTS.has(r.effect)) continue;
+    try {
+      new RegExp(r.toolPattern, 'i');
+    } catch {
+      continue; // invalid pattern: drop the rule, don't poison the bot
+    }
+    rules.push({
+      id: r.id,
+      toolPattern: r.toolPattern,
+      effect: r.effect as BotPolicyRule['effect'],
+      reason: typeof r.reason === 'string' && r.reason ? r.reason : undefined,
+    });
+  }
+  return { rules };
+}
+
 function normalizeBot(bot: unknown): BotConfig | null {
   if (typeof bot !== 'object' || bot === null) return null;
   const b = bot as Record<string, unknown>;
   if (typeof b.id !== 'string' || !b.id) return null;
   if (typeof b.name !== 'string' || !b.name) return null;
   if (typeof b.systemPrompt !== 'string' || !b.systemPrompt) return null;
+  const policy = normalizeBotPolicy(b.policy);
   return {
     id: b.id,
     name: b.name,
@@ -65,6 +95,7 @@ function normalizeBot(bot: unknown): BotConfig | null {
     skills: stringArray(b.skills),
     tools: stringArray(b.tools),
     mcpServers: stringArray(b.mcpServers),
+    ...(policy ? { policy } : {}),
   };
 }
 

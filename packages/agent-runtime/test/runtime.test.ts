@@ -413,3 +413,63 @@ describe('prompt-injection floor', () => {
     runtime.close();
   });
 });
+
+describe('FREE_MODELS_ONLY guard', () => {
+  const GUARD_KEY = 'FREE_MODELS_ONLY';
+  let saved: string | undefined;
+
+  beforeEach(() => {
+    saved = process.env[GUARD_KEY];
+    delete process.env[GUARD_KEY];
+  });
+
+  afterEach(() => {
+    if (saved === undefined) delete process.env[GUARD_KEY];
+    else process.env[GUARD_KEY] = saved;
+  });
+
+  function runOnce(botOverrides: Record<string, unknown> = {}): Promise<unknown> {
+    const gateway = new FakeGateway();
+    const provider = new MockProvider([{ content: 'hi' }]);
+    const runtime = makeRuntime(gateway, [], provider);
+    return runtime
+      .runTurn({
+        bot: testBot(botOverrides as Partial<BotConfig>),
+        message: 'hello',
+        onEvent: () => undefined,
+      })
+      .finally(() => runtime.close());
+  }
+
+  it('guard on + paid model → throws naming the model and the guard', async () => {
+    process.env[GUARD_KEY] = '1';
+    // mock/mock-model is not in the catalog and has no :free/-free suffix.
+    await expect(runOnce()).rejects.toThrow(/FREE_MODELS_ONLY/);
+    await expect(runOnce()).rejects.toThrow(/mock\/mock-model/);
+  });
+
+  it('guard on + free model → passes', async () => {
+    process.env[GUARD_KEY] = 'true';
+    // opencode-zen/big-pickle is pinned free:true in the catalog.
+    await expect(
+      runOnce({ provider: 'opencode-zen', model: 'big-pickle' }),
+    ).resolves.toBeDefined();
+  });
+
+  it('guard on + :free-suffixed model → passes', async () => {
+    process.env[GUARD_KEY] = '1';
+    await expect(
+      runOnce({ provider: 'openrouter', model: 'some-model:free' }),
+    ).resolves.toBeDefined();
+  });
+
+  it('guard off → paid model passes', async () => {
+    delete process.env[GUARD_KEY];
+    await expect(runOnce()).resolves.toBeDefined();
+  });
+
+  it('guard treats other values as off', async () => {
+    process.env[GUARD_KEY] = 'yes';
+    await expect(runOnce()).resolves.toBeDefined();
+  });
+});

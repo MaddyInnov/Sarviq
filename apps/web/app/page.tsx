@@ -5,15 +5,16 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   decideApproval,
   getBots,
+  getModels,
   getProviders,
   streamChat,
 } from '../lib/api';
-import type { BotConfig, ProviderInfo, StreamEvent, TokenUsage, ToolCall } from '../lib/api';
-import { contextMeter, formatTokens } from '../lib/usage';
+import type { BotConfig, ModelPriceInfo, ProviderInfo, StreamEvent, TokenUsage, ToolCall } from '../lib/api';
+import { COST_ESTIMATE_TOOLTIP, contextMeter, costOfUsage, formatTokens, formatUsd } from '../lib/usage';
 
 type ChatBlock =
   | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean; usage?: TokenUsage }
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; usage?: TokenUsage; costUsd?: number }
   | { kind: 'tool'; id: string; call: ToolCall; result?: unknown; denied?: boolean }
   | {
       kind: 'approval';
@@ -61,19 +62,42 @@ function emptyUsage(): TokenUsage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 }
 
-/** Subtle per-turn footer under an assistant message: tokens + context meter. */
-function UsageFooter({ usage, contextLength }: { usage: TokenUsage; contextLength?: number }) {
+/** Subtle per-turn footer under an assistant message: tokens + $ cost + context meter. */
+function UsageFooter({
+  usage,
+  contextLength,
+  costUsd,
+}: {
+  usage: TokenUsage;
+  contextLength?: number;
+  costUsd?: number;
+}) {
   const meter = contextMeter(usage.totalTokens, contextLength);
   return (
     <div className="small muted mono usage-line">
       ↑ {formatTokens(usage.promptTokens)} in · ↓ {formatTokens(usage.completionTokens)} out · Σ{' '}
       {formatTokens(usage.totalTokens)}
+      {costUsd !== undefined && (
+        <span title={COST_ESTIMATE_TOOLTIP}> · ≈{formatUsd(costUsd)}</span>
+      )}
       {meter && (
         <span className={meter.warn ? 'amber' : undefined}>
           {' '}· ctx {formatTokens(meter.used)}/{formatTokens(meter.limit)} ({Math.round(meter.pct)}%)
         </span>
       )}
     </div>
+  );
+}
+
+/** Find a /api/models price entry: exact providerId/modelId, then bare modelId fallback. */
+function lookupPrice(
+  models: ModelPriceInfo[],
+  providerId: string,
+  modelId: string,
+): ModelPriceInfo | undefined {
+  return (
+    models.find((m) => m.providerId === providerId && m.id === modelId) ??
+    models.find((m) => m.id === modelId)
   );
 }
 
@@ -89,24 +113,37 @@ export default function ChatPage() {
   const [loadError, setLoadError] = useState('');
   // Per-bot accumulated token usage for the current session (reset on New conversation).
   const [sessionUsage, setSessionUsage] = useState<Record<string, TokenUsage>>({});
+  // Per-bot accumulated estimated $ cost for the current session.
+  const [sessionCost, setSessionCost] = useState<Record<string, number>>({});
+  // Price table from /api/models (estimates from public list prices).
+  const [modelPrices, setModelPrices] = useState<ModelPriceInfo[]>([]);
   const sessionIds = useRef<Record<string, string>>({});
   const messagesRef = useRef<HTMLDivElement>(null);
-  // Current bot id for the done-handler (applyEvent is a stable callback).
+  // Current bot/provider/model for the done-handler (applyEvent is a stable callback).
   const botIdRef = useRef(selectedBotId);
   botIdRef.current = selectedBotId;
+  const providerIdRef = useRef(providerId);
+  providerIdRef.current = providerId;
+  const modelIdRef = useRef(modelId);
+  modelIdRef.current = modelId;
+  const modelPricesRef = useRef(modelPrices);
+  modelPricesRef.current = modelPrices;
 
   const selectedBot = bots.find((b) => b.id === selectedBotId);
   const selectedProvider = providers.find((p) => p.id === providerId);
+  const selectedBotRef = useRef(selectedBot);
+  selectedBotRef.current = selectedBot;
 
   // Initial load.
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [b, p] = await Promise.all([getBots(), getProviders()]);
+        const [b, p, m] = await Promise.all([getBots(), getProviders(), getModels()]);
         if (cancelled) return;
         setBots(b);
         setProviders(p);
+        setModelPrices(m);
         if (b.length > 0) setSelectedBotId(b[0].id);
       } catch (err) {
         if (!cancelled) setLoadError(err instanceof Error ? err.message : String(err));
@@ -155,7 +192,12 @@ export default function ChatPage() {
     if (event.type === 'done') {
       const bid = botIdRef.current;
       const usage = event.usage;
+      // Estimated $ cost for the turn (public list prices — see tooltip).
+      let costUsd: number | undefined;
       if (usage && bid) {
+        const turnModel = modelIdRef.current || selectedBotRef.current?.model || '';
+        const price = lookupPrice(modelPricesRef.current, providerIdRef.current, turnModel);
+        costUsd = costOfUsage(price, usage).total;
         setSessionUsage((prev) => {
           const cur = prev[bid] ?? emptyUsage();
           return {
@@ -167,14 +209,15 @@ export default function ChatPage() {
             },
           };
         });
+        setSessionCost((prev) => ({ ...prev, [bid]: (prev[bid] ?? 0) + (costUsd ?? 0) }));
       }
       setBlocks((prev) => {
         const next = [...prev];
-        // Attach the turn usage to the last assistant block of this turn.
+        // Attach the turn usage (+ estimated cost) to the last assistant block of this turn.
         for (let i = next.length - 1; i >= 0; i--) {
           const b = next[i];
           if (b && b.kind === 'assistant') {
-            next[i] = { ...b, streaming: false, usage: event.usage ?? undefined };
+            next[i] = { ...b, streaming: false, usage: event.usage ?? undefined, costUsd };
             break;
           }
         }
@@ -290,6 +333,11 @@ export default function ChatPage() {
       delete next[selectedBotId];
       return next;
     });
+    setSessionCost((prev) => {
+      const next = { ...prev };
+      delete next[selectedBotId];
+      return next;
+    });
     setBlocks([]);
   };
 
@@ -311,6 +359,7 @@ export default function ChatPage() {
   const contextLength = modelOptions.find((m) => m.id === activeModelId)?.contextLength;
   // Per-session totals for the header meter.
   const botSessionUsage = selectedBotId ? sessionUsage[selectedBotId] : undefined;
+  const botSessionCost = selectedBotId ? sessionCost[selectedBotId] : undefined;
   const sessionMeter = botSessionUsage ? contextMeter(botSessionUsage.totalTokens, contextLength) : null;
 
   return (
@@ -368,6 +417,9 @@ export default function ChatPage() {
               title={`Session tokens: ${botSessionUsage.promptTokens} in / ${botSessionUsage.completionTokens} out`}
             >
               Σ {formatTokens(botSessionUsage.totalTokens)}
+              {botSessionCost !== undefined && (
+                <span title={COST_ESTIMATE_TOOLTIP}> · ≈{formatUsd(botSessionCost)}</span>
+              )}
               {sessionMeter && (
                 <span className={sessionMeter.warn ? 'amber' : undefined}>
                   {' '}· ctx {formatTokens(sessionMeter.used)}/{formatTokens(sessionMeter.limit)} (
@@ -406,7 +458,9 @@ export default function ChatPage() {
                   <div key={b.id} className="msg assistant">
                     {b.text}
                     {b.streaming && <span className="typing"> ▍</span>}
-                    {b.usage && <UsageFooter usage={b.usage} contextLength={contextLength} />}
+                    {b.usage && (
+                      <UsageFooter usage={b.usage} contextLength={contextLength} costUsd={b.costUsd} />
+                    )}
                   </div>
                 );
               case 'tool':

@@ -48,3 +48,52 @@ export function formatResetIn(resetAt: string | undefined, nowMs = Date.now()): 
   const r = s % 60;
   return r === 0 ? `resets in ${m}m` : `resets in ${m}m ${r}s`;
 }
+
+// ---- Cost-in-dollars (client-side mirror of agent-runtime/src/pricing.ts) ---
+
+export interface TokenUsageLike {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface ModelPriceLike {
+  inputPer1M?: number;
+  outputPer1M?: number;
+  estimated: boolean;
+  free: boolean;
+}
+
+export interface UsageCost {
+  input: number;
+  output: number;
+  total: number;
+  estimated: boolean;
+}
+
+/**
+ * Dollar cost of a token usage record against a /api/models price entry.
+ * Unknown price (undefined) → $0 with estimated:true — an honest "unknown",
+ * never presented as exact.
+ */
+export function costOfUsage(price: ModelPriceLike | undefined, usage: TokenUsageLike): UsageCost {
+  if (!price || price.inputPer1M === undefined || price.outputPer1M === undefined) {
+    return { input: 0, output: 0, total: 0, estimated: true };
+  }
+  const input = (usage.promptTokens / 1_000_000) * price.inputPer1M;
+  const output = (usage.completionTokens / 1_000_000) * price.outputPer1M;
+  return { input, output, total: input + output, estimated: price.estimated };
+}
+
+/** Compact USD: 0 → "$0", 0.00042 → "$0.00042", 7.5 → "$7.50". */
+export function formatUsd(n: number): string {
+  if (!Number.isFinite(n) || n < 0) return '$0';
+  if (n === 0) return '$0';
+  if (n < 0.01) return `$${n.toFixed(6).replace(/0+$/, '').replace(/\.$/, '')}`;
+  if (n < 100) return `$${n.toFixed(4).replace(/0+$/, '').replace(/\.$/, '')}`;
+  return `$${n.toFixed(2)}`;
+}
+
+/** Tooltip caveat shared by every cost surface: prices are estimates. */
+export const COST_ESTIMATE_TOOLTIP =
+  'Estimated cost from public list prices — actual billing may differ. Free-tier models cost $0.';

@@ -18,6 +18,19 @@ export function getApiBase(): string {
 
 // ---- Shared types (mirror the API wire shapes) ----------------------------
 
+export type BotPolicyEffect = 'allow' | 'deny' | 'require-approval';
+
+export interface BotPolicyRule {
+  id: string;
+  toolPattern: string;
+  effect: BotPolicyEffect;
+  reason?: string;
+}
+
+export interface BotPolicy {
+  rules: BotPolicyRule[];
+}
+
 export interface BotConfig {
   id: string;
   name: string;
@@ -28,6 +41,7 @@ export interface BotConfig {
   skills: string[];
   tools: string[];
   mcpServers: string[];
+  policy?: BotPolicy;
 }
 
 export interface ToolCall {
@@ -87,6 +101,23 @@ export interface ModelInfo {
   id: string;
   name: string;
   contextLength?: number;
+  /** True when the model is free to call (catalog free:true / :free / -free suffix). */
+  free?: boolean;
+}
+
+/**
+ * Flat model catalog entry from GET /api/models. Prices are PUBLIC
+ * LIST-PRICE ESTIMATES, not live billing — see the API's pricing.ts.
+ */
+export interface ModelPriceInfo {
+  providerId: string;
+  id: string;
+  name: string;
+  contextLength?: number;
+  free: boolean;
+  inputPer1M?: number;
+  outputPer1M?: number;
+  estimated: boolean;
 }
 
 export interface ProviderInfo {
@@ -176,6 +207,15 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const getBots = (): Promise<BotConfig[]> => apiJson('/api/bots');
 export const getProviders = (): Promise<ProviderInfo[]> => apiJson('/api/providers');
+export const getModels = (freeOnly = false): Promise<ModelPriceInfo[]> =>
+  apiJson(`/api/models${freeOnly ? '?freeOnly=1' : ''}`);
+export function updateBotPolicy(botId: string, rules: BotPolicyRule[]): Promise<{ ok: boolean; botId: string; policy: BotPolicy }> {
+  return apiJson(`/api/bots/${encodeURIComponent(botId)}/policy`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rules }),
+  });
+}
 
 export function getApprovals(status?: string): Promise<ApprovalRecord[]> {
   const q = status ? `?status=${encodeURIComponent(status)}` : '';

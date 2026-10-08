@@ -27,6 +27,7 @@ import {
   getRateLimit,
   grantBridgeConsent,
   isBridgeConnected,
+  isFreeModel,
   listProviderPresets,
   resolveApiKey,
   revokeBridgeConsent,
@@ -392,6 +393,7 @@ async function resolveModels(providerId: string): Promise<ModelInfo[]> {
     id: m.id,
     name: m.name,
     contextLength: m.contextLength,
+    free: isFreeModel(providerId, m.id),
   }));
   // Live model list when the preset asks for it (or for custom endpoints,
   // which have no catalog) and a key is present; catalog fallback otherwise.

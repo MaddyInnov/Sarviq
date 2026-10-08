@@ -200,6 +200,11 @@ export class WorkflowRunner {
     return this.store.getRun(id);
   }
 
+  /** Look up a run by the idempotency key it was started with, if any. */
+  getRunByIdempotencyKey(key: string): WorkflowRun | undefined {
+    return this.store.getRunByIdempotencyKey(key);
+  }
+
   /** Newest first. */
   listRuns(workflowId?: string): WorkflowRun[] {
     return this.store.listRuns(workflowId);
@@ -238,6 +243,33 @@ export class WorkflowRunner {
   }
 
   /**
+   * Crash recovery: find runs stuck in 'running' (the process died without
+   * marking them terminal) and resume each from its last checkpoint.
+   * Completed steps are never re-executed — resume skips nodes already
+   * 'succeeded' and re-runs only pending/interrupted ones. Runs 'paused' for
+   * approval stay paused; terminal runs are untouched. Idempotent: calling
+   * recover() twice resumes nothing the second time (runs are either picked
+   * up by the in-flight `executing` guard or already terminal).
+   *
+   * Call this once at boot before starting the scheduler / API.
+   */
+  async recover(): Promise<string[]> {
+    const crashed = this.store.listCrashedRuns();
+    const resumed: string[] = [];
+    for (const run of crashed) {
+      if (this.executing.has(run.id)) continue;
+      resumed.push(run.id);
+      // Await each resume sequentially: keeps the burst of recovered runs
+      // bounded and preserves FIFO order by last update.
+      try {
+        await this.executeRun(run.id);
+      } catch (err) {
+        console.error(`workflow run ${run.id} failed during recovery:`, err);
+      }
+    }
+    return resumed;
+  }
+  /**
    * Subscribe to run updates. The callback fires after every node-state
    * transition and every run-status change. Returns an unsubscribe function.
    */
@@ -258,13 +290,21 @@ export class WorkflowRunner {
       const def = this.getWorkflow(run.workflowId);
       const levels = this.topologicalLevels(def);
 
-      for (const level of levels) {
+      for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
         const current = this.getRunOrThrow(runId);
         if (current.status !== 'running') return; // failed or paused-by-await
-        await Promise.all(level.map((nodeId) => this.executeNode(runId, nodeId)));
+        // Crash-resume: never re-execute steps that already completed (or
+        // were skipped as unreachable). Only pending / interrupted nodes run.
+        const pending = levels[levelIndex].filter((nodeId) => {
+          const s = current.nodeStates[nodeId]?.status;
+          return s !== 'succeeded' && s !== 'skipped';
+        });
+        if (pending.length > 0) {
+          await Promise.all(pending.map((nodeId) => this.executeNode(runId, nodeId)));
+        }
 
         const after = this.getRunOrThrow(runId);
-        const states = level.map((nodeId) => after.nodeStates[nodeId]?.status);
+        const states = levels[levelIndex].map((nodeId) => after.nodeStates[nodeId]?.status);
         if (states.some((s) => s === 'failed')) {
           this.setRunStatus(runId, 'failed');
           return;
@@ -291,6 +331,7 @@ export class WorkflowRunner {
     try {
       const output = await this.runNodeLogic(runId, node);
       this.updateNodeState(runId, nodeId, { status: 'succeeded', output, endedAt: Date.now() });
+      this.checkpoint(runId);
       // A node that paused for approval resumes the run once its decision lands.
       const current = this.getRunOrThrow(runId);
       if (current.status === 'paused') this.setRunStatus(runId, 'running');
@@ -301,6 +342,7 @@ export class WorkflowRunner {
         error: message,
         endedAt: Date.now(),
       });
+      this.checkpoint(runId);
     }
   }
 
@@ -430,6 +472,7 @@ export class WorkflowRunner {
   ): Promise<boolean> {
     this.updateNodeState(runId, nodeId, { status: 'paused', approvalId });
     this.setRunStatus(runId, 'paused');
+    this.checkpoint(runId);
     const decision = await this.governance.awaitDecision(approvalId);
     return decision === 'approved';
   }
@@ -518,6 +561,24 @@ export class WorkflowRunner {
   private setRunStatus(runId: string, status: RunStatus): void {
     this.store.updateRunStatus(runId, status, Date.now());
     this.emitUpdate(runId);
+  }
+
+  /**
+   * Write the crash-resume checkpoint for a run: number of completed steps
+   * and every completed step's output. Called after each node finishes (and
+   * on pause) so a crash always resumes from the latest durable state.
+   */
+  private checkpoint(runId: string): void {
+    const run = this.getRunOrThrow(runId);
+    const stepOutputs: Record<string, unknown> = {};
+    let completed = 0;
+    for (const [nodeId, state] of Object.entries(run.nodeStates)) {
+      if (state.status === 'succeeded') {
+        completed += 1;
+        stepOutputs[nodeId] = state.output;
+      }
+    }
+    this.store.checkpointRun(runId, { currentStepIndex: completed, stepOutputs }, Date.now());
   }
 
   private emitUpdate(runId: string): void {

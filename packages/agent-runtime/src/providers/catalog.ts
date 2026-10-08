@@ -15,6 +15,8 @@ export interface ProviderModelPreset {
   name: string;
   default?: boolean;
   contextLength?: number;
+  /** True when the model is currently in the provider's free tier/rotation (roster may change; live fetch is authoritative). */
+  free?: boolean;
 }
 
 export interface ProviderPreset {
@@ -186,4 +188,42 @@ export function resolveBaseUrl(providerId: string): string {
   const key = `${preset.envKey}_BASE_URL`;
   const fromFile = local[key];
   return typeof fromFile === 'string' ? fromFile : '';
+}
+
+/** Env var consulted by assertModelAllowed. '1' or 'true' (any case) enables the guard. */
+export const FREE_MODELS_ONLY_ENV_VAR = 'FREE_MODELS_ONLY';
+
+/**
+ * True when the model is free to call:
+ * - the catalog preset marks the model `free: true` (e.g. opencode-zen's
+ *   pinned free roster; the live /models fetch stays authoritative), or
+ * - the model id ends with ':free' (OpenRouter free tier), or
+ * - the model id ends with '-free' (Zen free models).
+ *
+ * Custom (`custom-*`) presets have no catalog models; the suffix rules
+ * still apply to them.
+ */
+export function isFreeModel(providerId: string, modelId: string): boolean {
+  const preset = resolvePreset(providerId);
+  if (preset?.models.some((m) => m.id === modelId && m.free === true)) return true;
+  return modelId.endsWith(':free') || modelId.endsWith('-free');
+}
+
+/**
+ * Fail-closed guard for the FREE_MODELS_ONLY kill switch. When the env var
+ * is '1'/'true' and the model is not free (see isFreeModel), throws an
+ * Error naming the model and the guard. No-op when the guard is off or the
+ * model is free.
+ */
+export function assertModelAllowed(providerId: string, modelId: string): void {
+  const raw = process.env[FREE_MODELS_ONLY_ENV_VAR];
+  const enabled = raw === '1' || (typeof raw === 'string' && raw.toLowerCase() === 'true');
+  if (!enabled) return;
+  if (isFreeModel(providerId, modelId)) return;
+  throw new Error(
+    `${FREE_MODELS_ONLY_ENV_VAR} is enabled (${FREE_MODELS_ONLY_ENV_VAR}=${raw}): ` +
+      `model "${providerId}/${modelId}" is not a free model, so this run is blocked. ` +
+      `Pick a free model (catalog free:true, or an id ending in ":free" / "-free"), ` +
+      `or unset ${FREE_MODELS_ONLY_ENV_VAR}.`,
+  );
 }

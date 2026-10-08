@@ -54,11 +54,16 @@ function RateLimitLine({ rateLimit }: { rateLimit: RateLimitSnapshot | null }) {
 
 function BridgeCard({
   p,
+  models,
+  freeOnly,
   saving,
   onConnect,
   onDisconnect,
 }: {
   p: ProviderInfo;
+  /** Model ids to display (already filtered by the "Free only" toggle). */
+  models: { id: string; free?: boolean }[];
+  freeOnly: boolean;
   saving: string;
   onConnect: (p: ProviderInfo) => void;
   onDisconnect: (p: ProviderInfo) => void;
@@ -76,9 +81,11 @@ function BridgeCard({
         <span className="small muted mono">{p.id}</span>
       </div>
       <p className="small muted">
-        {p.models.length > 0
-          ? `Models: ${p.models.map((m) => m.id).join(', ')}`
-          : 'No catalog models.'}
+        {models.length > 0
+          ? `Models: ${models.map((m) => modelLabel(m.id, m.free)).join(', ')}`
+          : freeOnly
+            ? 'No free models on this provider.'
+            : 'No catalog models.'}
       </p>
       <RateLimitLine rateLimit={p.rateLimit} />
       <div className="warn-box" style={{ marginTop: 8 }}>
@@ -112,15 +119,42 @@ function BridgeCard({
   );
 }
 
+function loadFreeOnly(): boolean {
+  try {
+    return localStorage.getItem('mvp:freeOnly') === '1';
+  } catch {
+    return false;
+  }
+}
+
+function modelLabel(id: string, free?: boolean): string {
+  return free ? `${id} (free)` : id;
+}
+
 export default function ProvidersPage() {
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
   const [saving, setSaving] = useState<string>('');
+  // "Free only" toggle: filters the model lists below to free models. Default off.
+  const [freeOnly, setFreeOnly] = useState<boolean>(() => loadFreeOnly());
   // Per-provider form state.
   const [keys, setKeys] = useState<Record<string, string>>({});
   const [baseUrls, setBaseUrls] = useState<Record<string, string>>({});
   const [headers, setHeaders] = useState<Record<string, string>>({});
+
+  const toggleFreeOnly = (on: boolean) => {
+    setFreeOnly(on);
+    try {
+      localStorage.setItem('mvp:freeOnly', on ? '1' : '0');
+    } catch {
+      // ignore
+    }
+  };
+
+  /** Models shown on a provider card, honouring the "Free only" toggle. */
+  const shownModels = (p: ProviderInfo) =>
+    freeOnly ? p.models.filter((m) => m.free) : p.models;
 
   const refresh = useCallback(async () => {
     try {
@@ -231,6 +265,20 @@ export default function ProvidersPage() {
         file <span className="mono">providers.local.json</span> (mode 0600) next to the API&apos;s
         data directory. They are never logged and never returned by the API.
       </div>
+      <div className="row-between" style={{ marginTop: 12 }}>
+        <label className="small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <input
+            type="checkbox"
+            checked={freeOnly}
+            onChange={(e) => toggleFreeOnly(e.target.checked)}
+          />
+          <strong>Free only</strong>
+          <span className="muted">— show only models that cost $0 to call</span>
+        </label>
+        {freeOnly && (
+          <span className="chip green">free models only</span>
+        )}
+      </div>
       {error && <div className="error-box">{error}</div>}
       {notice && (
         <div className="card" style={{ borderColor: '#bbf7d0', background: '#f0fdf4' }}>
@@ -251,6 +299,8 @@ export default function ProvidersPage() {
             <BridgeCard
               key={p.id}
               p={p}
+              models={shownModels(p)}
+              freeOnly={freeOnly}
               saving={saving}
               onConnect={connect}
               onDisconnect={disconnect}
@@ -274,9 +324,11 @@ export default function ProvidersPage() {
             <span className="small muted mono">{p.id}</span>
           </div>
           <p className="small muted">
-            {p.models.length > 0
-              ? `Models: ${p.models.map((m) => m.id).join(', ')}`
-              : 'No catalog models.'}
+            {shownModels(p).length > 0
+              ? `Models: ${shownModels(p).map((m) => modelLabel(m.id, m.free)).join(', ')}`
+              : freeOnly
+                ? 'No free models on this provider.'
+                : 'No catalog models.'}
           </p>
           <RateLimitLine rateLimit={p.rateLimit} />
           <div className="grid-2">

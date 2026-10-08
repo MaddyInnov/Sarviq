@@ -14,8 +14,14 @@ import type {
 import { addUsage, emptyUsage, withToolCalls } from './types.js';
 import type { AuditEntry, GovernanceDecision, GovernanceGateway } from './governance.js';
 import { createProvider } from './providers/factory.js';
-import { getDefaultModel, getProviderPreset, resolveApiKey } from './providers/catalog.js';
+import {
+  assertModelAllowed,
+  getDefaultModel,
+  getProviderPreset,
+  resolveApiKey,
+} from './providers/catalog.js';
 import { SessionStore } from './sessions.js';
+import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
 
 export interface AgentRuntimeOptions {
@@ -24,6 +30,13 @@ export interface AgentRuntimeOptions {
   governance: GovernanceGateway;
   toolRegistry: Map<string, ToolDefinition>;
   defaultProviderId?: string;
+  /**
+   * HOST WIRING (Phase 2): passthrough for the session store — lets the host
+   * plug in the summarization auto-compaction hook (and history tuning)
+   * without touching the runtime. Optional; without it the store keeps the
+   * last-100-messages hard floor with blind truncation as the fallback.
+   */
+  sessionStoreOptions?: SessionStoreOptions;
 }
 
 export interface RunTurnOptions {
@@ -110,7 +123,7 @@ export class AgentRuntime {
   private readonly defaultProviderId: string;
 
   constructor(opts: AgentRuntimeOptions) {
-    this.store = new SessionStore(opts.dbPath);
+    this.store = new SessionStore(opts.dbPath, opts.sessionStoreOptions);
     this.skills = new SkillLoader(opts.skillsDir);
     this.governance = opts.governance;
     this.toolRegistry = opts.toolRegistry;
@@ -144,18 +157,27 @@ export class AgentRuntime {
     const parts: string[] = [bot.systemPrompt, '\n\n' + UNTRUSTED_CONTENT_INSTRUCTION];
     const loadedSkills: string[] = [];
     if (bot.skills.length > 0) {
-      const skillTexts: string[] = [];
+      // Progressive disclosure: the prompt carries only name+description
+      // summaries (cheap). Full skill content is pulled on demand via the
+      // read_skill tool (see createSkillTools in skills.ts) when the host
+      // wires it into the tool registry.
+      const summaries: string[] = [];
       for (const name of bot.skills) {
         try {
-          const skill = await this.skills.load(name);
-          loadedSkills.push(skill.name);
-          skillTexts.push(`## Skill: ${skill.name}\n${skill.description}\n\n${skill.content}`);
+          const summary = await this.skills.getSummary(name);
+          loadedSkills.push(summary.name);
+          summaries.push(`- ${summary.name}: ${summary.description}`);
         } catch {
           // Skill load failure is non-fatal: the turn proceeds without it.
         }
       }
-      if (skillTexts.length > 0) {
-        parts.push('\n\n# Loaded skills\n' + skillTexts.join('\n\n'));
+      if (summaries.length > 0) {
+        parts.push('\n\n# Available skills\n' + summaries.join('\n'));
+        if (this.toolRegistry.has('read_skill')) {
+          parts.push(
+            '\nUse the read_skill tool with a skill name to load its full instructions before relying on it.',
+          );
+        }
       }
     }
     return { prompt: parts.join(''), loadedSkills };
@@ -174,8 +196,13 @@ export class AgentRuntime {
 
   async runTurn(opts: RunTurnOptions): Promise<TokenUsage> {
     const providerId = opts.providerId ?? opts.bot.provider ?? this.defaultProviderId;
-    const provider: LLMProvider = this.resolveProvider(providerId);
     const model = opts.model ?? opts.bot.model ?? getDefaultModel(providerId) ?? 'default';
+    // FREE_MODELS_ONLY fail-closed guard: when the env var is '1'/'true',
+    // non-free models are rejected before any provider is touched. This is
+    // the single choke point both the API chat route and the CLI pipe mode
+    // flow through.
+    assertModelAllowed(providerId, model);
+    const provider: LLMProvider = this.resolveProvider(providerId);
     const maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     const approvalTimeoutMs = opts.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     const emit = async (e: StreamEvent): Promise<void> => {
@@ -191,7 +218,7 @@ export class AgentRuntime {
     const userMessage: ChatMessage = { role: 'user', content: opts.message };
     this.store.appendMessage(sessionId, userMessage);
 
-    const history: RichMessage[] = this.store.getMessages(sessionId).slice(0, -1);
+    const history: RichMessage[] = (await this.store.getMessages(sessionId)).slice(0, -1);
     const messages: RichMessage[] = [
       { role: 'system', content: systemPrompt },
       ...history,

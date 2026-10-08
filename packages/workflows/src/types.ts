@@ -41,4 +41,8 @@ export interface WorkflowRun {
   idempotencyKey?: string;
   createdAt: number;
   updatedAt: number;
+  /** Crash-resume checkpoint: index of the last completed step (level). */
+  currentStepIndex?: number;
+  /** Crash-resume checkpoint: outputs of completed steps, keyed by node id. */
+  stepOutputs?: Record<string, unknown>;
 }

@@ -14,25 +14,53 @@
 import { randomUUID } from 'node:crypto';
 import type {
   AuditEntry as RuntimeAuditEntry,
+  BotConfig,
   GovernanceDecision,
   GovernanceEvaluation,
   GovernanceGateway as RuntimeGovernanceGateway,
   ToolCall,
   ToolContext,
 } from '@mvp/agent-runtime';
-import { GovernanceGateway as RealGovernanceGateway } from '@mvp/governance';
+import { DEFAULT_POLICY, GovernanceGateway as RealGovernanceGateway } from '@mvp/governance';
+import type { Policy } from '@mvp/governance';
+// bot-policy.ts is a new module not re-exported from the governance index
+// (index untouched); import the built subpath directly.
+import { mergeBotPolicy } from '@mvp/governance/dist/bot-policy.js';
 
 function toEvalContext(ctx: ToolContext): { sessionId: string; botId: string; actor: string } {
   return { sessionId: ctx.sessionId, botId: ctx.botId, actor: ctx.botId };
 }
 
+export interface GovernanceAdapterOptions {
+  /**
+   * Optional bot lookup: ctx.botId → BotConfig. When a bot carries
+   * `policy.rules`, evaluation runs against the merged policy (bot rules
+   * prepended, first match wins). Default: undefined → global policy only
+   * (unchanged behaviour).
+   *
+   * HOST WIRING: pass `{ getBotConfig: (id) => botsById.get(id) }` from
+   * index.ts (alongside `globalPolicy: DEFAULT_POLICY`, matching the policy
+   * the real gateway was constructed with).
+   */
+  getBotConfig?: (botId: string) => BotConfig | undefined;
+  /**
+   * The global policy the real gateway was constructed with, used as the
+   * merge base for per-bot policies. Defaults to DEFAULT_POLICY.
+   */
+  globalPolicy?: Policy;
+}
+
 export class GovernanceAdapter implements RuntimeGovernanceGateway {
   private readonly real: RealGovernanceGateway;
+  private readonly getBotConfig?: (botId: string) => BotConfig | undefined;
+  private readonly globalPolicy: Policy;
   /** Runtime-facing approval id → real gateway approval id. */
   private readonly idMap = new Map<string, string>();
 
-  constructor(real: RealGovernanceGateway) {
+  constructor(real: RealGovernanceGateway, opts: GovernanceAdapterOptions = {}) {
     this.real = real;
+    this.getBotConfig = opts.getBotConfig;
+    this.globalPolicy = opts.globalPolicy ?? DEFAULT_POLICY;
   }
 
   /** Translate a runtime-issued approval id to the real gateway id. */
@@ -48,7 +76,18 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
   }
 
   async evaluate(call: ToolCall, ctx: ToolContext): Promise<GovernanceEvaluation> {
-    const res = await this.real.evaluate(call.name, call.args, toEvalContext(ctx));
+    // Per-bot policy: merge the calling bot's rules ahead of the global
+    // policy (first match wins). No bot policy → global policy only.
+    const botPolicy = this.getBotConfig?.(ctx.botId)?.policy;
+    const res =
+      botPolicy && botPolicy.rules.length > 0
+        ? await this.real.evaluateWithPolicy(
+            call.name,
+            call.args,
+            toEvalContext(ctx),
+            mergeBotPolicy(this.globalPolicy, botPolicy),
+          )
+        : await this.real.evaluate(call.name, call.args, toEvalContext(ctx));
     if (res.effect === 'require-approval' && res.approvalId) {
       const runtimeId = randomUUID();
       this.idMap.set(runtimeId, res.approvalId);

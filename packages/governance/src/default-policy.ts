@@ -30,7 +30,7 @@ export const DEFAULT_POLICY: Policy = {
   rules: [
     {
       id: 'allow-reads',
-      toolPattern: '^(read_file|web_search|web_fetch)$',
+      toolPattern: '^(read_file|web_search|web_fetch|read_skill)$',
       actionClass: 'read',
       effect: 'allow',
       reason: 'Read-only tools are safe to auto-allow',

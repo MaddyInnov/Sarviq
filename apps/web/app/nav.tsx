@@ -8,6 +8,7 @@ import { getApiBase } from '../lib/api';
 
 const LINKS = [
   { href: '/', label: 'Chat' },
+  { href: '/bots', label: 'Bots' },
   { href: '/approvals', label: 'Approvals' },
   { href: '/workflows', label: 'Workflows' },
   { href: '/audit', label: 'Audit' },

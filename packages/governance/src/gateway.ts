@@ -182,6 +182,30 @@ export class GovernanceGateway {
     args: Record<string, unknown>,
     ctx: EvalContext,
   ): Promise<EvaluateResult> {
+    return this.evaluateInner(toolName, args, ctx, this.policy);
+  }
+
+  /**
+   * Evaluate against an explicit policy instead of the gateway's own — used
+   * by the API's governance adapter for per-bot policies (the bot's rules
+   * merged ahead of the global policy). Approvals and audit entries land in
+   * the same database, so the inbox and audit trail stay unified.
+   */
+  async evaluateWithPolicy(
+    toolName: string,
+    args: Record<string, unknown>,
+    ctx: EvalContext,
+    policy: Policy,
+  ): Promise<EvaluateResult> {
+    return this.evaluateInner(toolName, args, ctx, policy);
+  }
+
+  private async evaluateInner(
+    toolName: string,
+    args: Record<string, unknown>,
+    ctx: EvalContext,
+    policy: Policy,
+  ): Promise<EvaluateResult> {
     const actionClass = this.classify(toolName);
 
     // Hard denylist on run_command args — unconditional deny, no rule needed.
@@ -201,8 +225,8 @@ export class GovernanceGateway {
       return { effect: 'deny' };
     }
 
-    const rule = this.policy.rules.find((r) => this.ruleMatches(r, toolName, actionClass));
-    const effect: Effect = rule?.effect ?? this.policy.defaultEffect;
+    const rule = policy.rules.find((r) => this.ruleMatches(r, toolName, actionClass));
+    const effect: Effect = rule?.effect ?? policy.defaultEffect;
 
     if (effect === 'allow') {
       this.audit('tool.evaluate', {

@@ -1,0 +1,49 @@
+// SPDX-License-Identifier: Apache-2.0
+//
+// Per-bot policy merging.
+//
+// A bot's own rules are PREPENDED to the global policy's rules before
+// evaluation. Policy matching is first-match-wins (see
+// GovernanceGateway.evaluate and default-policy.ts), so a bot rule can
+// tighten the global floor (e.g. deny a tool the global policy would
+// allow) or loosen it (e.g. allow a tool the global policy gates behind
+// approval) — for that bot only. A bot with no policy evaluates against
+// the global policy unchanged.
+//
+// NOTE: this package cannot import BotConfig from @mvp/agent-runtime (that
+// package depends on THIS one), so the bot-policy shapes are declared here
+// structurally. They must stay field-compatible with agent-runtime's
+// BotPolicyRule/BotPolicy in packages/agent-runtime/src/types.ts.
+
+import type { Policy, PolicyRule } from './types.js';
+
+/** Per-bot governance rule — field-compatible with agent-runtime's BotPolicyRule. */
+export interface BotPolicyRule {
+  id: string;
+  toolPattern: string;
+  effect: 'allow' | 'deny' | 'require-approval';
+  reason?: string;
+}
+
+/** Per-bot governance policy — field-compatible with agent-runtime's BotPolicy. */
+export interface BotPolicy {
+  rules: BotPolicyRule[];
+}
+
+/**
+ * Merge a bot's policy with the global policy: bot rules first (they win
+ * on match), then the global rules, keeping the global defaultEffect for
+ * tools nothing matches. Pure function — neither input is mutated.
+ */
+export function mergeBotPolicy(globalPolicy: Policy, botPolicy?: BotPolicy): Policy {
+  const botRules: PolicyRule[] = (botPolicy?.rules ?? []).map((r) => ({
+    id: r.id,
+    toolPattern: r.toolPattern,
+    effect: r.effect,
+    reason: r.reason,
+  }));
+  return {
+    defaultEffect: globalPolicy.defaultEffect,
+    rules: [...botRules, ...globalPolicy.rules],
+  };
+}

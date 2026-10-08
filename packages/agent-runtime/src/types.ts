@@ -39,6 +39,28 @@ export interface ToolDefinition {
   handler: (args: Record<string, unknown>, ctx: ToolContext) => Promise<unknown>;
 }
 
+/**
+ * One per-bot governance rule. Same first-match-wins semantics as the
+ * governance package's PolicyRule: `toolPattern` is compiled as a
+ * case-insensitive RegExp and matched against the tool name.
+ */
+export interface BotPolicyRule {
+  id: string;
+  toolPattern: string;
+  effect: 'allow' | 'deny' | 'require-approval';
+  reason?: string;
+}
+
+/**
+ * Per-bot governance policy. When present, its rules are PREPENDED to the
+ * global policy before evaluation (first match wins), so bot rules can
+ * tighten OR loosen the global floor for that bot only. Absent → the global
+ * policy applies unchanged.
+ */
+export interface BotPolicy {
+  rules: BotPolicyRule[];
+}
+
 export interface BotConfig {
   id: string;
   name: string;
@@ -49,6 +71,7 @@ export interface BotConfig {
   skills: string[];
   tools: string[];
   mcpServers: string[];
+  policy?: BotPolicy;
 }
 
 export interface LLMProvider {
@@ -65,6 +88,8 @@ export interface ModelInfo {
   id: string;
   name: string;
   contextLength?: number;
+  /** True when the model is free to call (catalog free:true / ':free' / '-free' suffix). */
+  free?: boolean;
 }
 
 /**

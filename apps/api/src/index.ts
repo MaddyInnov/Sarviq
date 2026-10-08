@@ -19,15 +19,28 @@ import path from 'node:path';
 import { AgentRuntime } from '@mvp/agent-runtime';
 import type { BotConfig } from '@mvp/agent-runtime';
 import { DEFAULT_POLICY, GovernanceGateway } from '@mvp/governance';
-import { WorkflowRunner } from '@mvp/workflows';
+import { Scheduler, TriggerStore, WorkflowRunner } from '@mvp/workflows';
 import { loadConfig } from './config.js';
 import { GovernanceAdapter } from './governance-adapter.js';
 import { SEED_FILES } from './generated/seed.js';
 import { loadSeed } from './seed.js';
 import { syncProviderKeysToEnv } from './providers.js';
+import { applyBotPolicies } from './bot-policies.js';
 import { buildToolRegistry } from './tool-registry.js';
+import { registerDelegateTools } from './delegate-wiring.js';
+import { createSummarizer } from './summarizer.js';
 import { createRouter } from './routes.js';
+import { createWebhookRouter } from './webhooks.js';
 import { mountWebAssets } from './web-assets.js';
+import { runChatCli } from './cli.js';
+
+// Pipe/JSON chat mode: `mvp-server chat --bot <id> [--json]`. Parsed at the
+// very top, before boot(), so `chat` never starts the HTTP server.
+// runChatCli returns the exit code; index.ts owns process.exit.
+if (process.argv[2] === 'chat') {
+  const code = await runChatCli(process.argv.slice(2));
+  process.exit(code);
+}
 
 /**
  * Resolve the seed directory. Single-file binaries (bun --compile) ship with
@@ -67,6 +80,11 @@ async function boot(): Promise<void> {
   const seedDir = resolveSeedDir(config.seedDir);
   const seed = loadSeed(seedDir);
 
+  // Phase 2: per-bot policy overrides persisted in <dataDir>/bot-policies.json
+  // are applied onto the in-memory bot configs before anything else reads them.
+  applyBotPolicies(seed.bots, config.dataDir);
+  const botsById = new Map<string, BotConfig>(seed.bots.map((b) => [b.id, b]));
+
   // 2. Governance + tools.
   const governance = new GovernanceGateway({
     dbPath: `${config.dataDir}/governance.db`,
@@ -77,13 +95,17 @@ async function boot(): Promise<void> {
   // Tool executions are audited by the runtime itself through this adapter
   // (tool.denied / tool.approval_requested / tool.approval_decided /
   // tool.executed), so no extra hooks are registered here — they would
-  // double-log.
-  const governanceAdapter = new GovernanceAdapter(governance);
+  // double-log. Phase 2: getBotConfig lets the adapter evaluate per-bot
+  // policy overrides (bot rules prepended, first match wins).
+  const governanceAdapter = new GovernanceAdapter(governance, {
+    getBotConfig: (id) => botsById.get(id),
+  });
 
   const { registry: toolRegistry, connections: mcpConnections, close: closeMcp } =
     await buildToolRegistry({
       workspaceDir: config.workspaceDir,
       dataDir: config.dataDir,
+      skillsDir: path.join(seedDir, 'skills'),
       mcpServers: seed.mcpServers,
       // GovernanceGateway satisfies SchemaDriftApprovalBroker structurally:
       // MCP schema drift at (re)connect raises a human approval here.
@@ -96,9 +118,23 @@ async function boot(): Promise<void> {
     skillsDir: path.join(seedDir, 'skills'),
     governance: governanceAdapter,
     toolRegistry,
+    // Phase 2: summarization auto-compaction replaces blind truncation once
+    // sessions grow past the threshold; the last-100-messages floor stays.
+    sessionStoreOptions: { summarizer: createSummarizer() },
   });
 
-  const botsById = new Map<string, BotConfig>(seed.bots.map((b) => [b.id, b]));
+  // Phase 2: `delegate` subagent tool. The child runs under the same
+  // governance policy; parent/child records + audit events land in
+  // subagents.db and the audit log (visible in Audit/Activity).
+  registerDelegateTools({
+    registry: toolRegistry,
+    dataDir: config.dataDir,
+    skillsDir: path.join(seedDir, 'skills'),
+    governanceAdapter,
+    getBotConfig: (id) => botsById.get(id),
+    audit: (action, fields) => governance.audit(action, fields),
+  });
+
   const workflowRunner = new WorkflowRunner({
     dbPath: `${config.dataDir}/workflows.db`,
     agentRuntime,
@@ -138,6 +174,17 @@ async function boot(): Promise<void> {
     }
   });
 
+  // Phase 2: crash-resume — incomplete runs from a previous (crashed)
+  // process resume from their last checkpoint before anything new fires.
+  // Then start the trigger scheduler (cron) and mount webhook triggers.
+  const recovered = await workflowRunner.recover();
+  if (recovered.length > 0) {
+    console.log(`[workflows] recovered ${recovered.length} interrupted run(s): ${recovered.join(', ')}`);
+  }
+  const triggerStore = new TriggerStore(path.join(config.dataDir, 'triggers.db'));
+  const scheduler = new Scheduler();
+  scheduler.start(workflowRunner, triggerStore);
+
   // 4. HTTP layer. API routes first, then the frontend.
   const app = express();
   // MVP: allow any origin — the Tauri webview calls the sidecar API
@@ -145,6 +192,8 @@ async function boot(): Promise<void> {
   // auth/multi-user ships.
   app.use(cors({ origin: '*' }));
   app.use(express.json({ limit: '1mb' }));
+  // Phase 2: workflow webhook triggers (shared-secret authenticated).
+  app.use('/webhooks', createWebhookRouter({ runner: workflowRunner, triggerStore }));
   app.use(
     '/api',
     createRouter({
@@ -175,6 +224,7 @@ async function boot(): Promise<void> {
   const shutdown = async () => {
     console.log('[api] shutting down…');
     server.close();
+    scheduler.stop();
     await closeMcp();
     try {
       agentRuntime.close();

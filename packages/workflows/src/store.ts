@@ -26,6 +26,8 @@ interface RunRow {
   idempotency_key: string | null;
   created_at: number;
   updated_at: number;
+  current_step_index: number | null;
+  step_outputs_json: string | null;
 }
 
 interface NodeStateRow {
@@ -77,6 +79,18 @@ export class WorkflowStore {
       CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);
       CREATE INDEX IF NOT EXISTS idx_runs_idempotency ON runs(idempotency_key);
     `);
+    // Crash-resume checkpoint columns (added 2026-10-09). ALTER on existing
+    // tables is a no-op when the column already exists — ignore that error.
+    for (const ddl of [
+      'ALTER TABLE runs ADD COLUMN current_step_index INTEGER',
+      'ALTER TABLE runs ADD COLUMN step_outputs_json TEXT',
+    ]) {
+      try {
+        this.db.exec(ddl);
+      } catch (err) {
+        if (!/duplicate column name/i.test(err instanceof Error ? err.message : String(err))) throw err;
+      }
+    }
   }
 
   close(): void {
@@ -174,6 +188,30 @@ export class WorkflowStore {
     this.db.prepare('UPDATE runs SET status = ?, updated_at = ? WHERE id = ?').run(status, updatedAt, id);
   }
 
+  /**
+   * Durable crash-resume checkpoint: the last completed step index and the
+   * outputs of every completed step, written AFTER each step finishes (and on
+   * pause). On recovery the node_states table is the source of truth for which
+   * steps are done; this row is the fast resume cursor plus an audit trail.
+   */
+  checkpointRun(
+    id: string,
+    checkpoint: { currentStepIndex: number; stepOutputs: Record<string, unknown> },
+    updatedAt: number,
+  ): void {
+    this.db
+      .prepare('UPDATE runs SET current_step_index = ?, step_outputs_json = ?, updated_at = ? WHERE id = ?')
+      .run(checkpoint.currentStepIndex, JSON.stringify(checkpoint.stepOutputs), updatedAt, id);
+  }
+
+  /** Runs stuck in 'running' — i.e. the process died mid-flight. */
+  listCrashedRuns(): WorkflowRun[] {
+    const rows = this.db
+      .prepare("SELECT * FROM runs WHERE status = 'running' ORDER BY updated_at ASC")
+      .all() as unknown as RunRow[];
+    return rows.map((row) => this.assembleRun(row));
+  }
+
   upsertNodeState(runId: string, nodeId: string, state: NodeState): void {
     this.db
       .prepare(
@@ -223,6 +261,8 @@ export class WorkflowStore {
       updatedAt: row.updated_at,
     };
     if (row.idempotency_key !== null) run.idempotencyKey = row.idempotency_key;
+    if (row.current_step_index !== null) run.currentStepIndex = row.current_step_index;
+    if (row.step_outputs_json !== null) run.stepOutputs = JSON.parse(row.step_outputs_json) as Record<string, unknown>;
     return run;
   }
 }

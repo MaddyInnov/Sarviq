@@ -14,6 +14,7 @@ export interface SessionRecord {
 }
 
 interface MessageRow {
+  id: number;
   role: string;
   content: string;
   tool_name: string | null;
@@ -25,23 +26,68 @@ function newId(): string {
   return `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
-/** Default cap on messages returned by getMessages(). */
+/** Default cap on messages returned by getMessages() without compaction. */
 export const DEFAULT_HISTORY_LIMIT = 100;
 /** Env var consulted when no explicit historyLimit is passed to the constructor. */
 export const HISTORY_LIMIT_ENV_VAR = 'SESSION_HISTORY_LIMIT';
+
+/**
+ * Hard floor of most-recent messages always kept verbatim by compaction.
+ * Never shrinks: even a historyLimit below 100 keeps 100 here.
+ */
+export const COMPACTION_KEEP_FLOOR = 100;
+/** Default trigger: compact when total messages exceed keepN + this. */
+export const DEFAULT_COMPACT_THRESHOLD = 140;
+
+/**
+ * Summarizer hook for auto-compaction. The host provides the implementation
+ * (suggested: a cheap model via createProvider, e.g. a small Groq model,
+ * with the summary capped at ~800 tokens). It receives the messages to
+ * summarize — oldest first — and returns the summary text.
+ */
+export type SessionSummarizer = (messages: ChatMessage[]) => Promise<string>;
 
 export interface SessionStoreOptions {
   /**
    * Max messages returned by getMessages(); older messages are dropped from
    * the result (the DB rows are kept). Must be a positive integer.
    * Precedence: constructor option > SESSION_HISTORY_LIMIT env var > 100.
+   * Only applies when no summarizer is configured.
    */
   historyLimit?: number;
+  /**
+   * Summarizer hook. When set, blind truncation is replaced by
+   * summarization auto-compaction (see getMessages).
+   */
+  summarizer?: SessionSummarizer;
+  /**
+   * Compaction triggers when total messages exceed keepN + compactThreshold
+   * (default 140), where keepN is the verbatim floor. Must be a positive
+   * integer.
+   */
+  compactThreshold?: number;
 }
 
-function parseHistoryLimit(raw: string | number | undefined): number | undefined {
+function parsePositiveInt(raw: string | number | undefined): number | undefined {
   const n = typeof raw === 'number' ? raw : raw === undefined ? NaN : Number.parseInt(raw, 10);
   return Number.isInteger(n) && (n as number) > 0 ? (n as number) : undefined;
+}
+
+function mapRow(row: MessageRow): RichMessage {
+  const msg: RichMessage = {
+    role: row.role as ChatMessage['role'],
+    content: row.content,
+  };
+  if (row.tool_name) msg.toolName = row.tool_name;
+  if (row.tool_call_id) msg.toolCallId = row.tool_call_id;
+  if (row.tool_calls) {
+    try {
+      msg.toolCalls = JSON.parse(row.tool_calls) as ToolCall[];
+    } catch {
+      // corrupted column: drop it rather than failing the whole history
+    }
+  }
+  return msg;
 }
 
 /**
@@ -49,21 +95,35 @@ function parseHistoryLimit(raw: string | number | undefined): number | undefined
  * Assistant tool calls are persisted in a JSON column so history can be
  * re-serialized for providers; the public ChatMessage contract is unchanged.
  *
- * Rolling window: getMessages() returns at most `historyLimit` most recent
- * messages (default 100, configurable via constructor option or the
- * SESSION_HISTORY_LIMIT env var). A console warning is emitted when
- * truncation kicks in, so unbounded context growth is visible, not silent.
+ * Two history modes:
+ * - Without a summarizer: getMessages() returns at most `historyLimit`
+ *   most recent messages (default 100), dropping older ones from the result
+ *   with a console warning (legacy blind truncation).
+ * - With a summarizer: when total messages exceed keepN + compactThreshold
+ *   (defaults 100 + 140), everything EXCEPT the last keepN messages is
+ *   summarized once via the injected summarizer and returned as a single
+ *   leading system message; the last keepN messages stay verbatim. The
+ *   keep floor never shrinks. Compaction is idempotent: an already-compacted
+ *   range is never re-summarized (watermark in the `compactions` table +
+ *   in-memory cache); newly appended messages are summarized incrementally
+ *   and appended to the cached summary.
  */
 export class SessionStore {
   private readonly db: DatabaseSyncType;
   private readonly historyLimit: number;
+  private readonly summarizer?: SessionSummarizer;
+  private readonly compactThreshold: number;
+  /** sessionId → { summary, upToId }: already-compacted watermark cache. */
+  private readonly compactionCache = new Map<string, { summary: string; upToId: number }>();
 
   constructor(dbPath: string, opts: SessionStoreOptions = {}) {
     this.db = new DatabaseSync(dbPath);
     this.historyLimit =
-      parseHistoryLimit(opts.historyLimit) ??
-      parseHistoryLimit(process.env[HISTORY_LIMIT_ENV_VAR]) ??
+      parsePositiveInt(opts.historyLimit) ??
+      parsePositiveInt(process.env[HISTORY_LIMIT_ENV_VAR]) ??
       DEFAULT_HISTORY_LIMIT;
+    this.summarizer = opts.summarizer;
+    this.compactThreshold = parsePositiveInt(opts.compactThreshold) ?? DEFAULT_COMPACT_THRESHOLD;
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS sessions (
         id TEXT PRIMARY KEY,
@@ -81,6 +141,12 @@ export class SessionStore {
         ts TEXT NOT NULL
       );
       CREATE INDEX IF NOT EXISTS idx_messages_session ON messages (session_id, id);
+      CREATE TABLE IF NOT EXISTS compactions (
+        session_id TEXT PRIMARY KEY,
+        summary TEXT NOT NULL,
+        up_to_id INTEGER NOT NULL,
+        updated_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -117,36 +183,69 @@ export class SessionStore {
       );
   }
 
-  getMessages(sessionId: string): ChatMessage[] {
+  private readCompaction(sessionId: string): { summary: string; upToId: number } | undefined {
+    const row = this.db
+      .prepare('SELECT summary, up_to_id AS upToId FROM compactions WHERE session_id = ?')
+      .get(sessionId) as { summary: string; upToId: number } | undefined;
+    if (row) this.compactionCache.set(sessionId, row);
+    return row;
+  }
+
+  private writeCompaction(sessionId: string, summary: string, upToId: number): void {
+    this.db
+      .prepare(
+        `INSERT INTO compactions (session_id, summary, up_to_id, updated_at)
+         VALUES (?, ?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET summary = excluded.summary, up_to_id = excluded.up_to_id, updated_at = excluded.updated_at`,
+      )
+      .run(sessionId, summary, upToId, new Date().toISOString());
+    this.compactionCache.set(sessionId, { summary, upToId });
+  }
+
+  async getMessages(sessionId: string): Promise<ChatMessage[]> {
     const rows = this.db
       .prepare(
-        'SELECT role, content, tool_name, tool_call_id, tool_calls FROM messages WHERE session_id = ? ORDER BY id ASC',
+        'SELECT id, role, content, tool_name, tool_call_id, tool_calls FROM messages WHERE session_id = ? ORDER BY id ASC',
       )
       .all(sessionId) as unknown as MessageRow[];
-    const mapped = rows.map((row) => {
-      const msg: RichMessage = {
-        role: row.role as ChatMessage['role'],
-        content: row.content,
-      };
-      if (row.tool_name) msg.toolName = row.tool_name;
-      if (row.tool_call_id) msg.toolCallId = row.tool_call_id;
-      if (row.tool_calls) {
-        try {
-          msg.toolCalls = JSON.parse(row.tool_calls) as ToolCall[];
-        } catch {
-          // corrupted column: drop it rather than failing the whole history
-        }
+
+    const keepN = Math.max(this.historyLimit, COMPACTION_KEEP_FLOOR);
+    if (!this.summarizer || rows.length <= keepN + this.compactThreshold) {
+      // Legacy blind-truncation rolling window (unchanged behaviour).
+      const mapped = rows.map(mapRow);
+      if (mapped.length > this.historyLimit) {
+        const dropped = mapped.length - this.historyLimit;
+        console.warn(
+          `[sessions] session ${sessionId}: history truncated, dropped ${dropped} of ${mapped.length} messages (limit ${this.historyLimit})`,
+        );
+        return mapped.slice(-this.historyLimit);
       }
-      return msg;
-    });
-    if (mapped.length > this.historyLimit) {
-      const dropped = mapped.length - this.historyLimit;
-      console.warn(
-        `[sessions] session ${sessionId}: history truncated, dropped ${dropped} of ${mapped.length} messages (limit ${this.historyLimit})`,
-      );
-      return mapped.slice(-this.historyLimit);
+      return mapped;
     }
-    return mapped;
+
+    // Summarization auto-compaction: everything except the last keepN
+    // messages becomes one leading system summary.
+    const kept = rows.slice(-keepN);
+    const compactRange = rows.slice(0, rows.length - keepN);
+    const lastCompactId = compactRange[compactRange.length - 1]!.id;
+
+    const cached = this.compactionCache.get(sessionId) ?? this.readCompaction(sessionId);
+    let summary: string;
+    if (cached && cached.upToId >= lastCompactId) {
+      // Idempotent: the whole range is already compacted; reuse the summary.
+      summary = cached.summary;
+    } else {
+      // Incremental: summarize only messages appended since the watermark.
+      const fresh = compactRange.filter((r) => r.id > (cached?.upToId ?? -1));
+      const chunk = await this.summarizer(fresh.map(mapRow));
+      summary = cached ? `${cached.summary}\n\n${chunk}` : chunk;
+      this.writeCompaction(sessionId, summary, lastCompactId);
+    }
+
+    const header =
+      `[compacted summary — ${compactRange.length} older message(s) summarized; ` +
+      `the last ${keepN} message(s) follow verbatim]\n${summary}`;
+    return [{ role: 'system', content: header }, ...kept.map(mapRow)];
   }
 
   close(): void {
