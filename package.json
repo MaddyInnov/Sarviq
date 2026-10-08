@@ -4,7 +4,7 @@
     "typescript": "^5.6.3"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "license": "Apache-2.0",
   "name": "mvp-all-in-one-ai-agent-platform",
