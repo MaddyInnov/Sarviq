@@ -6,6 +6,7 @@ import { usePathname } from 'next/navigation';
 import { useEffect, useRef, useState } from 'react';
 import { getApiBase } from '../lib/api';
 import { useUxMode, type UxMode } from '../lib/ux-mode';
+import { THEMES, useTheme, type ThemeChoice } from '../lib/theme';
 
 interface Dest {
   href: string;
@@ -126,6 +127,78 @@ function ModeToggle({ mode, onChange }: { mode: UxMode; onChange: (m: UxMode) =>
   );
 }
 
+/** Theme chooser: Dark / Light / System + signature clay themes. */
+function ThemeSwitcher() {
+  const [choice, setChoice] = useTheme();
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const active = THEMES.find((t) => t.id === choice) ?? THEMES[0];
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open ]);
+
+  const pick = (c: ThemeChoice) => {
+    setChoice(c);
+    setOpen(false);
+  };
+
+  return (
+    <div className="theme-wrap" ref={ref}>
+      <button
+        className="theme-btn"
+        aria-label={`Theme: ${active.label}. Change theme`}
+        aria-expanded={open}
+        onClick={() => setOpen((v) => !v)}
+        title="Change theme"
+      >
+        <span
+          className="swatch-dot"
+          style={{ background: `linear-gradient(135deg, ${active.swatch[0]} 50%, ${active.swatch[1]} 50%)` }}
+          aria-hidden="true"
+        />
+        {active.label}
+      </button>
+      {open && (
+        <div className="theme-menu" role="menu" aria-label="Theme">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              className={`theme-opt${t.id === choice ? ' active' : ''}`}
+              role="menuitemradio"
+              aria-checked={t.id === choice}
+              onClick={() => pick(t.id)}
+            >
+              <span className="swatches" aria-hidden="true">
+                <span className="swatch-dot" style={{ background: t.swatch[0] }} />
+                <span className="swatch-dot" style={{ background: t.swatch[1] }} />
+              </span>
+              <span className="tmeta">
+                <span className="tname">{t.label}</span>
+                <br />
+                <span className="thint">{t.hint}</span>
+              </span>
+              {t.id === choice && <span className="tcheck" aria-hidden="true">✓</span>}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Nav() {
   const pathname = usePathname();
   const [apiBase, setApiBase] = useState('');
@@ -188,6 +261,7 @@ export default function Nav() {
       <span className="api-base" title="API base URL">
         api: {apiBase}
       </span>
+      <ThemeSwitcher />
       <ModeToggle mode={mode} onChange={setMode} />
 
       {/* Settings menu (accounts, providers, modules hub) */}
@@ -246,6 +320,10 @@ export default function Nav() {
             {s.label}
           </Link>
         ))}
+        <div className="drawer-section">Theme</div>
+        <div className="drawer-theme">
+          <ThemeSwitcher />
+        </div>
         <div className="drawer-section">Mode</div>
         <div className="drawer-mode">
           <ModeToggle mode={mode} onChange={setMode} />

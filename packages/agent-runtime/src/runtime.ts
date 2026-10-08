@@ -20,6 +20,7 @@ import {
   getProviderPreset,
   resolveApiKey,
 } from './providers/catalog.js';
+import { costOfUsage } from './pricing.js';
 import { SessionStore } from './sessions.js';
 import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
@@ -39,6 +40,20 @@ export interface AgentRuntimeOptions {
    * last-100-messages hard floor with blind truncation as the fallback.
    */
   sessionStoreOptions?: SessionStoreOptions;
+  /**
+   * Checkpoint hook (Claude Code-style rewind). Called BEFORE a
+   * file-mutating tool executes, with the file path and its current
+   * content (null if the file does not exist). The host persists the
+   * snapshot; restore is handled via the checkpoints API.
+   */
+  onBeforeFileMutate?: (info: {
+    sessionId: string;
+    botId: string;
+    toolName: string;
+    path: string;
+    contentBefore: string | null;
+    historyLength: number;
+  }) => void | Promise<void>;
 }
 
 export interface RunTurnOptions {
@@ -56,6 +71,32 @@ export interface RunTurnOptions {
   onEvent: (e: StreamEvent) => void | Promise<void>;
   maxIterations?: number;
   approvalTimeoutMs?: number;
+  /**
+   * AbortSignal for mid-turn interruption (Claude Code-style steering).
+   * When aborted, the turn stops at the next checkpoint, pending approvals
+   * from this turn are withdrawn (fail-closed), and an 'interrupted' event
+   * is emitted. The API layer aborts the previous turn when a new message
+   * arrives on the same session.
+   */
+  signal?: AbortSignal;
+  /**
+   * Session auto-approve mode (Claude Code Shift+Tab style). When true,
+   * tools that would require approval are auto-approved for this turn
+   * (audited). The user enables it explicitly per session in the UI.
+   */
+  autoApprove?: boolean;
+  /**
+   * Plan mode (Claude Code Shift+Tab style). When true, the turn is
+   * read-only: write/execute/network tools are denied by governance with
+   * an explanation, so the model explores and plans without mutating
+   * anything.
+   */
+  planMode?: boolean;
+  /**
+   * Max spend in USD for this turn. If the accumulated cost exceeds the
+   * cap, the turn stops fail-closed with an explanatory message.
+   */
+  maxBudgetUsd?: number;
 }
 
 export interface PreviewToolInfo {
@@ -129,6 +170,7 @@ export class AgentRuntime {
   private readonly governance: GovernanceGateway;
   private readonly toolRegistry: Map<string, ToolDefinition>;
   private readonly defaultProviderId: string;
+  private readonly onBeforeFileMutate?: AgentRuntimeOptions['onBeforeFileMutate'];
 
   constructor(opts: AgentRuntimeOptions) {
     this.store = new SessionStore(opts.dbPath, opts.sessionStoreOptions);
@@ -136,10 +178,20 @@ export class AgentRuntime {
     this.governance = opts.governance;
     this.toolRegistry = opts.toolRegistry;
     this.defaultProviderId = opts.defaultProviderId ?? 'groq';
+    this.onBeforeFileMutate = opts.onBeforeFileMutate;
   }
 
   close(): void {
     this.store.close();
+  }
+
+  /**
+   * Rewind a session's conversation history to an earlier checkpoint.
+   * Truncates to the first `keepCount` messages. Used by the checkpoints
+   * API for conversation/both restore modes.
+   */
+  rewindSession(sessionId: string, keepCount: number): number {
+    return this.store.rewindHistory(sessionId, keepCount);
   }
 
   /**
@@ -253,16 +305,34 @@ export class AgentRuntime {
     ];
 
     let totalUsage = emptyUsage();
+    // Approval ids minted by THIS turn, so an abort can withdraw them
+    // (fail-closed) instead of leaving stale cards in the inbox.
+    const turnApprovalIds: string[] = [];
 
     try {
       for (let iteration = 0; iteration < maxIterations; iteration++) {
+        opts.signal?.throwIfAborted();
         const turn = await provider.chat(messages, tools, {
           model,
           onToken: (t) => {
             void emit({ type: 'token', content: t });
           },
+          signal: opts.signal,
         });
         totalUsage = addUsage(totalUsage, turn.usage);
+
+        // Budget cap: stop fail-closed if the turn's accumulated cost
+        // exceeds maxBudgetUsd. The user sees what was spent and why it
+        // stopped.
+        if (opts.maxBudgetUsd !== undefined && opts.maxBudgetUsd >= 0) {
+          const cost = this.estimateTurnCost(totalUsage, model);
+          if (cost > opts.maxBudgetUsd) {
+            const msg = `Budget cap reached: $${cost.toFixed(4)} spent (cap $${opts.maxBudgetUsd.toFixed(4)}). Turn stopped.`;
+            this.audit({ type: 'turn.budget_cap', sessionId, botId: ctx.botId, detail: { cost, cap: opts.maxBudgetUsd } });
+            await emit({ type: 'error', message: msg });
+            return totalUsage;
+          }
+        }
 
         const assistantMsg = withToolCalls(
           { role: 'assistant', content: turn.content },
@@ -309,6 +379,18 @@ export class AgentRuntime {
             reason = `governance error: ${err instanceof Error ? err.message : String(err)}`;
           }
 
+          // Plan mode: block all mutating tools (write/execute/network).
+          // The model can read, search, and explore freely, but any attempt
+          // to change state is denied with an explanation.
+          if (opts.planMode && decision !== 'deny') {
+            const mutating = /^(write_file|edit_file|create_file|delete_file|remove_file|run_command|exec|shell|http|mcp:)/.test(call.name);
+            if (mutating) {
+              decision = 'deny';
+              reason = 'Plan mode: read-only exploration. Turn off plan mode to make changes.';
+              this.audit({ type: 'tool.plan_mode_denied', sessionId, botId: ctx.botId, call });
+            }
+          }
+
           if (decision === 'deny') {
             const result = { denied: true, reason: reason ?? 'denied by governance policy' };
             this.audit({ type: 'tool.denied', sessionId, botId: ctx.botId, call, detail: { reason } });
@@ -326,39 +408,55 @@ export class AgentRuntime {
 
           let approvalId: string | undefined;
           if (decision === 'require-approval') {
-            // Prefer the gateway-minted id when the gateway supplies one:
-            // the UI's approve/deny then hits the real record with no
-            // id-translation race.
-            approvalId = gatewayApprovalId ?? newApprovalId();
-            this.audit({ type: 'tool.approval_requested', sessionId, botId: ctx.botId, call, detail: { approvalId } });
-            await emit({ type: 'approval_required', approvalId, call });
-            await emit({ type: 'tool_call', call, approvalRequired: true, approvalId });
-            let verdict: 'approved' | 'denied';
-            try {
-              verdict = await this.governance.awaitDecision(approvalId, { timeoutMs: approvalTimeoutMs });
-            } catch {
-              verdict = 'denied';
-            }
-            this.audit({
-              type: 'tool.approval_decided',
-              sessionId,
-              botId: ctx.botId,
-              call,
-              detail: { approvalId, verdict },
-            });
-            if (verdict !== 'approved') {
-              const result = { denied: true, reason: 'approval denied or timed out' };
-              await emit({ type: 'tool_result', call, result, denied: true });
-              const toolMsg: ChatMessage = {
-                role: 'tool',
-                content: 'Tool call was not approved.',
-                toolCallId: call.id,
-                toolName: call.name,
-              };
-              this.store.appendMessage(sessionId, toolMsg);
-              messages.push(toolMsg);
-              continue;
-            }
+            // Session auto-approve (user explicitly enabled "auto-approve this
+            // session" in the UI): skip the approval card, audit the
+            // auto-decision, and execute. This is the "auto approve" mode —
+            // manual approve remains the default.
+            if (opts.autoApprove) {
+              this.audit({
+                type: 'tool.approval_auto_approved',
+                sessionId,
+                botId: ctx.botId,
+                call,
+                detail: { mode: 'session-auto-approve' },
+              });
+              await emit({ type: 'tool_call', call, approvalRequired: false });
+            } else {
+              // Prefer the gateway-minted id when the gateway supplies one:
+              // the UI's approve/deny then hits the real record with no
+              // id-translation race.
+              approvalId = gatewayApprovalId ?? newApprovalId();
+              turnApprovalIds.push(approvalId);
+              this.audit({ type: 'tool.approval_requested', sessionId, botId: ctx.botId, call, detail: { approvalId } });
+              await emit({ type: 'approval_required', approvalId, call });
+              await emit({ type: 'tool_call', call, approvalRequired: true, approvalId });
+              let verdict: 'approved' | 'denied';
+              try {
+                verdict = await this.awaitDecisionAbortable(approvalId, approvalTimeoutMs, opts.signal);
+              } catch {
+                verdict = 'denied';
+              }
+              this.audit({
+                type: 'tool.approval_decided',
+                sessionId,
+                botId: ctx.botId,
+                call,
+                detail: { approvalId, verdict },
+              });
+              if (verdict !== 'approved') {
+                const result = { denied: true, reason: 'approval denied or timed out' };
+                await emit({ type: 'tool_result', call, result, denied: true });
+                const toolMsg: ChatMessage = {
+                  role: 'tool',
+                  content: 'Tool call was not approved.',
+                  toolCallId: call.id,
+                  toolName: call.name,
+                };
+                this.store.appendMessage(sessionId, toolMsg);
+                messages.push(toolMsg);
+                continue;
+              }
+            } // end manual-approval branch (autoApprove path skips the card)
           } else {
             await emit({ type: 'tool_call', call, approvalRequired: false });
           }
@@ -397,10 +495,59 @@ export class AgentRuntime {
       await emit({ type: 'error', message: `Max iterations (${maxIterations}) reached without a final answer` });
       return totalUsage;
     } catch (err) {
+      if (opts.signal?.aborted) {
+        // Mid-turn interruption (e.g. user sent a newer message): withdraw
+        // this turn's pending approvals fail-closed so the inbox doesn't
+        // keep stale cards, tell the client, and return gracefully.
+        for (const id of turnApprovalIds) {
+          try {
+            this.governance.decide(id, 'denied', { note: 'Turn superseded by a newer message.' });
+          } catch { /* already decided */ }
+        }
+        await emit({ type: 'interrupted', reason: 'A newer message superseded this turn.' });
+        return totalUsage;
+      }
       const message = err instanceof Error ? err.message : String(err);
       await emit({ type: 'error', message });
       throw err;
     }
+  }
+
+  /**
+   * Estimate the USD cost of a turn's accumulated token usage.
+   * Unknown prices count as $0 (estimated) — the budget cap is a guardrail,
+   * not a billing instrument.
+   */
+  private estimateTurnCost(usage: TokenUsage, model: string): number {
+    try {
+      return costOfUsage(this.defaultProviderId, model, usage).total;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * awaitDecision that also resolves when `signal` aborts (rejects with the
+   * abort reason so the turn's catch block treats it as an interruption).
+   */
+  private awaitDecisionAbortable(
+    approvalId: string,
+    timeoutMs: number,
+    signal?: AbortSignal,
+  ): Promise<'approved' | 'denied'> {
+    if (!signal) return this.governance.awaitDecision(approvalId, { timeoutMs });
+    if (signal.aborted) return Promise.reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+    return new Promise<'approved' | 'denied'>((resolve, reject) => {
+      const onAbort = (): void => {
+        signal.removeEventListener('abort', onAbort);
+        reject(signal.reason ?? new DOMException('Aborted', 'AbortError'));
+      };
+      signal.addEventListener('abort', onAbort, { once: true });
+      this.governance.awaitDecision(approvalId, { timeoutMs }).then(
+        (v) => { signal.removeEventListener('abort', onAbort); resolve(v); },
+        (e) => { signal.removeEventListener('abort', onAbort); reject(e); },
+      );
+    });
   }
 
   private async executeTool(
@@ -408,6 +555,32 @@ export class AgentRuntime {
     call: ToolCall,
     ctx: ToolContext,
   ): Promise<unknown> {
+    // Checkpoint hook: snapshot the file BEFORE a mutating tool runs, so
+    // the user can rewind (Claude Code Esc+Esc style).
+    if (this.onBeforeFileMutate && /^(write_file|edit_file|create_file|delete_file|remove_file)$/.test(def.name)) {
+      const filePath = typeof call.args?.path === 'string' ? call.args.path : null;
+      if (filePath) {
+        let contentBefore: string | null = null;
+        try {
+          const { readFileSync, existsSync } = await import('node:fs');
+          contentBefore = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
+        } catch {
+          contentBefore = null;
+        }
+        try {
+          await this.onBeforeFileMutate({
+            sessionId: ctx.sessionId,
+            botId: ctx.botId,
+            toolName: def.name,
+            path: filePath,
+            contentBefore,
+            historyLength: (await this.store.getMessages(ctx.sessionId)).length,
+          });
+        } catch {
+          // Checkpoint failure must never block tool execution.
+        }
+      }
+    }
     await this.governance.runPreHooks(call, ctx);
     let result: unknown;
     try {

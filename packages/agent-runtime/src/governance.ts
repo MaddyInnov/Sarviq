@@ -47,7 +47,7 @@ export interface GovernanceGateway {
   /** Wait for an external approval decision (e.g. from the approval inbox UI). */
   awaitDecision(approvalId: string, opts?: { timeoutMs?: number }): Promise<'approved' | 'denied'>;
   /** Record an external approval decision (called by the approval UI / API). */
-  decide(approvalId: string, decision: 'approved' | 'denied'): void;
+  decide(approvalId: string, decision: 'approved' | 'denied', opts?: { decidedBy?: string; note?: string }): void;
   /** Append an audit event. Must never carry PII. */
   audit(entry: AuditEntry): void | Promise<void>;
   /** Governance hooks run around every tool execution. */

@@ -25,6 +25,7 @@ export type StreamEvent =
   | { type: 'tool_result'; call: ToolCall; result: unknown; denied?: boolean }
   | { type: 'done'; usage: TokenUsage }
   | { type: 'error'; message: string }
+  | { type: 'interrupted'; reason: string }
   | { type: 'approval_required'; approvalId: string; call: ToolCall };
 
 export interface ToolContext {

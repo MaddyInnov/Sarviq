@@ -138,3 +138,35 @@ export function saveBotPolicy(
   bot.policy = policy;
   return policy;
 }
+
+/**
+ * "Always allow this tool" — appends a persistent allow rule for one tool
+ * to the bot's policy (deduped). Future calls to the tool skip the approval
+ * card entirely. This is the "remember my choice" behind the approval UI.
+ */
+export function rememberAllowedTool(
+  dataDir: string,
+  bots: BotConfig[],
+  botId: string,
+  tool: string,
+): BotPolicy {
+  const bot = bots.find((b) => b.id === botId);
+  if (!bot) throw new Error(`Unknown bot "${botId}"`);
+  const file = loadBotPolicies(dataDir);
+  const existing = file[botId]?.rules ?? bot.policy?.rules ?? [];
+  const escaped = tool.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const ruleId = `user-allow-${tool}`;
+  const already = existing.some((r) => r.id === ruleId);
+  const rules = already
+    ? existing
+    : [
+        {
+          id: ruleId,
+          toolPattern: `^${escaped}$`,
+          effect: 'allow' as const,
+          reason: `User chose "always allow" for ${tool}`,
+        },
+        ...existing,
+      ];
+  return saveBotPolicy(dataDir, bots, botId, rules);
+}

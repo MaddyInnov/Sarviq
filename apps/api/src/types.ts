@@ -16,6 +16,12 @@ export interface ChatRequestBody {
   model?: string;
   /** Task type for Phase 3 smart model routing (only used when no model is pinned). */
   taskType?: 'code' | 'chat' | 'reasoning' | 'simple-qa';
+  /** Session auto-approve: skip approval cards for this turn (audited). */
+  autoApprove?: boolean;
+  /** Plan mode: read-only exploration, mutating tools denied. */
+  planMode?: boolean;
+  /** Max USD spend for this turn; stops fail-closed when exceeded. */
+  maxBudgetUsd?: number;
 }
 
 export interface DecideApprovalBody {

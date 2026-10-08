@@ -2,7 +2,7 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { decideApproval, getApprovals } from '../../lib/api';
+import { decideApproval, getApprovals, allowTool } from '../../lib/api';
 import type { ApprovalRecord } from '../../lib/api';
 
 function fmtTs(ts: number): string {
@@ -44,6 +44,20 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
     setActing(id);
     try {
       await decideApproval(id, decision);
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setActing('');
+    }
+  };
+
+  /** "Always allow <tool>": persist an allow rule for the bot, then approve. */
+  const alwaysAllow = async (a: ApprovalRecord) => {
+    setActing(a.id);
+    try {
+      await allowTool(a.botId, a.toolName);
+      await decideApproval(a.id, 'approved', `User chose "always allow ${a.toolName}"`);
       await refresh();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -97,6 +111,14 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
               onClick={() => void decide(a.id, 'denied')}
             >
               Deny
+            </button>
+            <button
+              className="btn btn-sm"
+              disabled={acting === a.id}
+              onClick={() => void alwaysAllow(a)}
+              title={`Never ask for ${a.toolName} again on this bot, then approve this call.`}
+            >
+              Always allow {a.toolName}
             </button>
           </div>
         </div>

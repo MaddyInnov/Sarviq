@@ -186,6 +186,12 @@ async function boot(): Promise<void> {
   registerMuseModuleTools(toolRegistry, { dataDir: config.dataDir });
 
   // 3. Agent runtime + workflows.
+  const { CheckpointStore } = await import('./checkpoints.js');
+  const checkpointStore = new CheckpointStore(config.dataDir);
+
+  const { DotStore } = await import('./dots.js');
+  const dotStore = new DotStore(config.dataDir);
+
   const agentRuntime = new AgentRuntime({
     dbPath: `${config.dataDir}/agent.db`,
     skillsDir: path.join(seedDir, 'skills'),
@@ -194,6 +200,16 @@ async function boot(): Promise<void> {
     // Phase 2: summarization auto-compaction replaces blind truncation once
     // sessions grow past the threshold; the last-100-messages floor stays.
     sessionStoreOptions: { summarizer: createSummarizer() },
+    // Checkpoints: snapshot files before mutation (Claude Code rewind).
+    // One checkpoint per (session, tool call) — files accumulate per call.
+    onBeforeFileMutate: async (info) => {
+      checkpointStore.create({
+        sessionId: info.sessionId,
+        files: { [info.path]: info.contentBefore },
+        historyLength: info.historyLength,
+        label: `before ${info.toolName} ${info.path}`,
+      });
+    },
   });
 
   // Phase 2: `delegate` subagent tool. The child runs under the same
@@ -309,6 +325,32 @@ async function boot(): Promise<void> {
     }
   });
 
+  // Thread automations: wake chat threads on a schedule (Codex-style).
+  // Each wake leaves a task so the user can see what the agent did.
+  const { ThreadScheduleStore, ThreadScheduler } = await import('./thread-scheduler.js');
+  const threadScheduleStore = new ThreadScheduleStore(config.dataDir);
+  const threadScheduler = new ThreadScheduler({
+    store: threadScheduleStore,
+    agentRuntime,
+    getBots: () => seed.bots,
+    onWake: ({ schedule, ok, error }) => {
+      try {
+        createTask({
+          title: ok
+            ? `Thread woke on schedule: ${schedule.sessionId}`
+            : `Thread wake failed: ${schedule.sessionId}`,
+          notes: ok
+            ? `Schedule ${schedule.id} fired — agent checked in on session ${schedule.sessionId}.`
+            : `Schedule ${schedule.id} failed: ${error ?? 'unknown error'}`,
+          dueAt: null,
+        });
+      } catch (err) {
+        console.error('[tasks] failed to record thread wake:', err instanceof Error ? err.message : err);
+      }
+    },
+  });
+  threadScheduler.start();
+
   // Phase 3: two-way MCP over HTTP+SSE on a separate port when configured.
   // External clients connect to http://127.0.0.1:<port>/sse.
   let mcpServer: PlatformMcpServer | undefined;
@@ -348,6 +390,9 @@ async function boot(): Promise<void> {
       workflowRunner,
       mcpConnections,
       mcpServer,
+      threadScheduleStore,
+      checkpointStore,
+      dotStore,
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).

@@ -473,3 +473,67 @@ describe('FREE_MODELS_ONLY guard', () => {
     await expect(runOnce()).resolves.toBeDefined();
   });
 });
+
+describe('mid-turn interruption (AbortSignal)', () => {
+  it('emits interrupted and withdraws pending approvals when aborted during approval wait', async () => {
+    const gateway = new FakeGateway();
+    gateway.decision = 'require-approval';
+    gateway.approvalDelayMs = 5000; // long wait — we abort mid-wait
+    const decided: Array<{ id: string; decision: string; note?: string }> = [];
+    gateway.decide = (id: string, decision: 'approved' | 'denied', opts?: { note?: string }) => {
+      decided.push({ id, decision, note: opts?.note });
+    };
+
+    const provider = new MockProvider([
+      { toolCalls: [{ id: 'call-1', name: 'write_file', args: { path: 'x.txt' } }] },
+      { content: 'done' },
+    ]);
+    const runtime = makeRuntime(gateway, [
+      { name: 'write_file', description: 'w', parameters: {} },
+    ], provider);
+    const bot = testBot({ tools: ['write_file'] });
+
+    const events: StreamEvent[] = [];
+    const controller = new AbortController();
+    const runPromise = runtime.runTurn({
+      bot,
+      message: 'write it',
+      sessionId: 's-interrupt',
+      signal: controller.signal,
+      onEvent: async (e) => { events.push(e); },
+    });
+    await sleep(100); // let the turn reach the approval wait
+    controller.abort();
+    await runPromise; // must not throw
+
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+    expect(events.some((e) => e.type === 'done')).toBe(false);
+    expect(decided.length).toBe(1);
+    expect(decided[0].decision).toBe('denied');
+  });
+
+  it('aborts between iterations without starting a new provider call', async () => {
+    const gateway = new FakeGateway();
+    const provider = new MockProvider([
+      { toolCalls: [{ id: 'c1', name: 'read_file', args: {} }] },
+      { content: 'final' },
+    ]);
+    const runtime = makeRuntime(gateway, [
+      { name: 'read_file', description: 'r', parameters: {} },
+    ], provider);
+    const bot = testBot({ tools: ['read_file'] });
+
+    const events: StreamEvent[] = [];
+    const controller = new AbortController();
+    controller.abort(); // pre-aborted
+    await runtime.runTurn({
+      bot,
+      message: 'hi',
+      sessionId: 's-preabort',
+      signal: controller.signal,
+      onEvent: async (e) => { events.push(e); },
+    });
+    expect(provider.calls.length).toBe(0); // never reached the model
+    expect(events.some((e) => e.type === 'interrupted')).toBe(true);
+  });
+});

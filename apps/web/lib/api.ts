@@ -70,6 +70,7 @@ export type StreamEvent =
   | { type: 'tool_result'; call: ToolCall; result: unknown; denied?: boolean }
   | { type: 'done'; usage: TokenUsage | null }
   | { type: 'error'; message: string }
+  | { type: 'interrupted'; reason: string }
   | { type: 'approval_required'; approvalId: string; call: ToolCall }
   /**
    * Rich inline card. `widget` is validated client-side against the widget
@@ -240,6 +241,47 @@ export function decideApproval(
   });
 }
 
+/**
+ * "Always allow this tool" — appends a persistent allow rule for one tool
+ * to the bot's governance policy so future calls skip the approval card.
+ */
+export function allowTool(
+  botId: string,
+  tool: string,
+): Promise<{ ok: boolean; botId: string; tool: string }> {
+  return apiJson(`/api/bots/${encodeURIComponent(botId)}/allow-tool`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ tool }),
+  });
+}
+
+// ---- Custom slash commands --------------------------------------------------
+
+export interface SlashCommand {
+  description: string;
+  prompt: string;
+}
+
+export function getSlashCommands(): Promise<{ ok: boolean; commands: Record<string, SlashCommand> }> {
+  return apiJson('/api/slash-commands');
+}
+
+export function saveSlashCommand(
+  name: string,
+  command: SlashCommand,
+): Promise<{ ok: boolean; commands: Record<string, SlashCommand> }> {
+  return apiJson('/api/slash-commands', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, ...command }),
+  });
+}
+
+export function deleteSlashCommand(name: string): Promise<{ ok: boolean; deleted: string }> {
+  return apiJson(`/api/slash-commands/${encodeURIComponent(name)}`, { method: 'DELETE' });
+}
+
 export function getAudit(limit = 100): Promise<AuditEntry[]> {
   return apiJson(`/api/audit?limit=${limit}`);
 }
@@ -307,14 +349,24 @@ export interface ChatRequest {
   sessionId?: string;
   provider?: string;
   model?: string;
+  /** Session auto-approve: skip approval cards for this turn (audited). */
+  autoApprove?: boolean;
+  /** Plan mode: read-only exploration, mutating tools denied. */
+  planMode?: boolean;
+  /** Fail-closed max spend in USD for this turn. */
+  maxBudgetUsd?: number;
+  /** AbortSignal to cancel the stream client-side (Stop button). */
+  signal?: AbortSignal;
 }
 
 /** POST /api/chat and yield each SSE `data:` payload as a parsed StreamEvent. */
 export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent> {
+  const { signal, ...body } = req;
   const res = await apiFetch('/api/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(req),
+    body: JSON.stringify(body),
+    signal,
   });
   if (!res.ok || !res.body) {
     let detail = '';

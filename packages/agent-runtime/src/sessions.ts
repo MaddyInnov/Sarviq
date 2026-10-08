@@ -165,6 +165,24 @@ export class SessionStore {
     return row ? { id: row.id, botId: row.botId, createdAt: row.createdAt } : undefined;
   }
 
+  /**
+   * Rewind: truncate a session's history to the first `keepCount` messages
+   * (by insertion order). Used by checkpoints/rewind to restore the
+   * conversation to an earlier point. Returns the number of messages removed.
+   */
+  rewindHistory(sessionId: string, keepCount: number): number {
+    const ids = (
+      this.db
+        .prepare('SELECT rowid AS id FROM messages WHERE session_id = ? ORDER BY rowid ASC')
+        .all(sessionId) as Array<{ id: number }>
+    ).map((r) => r.id);
+    if (keepCount >= ids.length) return 0;
+    const toDelete = ids.slice(keepCount);
+    const placeholders = toDelete.map(() => '?').join(',');
+    const result = this.db.prepare(`DELETE FROM messages WHERE rowid IN (${placeholders})`).run(...toDelete);
+    return Number(result.changes);
+  }
+
   appendMessage(sessionId: string, msg: ChatMessage): void {
     const rich = msg as RichMessage;
     const toolCalls: ToolCall[] | undefined = rich.toolCalls;

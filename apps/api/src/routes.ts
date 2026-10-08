@@ -19,7 +19,16 @@ import type { WorkflowRun, WorkflowRunner } from '@mvp/workflows';
 import type { AppConfig } from './config.js';
 import type { GovernanceAdapter } from './governance-adapter.js';
 import type { McpConnection } from './tool-registry.js';
-import { saveBotPolicy } from './bot-policies.js';
+import { rememberAllowedTool, saveBotPolicy } from './bot-policies.js';
+import {
+  deleteSlashCommand,
+  expandSlashCommand,
+  loadSlashCommands,
+  saveSlashCommand,
+} from './slash-commands.js';
+import { ThreadScheduler, ThreadScheduleStore } from './thread-scheduler.js';
+import { CheckpointStore } from './checkpoints.js';
+import { DotStore, dotWakePrompt } from './dots.js';
 // Phase 3: connected apps (OAuth), messaging gateway, notes, tasks/calendar.
 import { registerOAuthRoutes } from './oauth.js';
 import { registerMessagingRoutes } from './messaging.js';
@@ -73,6 +82,12 @@ export interface RouteDeps {
    * that originated from external MCP clients.
    */
   mcpServer?: { decideApproval(approvalId: string, decision: 'approved' | 'denied'): void };
+  /** Thread automation store (shared with the ThreadScheduler in index.ts). */
+  threadScheduleStore: ThreadScheduleStore;
+  /** Checkpoint store for rewind (shared with the runtime hook in index.ts). */
+  checkpointStore: CheckpointStore;
+  /** Dots store (always-on background agents). */
+  dotStore: DotStore;
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -112,7 +127,13 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore } = deps;
+
+  // Mid-turn interruption (Claude Code-style steering): at most one live turn
+  // per session. A new message on a session aborts the previous turn — the
+  // runtime withdraws its pending approvals fail-closed and emits
+  // 'interrupted' on the old stream.
+  const activeTurns = new Map<string, AbortController>();
 
   router.get('/health', (_req, res) => {
     res.json({
@@ -141,6 +162,226 @@ export function createRouter(deps: RouteDeps): express.Router {
       const status = message.startsWith('Unknown bot') ? 404 : 400;
       res.status(status).json(errorBody('Failed to save bot policy', message));
     }
+  });
+
+  // "Always allow this tool" (approval "remember" / "skip approve").
+  // Appends a persistent allow rule for one tool to the bot's policy so
+  // future calls never raise an approval card. The user clicks it on the
+  // approval card itself.
+  router.post('/bots/:id/allow-tool', (req, res) => {
+    const body = (req.body ?? {}) as { tool?: unknown };
+    const tool = typeof body.tool === 'string' ? body.tool.trim() : '';
+    if (!tool || !/^[a-zA-Z0-9_:.-]{1,64}$/.test(tool)) {
+      res.status(400).json(errorBody('tool is required (1-64 chars: letters, digits, _ : . -)'));
+      return;
+    }
+    try {
+      const policy = rememberAllowedTool(config.dataDir, bots, req.params.id, tool);
+      res.json({ ok: true, botId: req.params.id, tool, policy });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot') ? 404 : 400;
+      res.status(status).json(errorBody('Failed to remember tool', message));
+    }
+  });
+
+  // ---- Custom slash commands --------------------------------------------
+  // User-defined `/name` commands (the `/work` pattern). A message starting
+  // with `/` is expanded through the registry before reaching the agent.
+  router.get('/slash-commands', (_req, res) => {
+    res.json({ ok: true, commands: loadSlashCommands(config.dataDir) });
+  });
+
+  router.post('/slash-commands', (req, res) => {
+    const body = (req.body ?? {}) as { name?: unknown; description?: unknown; prompt?: unknown };
+    try {
+      const commands = saveSlashCommand(config.dataDir, String(body.name ?? ''), {
+        description: typeof body.description === 'string' ? body.description : '',
+        prompt: typeof body.prompt === 'string' ? body.prompt : '',
+      });
+      res.json({ ok: true, commands });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json(errorBody('Failed to save slash command', message));
+    }
+  });
+
+  router.delete('/slash-commands/:name', (req, res) => {
+    const ok = deleteSlashCommand(config.dataDir, req.params.name);
+    if (!ok) {
+      res.status(404).json(errorBody(`Unknown slash command "${req.params.name}"`));
+      return;
+    }
+    res.json({ ok: true, deleted: req.params.name });
+  });
+
+  // ---- Thread automations -------------------------------------------------
+  // Codex-style "wake this conversation on a schedule": a cron + wake prompt
+  // bound to a session. When due, the scheduler runs an agent turn on the
+  // session so the agent continues with full conversation context.
+  // (Store instance is shared with the ThreadScheduler started in index.ts.)
+  const threadSchedules = threadScheduleStore;
+
+  router.get('/thread-schedules', (_req, res) => {
+    res.json({ ok: true, schedules: threadSchedules.list() });
+  });
+
+  router.post('/thread-schedules', (req, res) => {
+    const body = (req.body ?? {}) as { botId?: unknown; sessionId?: unknown; cron?: unknown; prompt?: unknown };
+    try {
+      const botId = typeof body.botId === 'string' ? body.botId : '';
+      const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
+      if (!bots.find((b) => b.id === botId)) {
+        throw new Error(`Unknown bot "${botId}"`);
+      }
+      if (!sessionId.trim()) throw new Error('sessionId is required');
+      const s = threadSchedules.create({
+        botId,
+        sessionId: sessionId.trim(),
+        cron: typeof body.cron === 'string' ? body.cron : '',
+        prompt: typeof body.prompt === 'string' ? body.prompt : '',
+      });
+      res.json({ ok: true, schedule: s });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json(errorBody('Failed to create thread schedule', message));
+    }
+  });
+
+  router.patch('/thread-schedules/:id', (req, res) => {
+    const body = (req.body ?? {}) as { enabled?: unknown };
+    const s = threadSchedules.setEnabled(req.params.id, body.enabled !== false);
+    if (!s) {
+      res.status(404).json(errorBody(`Unknown thread schedule "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, schedule: s });
+  });
+
+  router.delete('/thread-schedules/:id', (req, res) => {
+    if (!threadSchedules.remove(req.params.id)) {
+      res.status(404).json(errorBody(`Unknown thread schedule "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, deleted: req.params.id });
+  });
+
+  // ---- Checkpoints / rewind ------------------------------------------------
+  // Claude Code Esc+Esc style: snapshots are taken automatically before file
+  // mutations (see onBeforeFileMutate in index.ts). Restore modes:
+  // 'code' (files only), 'conversation' (history only), 'both'.
+  router.get('/sessions/:sessionId/checkpoints', (req, res) => {
+    res.json({ ok: true, checkpoints: checkpointStore.list(req.params.sessionId) });
+  });
+
+  router.post('/checkpoints/:id/restore', (req, res) => {
+    const body = (req.body ?? {}) as { mode?: unknown };
+    const mode = body.mode === 'code' || body.mode === 'conversation' || body.mode === 'both' ? body.mode : 'both';
+    const cp = checkpointStore.get(req.params.id);
+    if (!cp) {
+      res.status(404).json(errorBody(`Unknown checkpoint "${req.params.id}"`));
+      return;
+    }
+    const restoredFiles: string[] = [];
+    const errors: string[] = [];
+    if (mode === 'code' || mode === 'both') {
+      const fs = require('node:fs') as typeof import('node:fs');
+      for (const [filePath, content] of Object.entries(cp.files)) {
+        try {
+          if (content === null) {
+            if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+          } else {
+            fs.writeFileSync(filePath, content, 'utf-8');
+          }
+          restoredFiles.push(filePath);
+        } catch (err) {
+          errors.push(`${filePath}: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
+    }
+    let messagesRemoved = 0;
+    if (mode === 'conversation' || mode === 'both') {
+      try {
+        messagesRemoved = agentRuntime.rewindSession(cp.sessionId, cp.historyLength);
+      } catch (err) {
+        errors.push(`history: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    res.json({
+      ok: errors.length === 0,
+      checkpointId: cp.id,
+      mode,
+      restoredFiles,
+      messagesRemoved,
+      errors,
+    });
+  });
+
+  // ---- Dots (always-on background agents) ---------------------------------
+  // A Dot has a responsibility, not a one-off prompt. It wakes on its cron
+  // via a backing thread schedule, works in its session, and reports back.
+  router.get('/dots', (_req, res) => {
+    res.json({ ok: true, dots: dotStore.list() });
+  });
+
+  router.post('/dots', (req, res) => {
+    const body = (req.body ?? {}) as {
+      name?: unknown; responsibility?: unknown; instructions?: unknown;
+      botId?: unknown; sessionId?: unknown; cron?: unknown;
+    };
+    try {
+      const botId = typeof body.botId === 'string' ? body.botId : '';
+      if (!bots.find((b) => b.id === botId)) {
+        throw new Error(`Unknown bot "${botId}"`);
+      }
+      const dot = dotStore.create({
+        name: typeof body.name === 'string' ? body.name : '',
+        responsibility: typeof body.responsibility === 'string' ? body.responsibility : '',
+        instructions: typeof body.instructions === 'string' ? body.instructions : '',
+        botId,
+        sessionId: typeof body.sessionId === 'string' ? body.sessionId : '',
+        cron: typeof body.cron === 'string' ? body.cron : '',
+      });
+      // Backing wake mechanism: a thread schedule that fires the Dot's
+      // check-in prompt on its session.
+      const schedule = threadScheduleStore.create({
+        botId: dot.botId,
+        sessionId: dot.sessionId,
+        cron: dot.cron,
+        prompt: dotWakePrompt(dot),
+      });
+      dotStore.setThreadScheduleId(dot.id, schedule.id);
+      res.json({ ok: true, dot: { ...dot, threadScheduleId: schedule.id } });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(400).json(errorBody('Failed to create Dot', message));
+    }
+  });
+
+  router.patch('/dots/:id', (req, res) => {
+    const body = (req.body ?? {}) as { enabled?: unknown };
+    const dot = dotStore.setEnabled(req.params.id, body.enabled !== false);
+    if (!dot) {
+      res.status(404).json(errorBody(`Unknown Dot "${req.params.id}"`));
+      return;
+    }
+    if (dot.threadScheduleId) {
+      threadScheduleStore.setEnabled(dot.threadScheduleId, dot.enabled);
+    }
+    res.json({ ok: true, dot });
+  });
+
+  router.delete('/dots/:id', (req, res) => {
+    const dot = dotStore.get(req.params.id);
+    if (!dot) {
+      res.status(404).json(errorBody(`Unknown Dot "${req.params.id}"`));
+      return;
+    }
+    if (dot.threadScheduleId) {
+      threadScheduleStore.remove(dot.threadScheduleId);
+    }
+    dotStore.remove(req.params.id);
+    res.json({ ok: true, deleted: req.params.id });
   });
 
   // ---- Per-bot persistent memory ----------------------------------------
@@ -191,6 +432,25 @@ export function createRouter(deps: RouteDeps): express.Router {
       return;
     }
 
+    // Custom slash commands: expand `/name args` before the agent sees it.
+    // Unknown `/command` → 400 with the list of known commands.
+    let chatMessage = body.message;
+    let slashCommandName: string | null = null;
+    if (chatMessage.trim().startsWith('/')) {
+      const expanded = expandSlashCommand(chatMessage, loadSlashCommands(config.dataDir));
+      if (expanded === null) {
+        const known = Object.keys(loadSlashCommands(config.dataDir));
+        res.status(400).json(
+          errorBody(
+            `Unknown slash command. Known: ${known.length ? known.map((k) => `/${k}`).join(', ') : '(none yet)'}`,
+          ),
+        );
+        return;
+      }
+      chatMessage = expanded.expanded;
+      slashCommandName = expanded.commandName;
+    }
+
     sseHeaders(res);
     let closed = false;
     let terminalEmitted = false;
@@ -207,16 +467,30 @@ export function createRouter(deps: RouteDeps): express.Router {
     // NOTE: listen on the RESPONSE, not the request: under Bun's node:http
     // compat layer req 'close' can fire as soon as the request body is
     // consumed, which would wrongly kill long-lived SSE streams.
+    // Client disconnect (Stop button / tab closed / navigation): abort the
+    // in-flight turn so it doesn't keep spending tokens in the background.
+    // turnController is assigned below; the closure sees the final value.
+    let turnController: AbortController | null = null;
     res.on('close', () => {
       closed = true;
       clearInterval(heartbeat);
+      turnController?.abort('client disconnected');
     });
 
     const onEvent = async (event: StreamEvent): Promise<void> => {
       if (closed) return;
-      if (event.type === 'done' || event.type === 'error') terminalEmitted = true;
+      if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') terminalEmitted = true;
       res.write(`data: ${serializeEvent(event)}\n\n`);
     };
+
+    // Abort any in-flight turn on this session before starting the new one.
+    const sessionKey = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    turnController = new AbortController();
+    if (sessionKey) {
+      const prev = activeTurns.get(sessionKey);
+      if (prev) prev.abort('superseded by a newer message');
+      activeTurns.set(sessionKey, turnController);
+    }
 
     try {
       // Phase 3: pass the RAW explicit values (no bot-default merging here).
@@ -229,11 +503,15 @@ export function createRouter(deps: RouteDeps): express.Router {
           : undefined;
       await agentRuntime.runTurn({
         bot,
-        message: body.message,
+        message: chatMessage,
         sessionId: body.sessionId,
         providerId: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
         model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
         taskType,
+        signal: turnController.signal,
+        autoApprove: body.autoApprove === true,
+        planMode: body.planMode === true,
+        maxBudgetUsd: typeof body.maxBudgetUsd === 'number' && body.maxBudgetUsd >= 0 ? body.maxBudgetUsd : undefined,
         onEvent,
       });
       // The runtime should emit done/error itself; emit a terminal event only
@@ -247,6 +525,9 @@ export function createRouter(deps: RouteDeps): express.Router {
         res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
       }
     } finally {
+      if (sessionKey && activeTurns.get(sessionKey) === turnController) {
+        activeTurns.delete(sessionKey);
+      }
       finish();
     }
   });
