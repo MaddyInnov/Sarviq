@@ -308,3 +308,19 @@ logged and never committed.
 All modules share one SQLite file, `<dataDir>/muse-modules.db`, with
 namespaced tables (`mm_<module>_*`). Back up that one file to back up all
 module state. Nothing here writes outside the data dir.
+
+## 9. CLA Assistant (one-time, 5 minutes)
+
+The repo enforces a Contributor License Agreement on pull requests via the
+CLA Assistant bot (`.github/workflows/cla.yml`, text in `CLA.md`).
+
+1. Install the [CLA Assistant GitHub App](https://github.com/apps/cla-assistant)
+   on the `SSDMOH/all-in-one-ai-agent-saas-platform` repository.
+2. Create a personal access token (classic) with `repo` + `write:org` scopes.
+3. Add it as a repository secret named `CLA_ASSISTANT_PAT`
+   (Settings → Secrets and variables → Actions).
+4. The `allowlist` in `cla.yml` already includes `SSDMOH` so your own PRs
+   skip the check.
+
+Without this secret the CLA workflow fails on external PRs — set it before
+accepting the first outside contribution.

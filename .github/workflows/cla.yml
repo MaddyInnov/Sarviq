@@ -1,0 +1,28 @@
+# SPDX-License-Identifier: Apache-2.0
+name: CLA
+
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  cla:
+    runs-on: ubuntu-latest
+    steps:
+      - name: CLA Assistant
+        uses: contributor-assistant/github-action@v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Personal access token for the CLA Assistant bot — the founder
+          # creates this once (see docs/founder-setup.md) and stores it as
+          # the CLA_ASSISTANT_PAT repository secret.
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_ASSISTANT_PAT }}
+        with:
+          path-to-signatures: 'signatures/version1/cla.json'
+          path-to-document: 'https://github.com/SSDMOH/all-in-one-ai-agent-saas-platform/blob/main/CLA.md'
+          branch: 'main'
+          allowlist: SSDMOH
