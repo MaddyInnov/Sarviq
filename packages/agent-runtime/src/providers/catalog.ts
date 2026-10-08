@@ -74,11 +74,35 @@ export function resetCatalogCache(): void {
 }
 
 export function listProviderPresets(): ProviderPreset[] {
-  return Object.values(loadCatalog().providers);
+  const presets = Object.values(loadCatalog().providers);
+  if (isDemoMockEnabled()) presets.push(DEMO_PRESET);
+  return presets;
 }
 
 export function getProviderPreset(id: string): ProviderPreset | undefined {
+  if (id === DEMO_PRESET.id && isDemoMockEnabled()) return DEMO_PRESET;
   return loadCatalog().providers[id];
+}
+
+/**
+ * Demo provider for the video guide and screenshots. Only visible when
+ * DEMO_MOCK=1 is set. Streams scripted responses through MockProvider —
+ * no API keys, no network calls, zero cost. Never enable in production;
+ * the preset is clearly labeled "(mock)" in the UI.
+ */
+const DEMO_PRESET: ProviderPreset = {
+  id: 'demo',
+  name: 'Demo (mock — no API key)',
+  api: 'openai-compatible',
+  baseUrl: 'mock://demo',
+  envKey: 'DEMO_MOCK',
+  liveModels: false,
+  models: [{ id: 'demo-model', name: 'Demo model', default: true }],
+};
+
+/** True when the demo mock provider is enabled via DEMO_MOCK=1. */
+export function isDemoMockEnabled(): boolean {
+  return process.env.DEMO_MOCK === '1';
 }
 
 const CUSTOM_ID_PATTERN = /^custom-[a-z0-9][a-z0-9-]*$/;

@@ -6,9 +6,11 @@ import {
   getCustomProviderPreset,
   getDefaultModel,
   getProviderPreset,
+  isDemoMockEnabled,
   resolveApiKey,
   resolveBaseUrl,
 } from './catalog.js';
+import { MockProvider } from './mock.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 
 /**
@@ -21,6 +23,32 @@ import { OpenAICompatibleProvider } from './openai-compatible.js';
  * instead of attempting a request to an empty URL.
  */
 export function createProvider(providerId: string): LLMProvider {
+  // Demo mock provider for the video guide / screenshots (DEMO_MOCK=1 only).
+  // Scripted two-step turn: announce a file write, then confirm after the
+  // approval-gated tool call completes. Clearly labeled "(mock)" in the UI.
+  if (providerId === 'demo' && isDemoMockEnabled()) {
+    return new MockProvider([
+      {
+        content: "I'll create that note for you right now.",
+        toolCalls: [
+          {
+            id: 'call_demo_write_1',
+            name: 'write_file',
+            args: {
+              path: 'demo/hello-from-video.txt',
+              content:
+                'Hello from the all-in-one AI agent platform!\n\nThis file was written by the demo bot during the video guide recording.\n',
+            },
+          },
+        ],
+      },
+      {
+        content:
+          'Done — hello-from-video.txt is written to the workspace. Notice what just happened: the platform paused and asked for your approval before writing the file. That is deny-by-default governance in action — sensitive actions always wait for your OK, right here in the chat.',
+      },
+    ]);
+  }
+
   const preset = getProviderPreset(providerId) ?? getCustomProviderPreset(providerId);
   if (!preset) {
     throw new Error(
