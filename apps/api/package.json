@@ -1,0 +1,25 @@
+{
+  "dependencies": {
+    "@mvp/agent-runtime": "*",
+    "@mvp/governance": "*",
+    "@mvp/workflows": "*",
+    "cors": "^2.8.5",
+    "express": "^4.21.2"
+  },
+  "devDependencies": {
+    "@types/cors": "^2.8.17",
+    "@types/express": "^4.17.21",
+    "@types/node": "^22.7.5",
+    "typescript": "^5.6.3"
+  },
+  "license": "Apache-2.0",
+  "name": "@mvp/api",
+  "private": true,
+  "scripts": {
+    "build": "node ../../scripts/embed-web.mjs && node ../../scripts/embed-seed.mjs && tsc -p tsconfig.json",
+    "dev": "node ../../scripts/embed-web.mjs && node ../../scripts/embed-seed.mjs && bun --watch src/index.ts",
+    "start": "bun src/index.ts"
+  },
+  "version": "0.1.0",
+  "type": "module"
+}

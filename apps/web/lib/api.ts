@@ -1,0 +1,322 @@
+// SPDX-License-Identifier: Apache-2.0
+// Typed client for the MVP API. ALL API calls go through getApiBase() so one
+// frontend codebase works in three contexts:
+//  - Tauri desktop: window.__TAURI__ is present → http://127.0.0.1:4567
+//    (the sidecar API; CORS allows any origin in the MVP)
+//  - Local dev: NEXT_PUBLIC_API_URL (e.g. http://localhost:4000)
+//  - Docker/server: '' → same-origin (the API serves the frontend)
+
+export function getApiBase(): string {
+  if (typeof window !== 'undefined') {
+    const w = window as unknown as { __TAURI__?: unknown };
+    if (w.__TAURI__) return 'http://127.0.0.1:4567';
+  }
+  const env = process.env.NEXT_PUBLIC_API_URL;
+  if (env && env.length > 0) return env;
+  return '';
+}
+
+// ---- Shared types (mirror the API wire shapes) ----------------------------
+
+export interface BotConfig {
+  id: string;
+  name: string;
+  description: string;
+  systemPrompt: string;
+  provider: string;
+  model: string;
+  skills: string[];
+  tools: string[];
+  mcpServers: string[];
+}
+
+export interface ToolCall {
+  id: string;
+  name: string;
+  args: Record<string, unknown>;
+}
+
+export interface TokenUsage {
+  promptTokens: number;
+  completionTokens: number;
+  totalTokens: number;
+}
+
+export interface RateLimitSnapshot {
+  remainingRequests?: number;
+  limitRequests?: number;
+  remainingTokens?: number;
+  limitTokens?: number;
+  resetAt?: string;
+}
+
+export type StreamEvent =
+  | { type: 'token'; content: string }
+  | { type: 'tool_call'; call: ToolCall; approvalRequired: boolean; approvalId?: string }
+  | { type: 'tool_result'; call: ToolCall; result: unknown; denied?: boolean }
+  | { type: 'done'; usage: TokenUsage | null }
+  | { type: 'error'; message: string }
+  | { type: 'approval_required'; approvalId: string; call: ToolCall };
+
+export interface ApprovalRecord {
+  id: string;
+  ts: number;
+  sessionId: string;
+  botId: string;
+  actor: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  decidedAt?: number;
+  decidedBy?: string;
+  note?: string;
+}
+
+export interface AuditEntry {
+  id: number;
+  ts: number;
+  actor: string;
+  sessionId?: string;
+  action: string;
+  toolName?: string;
+  decision?: string;
+  detail?: string;
+}
+
+export interface ModelInfo {
+  id: string;
+  name: string;
+  contextLength?: number;
+}
+
+export interface ProviderInfo {
+  id: string;
+  name: string;
+  api: string;
+  configured: boolean;
+  models: ModelInfo[];
+  /** Latest rate-limit/quota snapshot from response headers (null when unknown). */
+  rateLimit: RateLimitSnapshot | null;
+  /** Subscription/CLI bridge: 'claude' | 'codex'. Set only on bridge presets. */
+  bridge?: 'claude' | 'codex';
+  /** Bridge only: a matching CLI or credential file was detected on this machine. */
+  detected?: boolean;
+  /** Bridge only: Connect consent granted (token readable in memory). */
+  connected?: boolean;
+}
+
+export interface WorkflowNodeDef {
+  id: string;
+  type: string;
+  name: string;
+  config: Record<string, unknown>;
+}
+
+export interface WorkflowDefinition {
+  id: string;
+  name: string;
+  description?: string;
+  nodes: WorkflowNodeDef[];
+  edges: [string, string][];
+}
+
+export interface NodeState {
+  status: 'pending' | 'running' | 'succeeded' | 'failed' | 'paused' | 'skipped';
+  output?: unknown;
+  error?: string;
+  startedAt?: number;
+  endedAt?: number;
+  approvalId?: string;
+}
+
+export interface WorkflowRun {
+  id: string;
+  workflowId: string;
+  status: 'running' | 'paused' | 'succeeded' | 'failed';
+  nodeStates: Record<string, NodeState>;
+  input: unknown;
+  idempotencyKey?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
+export interface PreviewResult {
+  verdict: 'ready' | 'warning' | 'blocked';
+  bot: string;
+  provider: string;
+  model: string;
+  keyConfigured: boolean;
+  skills: string[];
+  tools: Array<{ name: string; effect: string }>;
+  mcpServers: string[];
+  nextActions: string[];
+}
+
+// ---- Fetch helpers ----------------------------------------------------------
+
+async function apiFetch(path: string, init?: RequestInit): Promise<Response> {
+  const res = await fetch(`${getApiBase()}${path}`, init);
+  return res;
+}
+
+async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await apiFetch(path, init);
+  if (!res.ok) {
+    let detail = '';
+    try {
+      const body = (await res.json()) as { error?: string };
+      detail = body.error ?? '';
+    } catch {
+      // ignore
+    }
+    throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
+
+export const getBots = (): Promise<BotConfig[]> => apiJson('/api/bots');
+export const getProviders = (): Promise<ProviderInfo[]> => apiJson('/api/providers');
+
+export function getApprovals(status?: string): Promise<ApprovalRecord[]> {
+  const q = status ? `?status=${encodeURIComponent(status)}` : '';
+  return apiJson(`/api/approvals${q}`);
+}
+
+export function decideApproval(
+  id: string,
+  decision: 'approved' | 'denied',
+  note?: string,
+): Promise<ApprovalRecord> {
+  return apiJson(`/api/approvals/${encodeURIComponent(id)}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ decision, note }),
+  });
+}
+
+export function getAudit(limit = 100): Promise<AuditEntry[]> {
+  return apiJson(`/api/audit?limit=${limit}`);
+}
+
+export function saveProviderKey(
+  providerId: string,
+  apiKey: string,
+  baseUrl?: string,
+  headers?: Record<string, string>,
+): Promise<{ ok: boolean }> {
+  return apiJson('/api/providers/keys', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ providerId, apiKey, baseUrl, headers }),
+  });
+}
+
+export function removeProviderKey(providerId: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/providers/keys/${encodeURIComponent(providerId)}`, { method: 'DELETE' });
+}
+
+export function connectBridge(bridgeId: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/providers/bridges/${encodeURIComponent(bridgeId)}/connect`, {
+    method: 'POST',
+  });
+}
+
+export function disconnectBridge(bridgeId: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/providers/bridges/${encodeURIComponent(bridgeId)}/disconnect`, {
+    method: 'DELETE',
+  });
+}
+
+export const getWorkflows = (): Promise<WorkflowDefinition[]> => apiJson('/api/workflows');
+
+export function runWorkflow(
+  id: string,
+  input?: unknown,
+  idempotencyKey?: string,
+): Promise<{ runId: string }> {
+  return apiJson(`/api/workflows/${encodeURIComponent(id)}/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ input, idempotencyKey }),
+  });
+}
+
+export const getRuns = (): Promise<WorkflowRun[]> => apiJson('/api/workflows/runs');
+export const getRun = (runId: string): Promise<WorkflowRun> =>
+  apiJson(`/api/workflows/runs/${encodeURIComponent(runId)}`);
+
+export function dryRun(botId: string, message: string): Promise<PreviewResult> {
+  return apiJson('/api/dry-run', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ botId, message }),
+  });
+}
+
+// ---- SSE --------------------------------------------------------------------
+
+export interface ChatRequest {
+  botId: string;
+  message: string;
+  sessionId?: string;
+  provider?: string;
+  model?: string;
+}
+
+/** POST /api/chat and yield each SSE `data:` payload as a parsed StreamEvent. */
+export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent> {
+  const res = await apiFetch('/api/chat', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok || !res.body) {
+    let detail = '';
+    try {
+      detail = ((await res.json()) as { error?: string }).error ?? '';
+    } catch {
+      // ignore
+    }
+    throw new Error(`Chat failed (${res.status}): ${detail || res.statusText}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const chunks = buf.split('\n\n');
+    buf = chunks.pop() ?? '';
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('data: ')) {
+          yield JSON.parse(line.slice('data: '.length)) as StreamEvent;
+        }
+      }
+    }
+  }
+}
+
+/** SSE of workflow run updates for one run. */
+export async function* streamRunUpdates(runId: string): AsyncGenerator<WorkflowRun> {
+  const res = await apiFetch(`/api/workflows/runs/${encodeURIComponent(runId)}/stream`);
+  if (!res.ok || !res.body) throw new Error(`Run stream failed (${res.status})`);
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    const chunks = buf.split('\n\n');
+    buf = chunks.pop() ?? '';
+    for (const chunk of chunks) {
+      for (const line of chunk.split('\n')) {
+        if (line.startsWith('data: ')) {
+          yield JSON.parse(line.slice('data: '.length)) as WorkflowRun;
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,65 @@
+// SPDX-License-Identifier: Apache-2.0
+
+import type {
+  ChatMessage,
+  LLMProvider,
+  ModelInfo,
+  TokenUsage,
+  ToolCall,
+  ToolDefinition,
+} from '../types.js';
+
+export interface MockStep {
+  content?: string;
+  toolCalls?: ToolCall[];
+  usage?: TokenUsage;
+}
+
+const DEFAULT_USAGE: TokenUsage = { promptTokens: 10, completionTokens: 5, totalTokens: 15 };
+
+/**
+ * Scripted provider for tests. Each chat() call consumes the next step
+ * (the last step repeats), streaming content word-by-word through onToken.
+ */
+export class MockProvider implements LLMProvider {
+  readonly providerId = 'mock';
+  private readonly steps: MockStep[];
+  private cursor = 0;
+  /** Every chat() invocation, in order — handy for assertions. */
+  readonly calls: Array<{ messages: ChatMessage[]; model: string }> = [];
+
+  constructor(steps: MockStep[]) {
+    if (steps.length === 0) throw new Error('MockProvider needs at least one scripted step');
+    this.steps = steps;
+  }
+
+  async chat(
+    messages: ChatMessage[],
+    _tools: ToolDefinition[],
+    opts: { model: string; onToken?: (t: string) => void; signal?: AbortSignal },
+  ): Promise<{ content: string; toolCalls: ToolCall[]; usage: TokenUsage }> {
+    this.calls.push({ messages, model: opts.model });
+    const step = this.steps[Math.min(this.cursor, this.steps.length - 1)];
+    this.cursor += 1;
+    const content = step.content ?? '';
+    if (opts.onToken && content) {
+      for (const word of content.split(/(\s+)/)) {
+        if (word) opts.onToken(word);
+      }
+    }
+    return {
+      content,
+      toolCalls: step.toolCalls ?? [],
+      usage: step.usage ?? { ...DEFAULT_USAGE },
+    };
+  }
+
+  async listModels(): Promise<ModelInfo[]> {
+    return [{ id: 'mock-model', name: 'Mock Model' }];
+  }
+}
+
+/** Convenience: build a scripted turn of [tool call…] then a final answer. */
+export function scriptedBotTurn(toolCalls: ToolCall[], finalContent: string): MockStep[] {
+  return [{ toolCalls }, { content: finalContent }];
+}

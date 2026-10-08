@@ -1,0 +1,138 @@
+{
+  "providers": {
+    "anthropic": {
+      "api": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "envKey": "ANTHROPIC_API_KEY",
+      "id": "anthropic",
+      "models": [
+        {
+          "default": true,
+          "id": "claude-3-5-sonnet-latest",
+          "name": "Claude 3.5 Sonnet",
+          "contextLength": 200000
+        },
+        {
+          "id": "claude-3-5-haiku-latest",
+          "name": "Claude 3.5 Haiku",
+          "contextLength": 200000
+        }
+      ],
+      "name": "Anthropic"
+    },
+    "groq": {
+      "api": "openai-compatible",
+      "baseUrl": "https://api.groq.com/openai/v1",
+      "envKey": "GROQ_API_KEY",
+      "id": "groq",
+      "models": [
+        {
+          "default": true,
+          "id": "gpt-oss-120b",
+          "name": "GPT-OSS 120B",
+          "contextLength": 131072
+        },
+        {
+          "id": "gpt-oss-20b",
+          "name": "GPT-OSS 20B",
+          "contextLength": 131072
+        },
+        {
+          "id": "groq/compound",
+          "name": "Groq Compound",
+          "contextLength": 131072
+        },
+        {
+          "id": "groq/compound-mini",
+          "name": "Groq Compound Mini",
+          "contextLength": 131072
+        }
+      ],
+      "name": "Groq"
+    },
+    "omnirush": {
+      "api": "openai-compatible",
+      "baseUrl": "",
+      "byo": true,
+      "envKey": "OMNIRUSH_API_KEY",
+      "id": "omnirush",
+      "liveModels": false,
+      "models": [],
+      "name": "OmniRush (bring your own)",
+      "notes": "Bring-your-own preset. Paste YOUR OWN OmniRush API key/token from your own OmniRush account \u2014 never a shared or pooled key. Set the base URL from your OmniRush app/account; no endpoint is pre-configured."
+    },
+    "openai": {
+      "api": "openai-compatible",
+      "baseUrl": "https://api.openai.com/v1",
+      "envKey": "OPENAI_API_KEY",
+      "id": "openai",
+      "models": [
+        {
+          "default": true,
+          "id": "gpt-4o-mini",
+          "name": "GPT-4o mini",
+          "contextLength": 128000
+        },
+        {
+          "id": "gpt-4o",
+          "name": "GPT-4o",
+          "contextLength": 128000
+        }
+      ],
+      "name": "OpenAI"
+    },
+    "openrouter": {
+      "api": "openai-compatible",
+      "baseUrl": "https://openrouter.ai/api/v1",
+      "envKey": "OPENROUTER_API_KEY",
+      "extraHeaders": {
+        "HTTP-Referer": "https://localhost",
+        "X-Title": "MVP All-in-One AI Agent Platform"
+      },
+      "id": "openrouter",
+      "liveModels": true,
+      "models": [],
+      "name": "OpenRouter"
+    },
+    "claude-subscription": {
+      "id": "claude-subscription",
+      "name": "Claude subscription (Claude Code login)",
+      "api": "anthropic",
+      "baseUrl": "https://api.anthropic.com/v1",
+      "envKey": "CLAUDE_SUBSCRIPTION_TOKEN",
+      "bridge": "claude",
+      "models": [
+        {
+          "id": "claude-sonnet-4-5",
+          "name": "Claude Sonnet 4.5",
+          "default": true
+        },
+        {
+          "id": "claude-haiku-4-5",
+          "name": "Claude Haiku 4.5"
+        }
+      ],
+      "notes": "Uses YOUR Claude Code CLI login (~/.claude/.credentials.json) \u2014 no API key needed. Shown only when the CLI is detected; requires your explicit Connect consent. Token is read at request time and never stored or logged."
+    },
+    "codex-subscription": {
+      "id": "codex-subscription",
+      "name": "ChatGPT subscription (Codex CLI login)",
+      "api": "openai-compatible",
+      "baseUrl": "https://api.openai.com/v1",
+      "envKey": "CODEX_SUBSCRIPTION_TOKEN",
+      "bridge": "codex",
+      "models": [
+        {
+          "id": "gpt-5",
+          "name": "GPT-5",
+          "default": true
+        },
+        {
+          "id": "gpt-5-mini",
+          "name": "GPT-5 mini"
+        }
+      ],
+      "notes": "Uses YOUR Codex CLI login (~/.codex/auth.json) \u2014 no API key needed. Shown only when the CLI is detected; requires your explicit Connect consent. Token is read at request time and never stored or logged."
+    }
+  }
+}

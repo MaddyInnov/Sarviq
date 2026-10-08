@@ -1,0 +1,24 @@
+# SPDX-License-Identifier: Apache-2.0
+# SECONDARY deployment path: hosted/server. The primary end-user distribution
+# is the Tauri desktop app (see scripts/build-desktop.sh) — a real .exe/AppImage
+# with its own built-in UI. This compose file is for running the platform as a
+# server (browser opens the served UI) or for self-hosting.
+services:
+  app:
+    build:
+      context: .
+      dockerfile: apps/api/Dockerfile
+    ports:
+      - "${PORT:-4000}:4000"
+    env_file:
+      - .env
+    environment:
+      PORT: "4000"
+      DATA_DIR: /data
+      SEED_DIR: /app/seed
+    volumes:
+      - mvp-data:/data
+    restart: unless-stopped
+
+volumes:
+  mvp-data:

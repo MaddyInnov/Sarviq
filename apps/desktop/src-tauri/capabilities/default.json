@@ -1,0 +1,1 @@
+{"$schema":"../gen/schemas/desktop-schema.json","description":"Default capabilities for the Muse desktop app","identifier":"default","permissions":["core:default",{"allow":[{"args":true,"cmd":"$RESOURCE/binaries/mvp-api*","name":"mvp-api"}],"identifier":"shell:allow-spawn"}],"windows":["main"]}

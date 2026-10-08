@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.js
+
+# Build outputs
+dist/
+.next/
+out/
+build/
+
+# Tauri / Rust
+target/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/binaries/
+
+# Runtime data (SQLite, local state)
+data/
+*.db
+*.db-journal
+*.sqlite
+*.sqlite-journal
+
+# Secrets & local config
+.env
+.env.local
+.env.*.local
+providers.local.json
+.machine-key
+*.pem
+*.key
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Editor
+.vscode/
+.idea/
+*.swp

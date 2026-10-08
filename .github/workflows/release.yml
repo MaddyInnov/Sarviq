@@ -1,0 +1,89 @@
+# SPDX-License-Identifier: Apache-2.0
+# Release pipeline — triggered by pushing a tag like v0.1.0:
+#   git tag v0.1.0 && git push origin v0.1.0
+# Builds the Tauri desktop app per OS (Windows .exe via NSIS, Linux AppImage + .deb)
+# and the standalone mvp-server binary, then attaches everything to a DRAFT
+# GitHub Release for review before publishing.
+name: Release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  server-binary:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+
+      - run: npm ci
+      - run: bash scripts/build-server-binary.sh --target bun-linux-x64
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mvp-server-linux-x64
+          path: dist/mvp-server
+          if-no-files-found: error
+
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            sidecar-target: bun-linux-x64
+            sidecar-name: mvp-api-x86_64-unknown-linux-gnu
+          - os: windows-latest
+            sidecar-target: bun-windows-x64
+            sidecar-name: mvp-api-x86_64-pc-windows-msvc.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - uses: oven-sh/setup-bun@v2
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux Tauri deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libwebkit2gtk-4.1-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf
+
+      - run: npm ci
+
+      - name: Compile API sidecar for this OS
+        shell: bash
+        run: |
+          mkdir -p apps/desktop/src-tauri/binaries
+          bun build --compile --target=${{ matrix.sidecar-target }} \
+            apps/api/src/index.ts \
+            --outfile apps/desktop/src-tauri/binaries/${{ matrix.sidecar-name }}
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: 'Muse ${{ github.ref_name }}'
+          releaseBody: |
+            Desktop app installers (Windows .exe, Linux AppImage + .deb) and the
+            standalone mvp-server binary. Desktop builds are DRAFT releases —
+            review before publishing.
+          releaseDraft: true
+          prerelease: false

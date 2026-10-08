@@ -1,0 +1,26 @@
+{
+  "description": "MVP of the all-in-one AI agent SaaS platform: Groq-powered bots, tool use, approval-gated actions, workflows, audit.",
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "license": "Apache-2.0",
+  "name": "mvp-all-in-one-ai-agent-platform",
+  "private": true,
+  "scripts": {
+    "build": "npm run build --workspace=@mvp/governance && npm run build --workspace=@mvp/agent-runtime && npm run build --workspace=@mvp/workflows && npm run build --workspace=@mvp/web && npm run build --workspace=@mvp/api",
+    "dev": "npm run dev --workspace=@mvp/api & npm run dev --workspace=@mvp/web",
+    "dev:api": "npm run dev --workspace=@mvp/api",
+    "dev:web": "npm run dev --workspace=@mvp/web",
+    "test": "npm run test --workspaces --if-present",
+    "build:binary": "bash scripts/build-server-binary.sh",
+    "build:desktop-binaries": "bash scripts/build-desktop.sh"
+  },
+  "version": "0.1.0",
+  "workspaces": [
+    "packages/*",
+    "apps/*"
+  ]
+}
