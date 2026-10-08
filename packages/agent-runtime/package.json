@@ -2,6 +2,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.7.0",
     "@mvp/governance": "*",
+    "e2b": "^2.53.1",
     "gray-matter": "^4.0.3"
   },
   "devDependencies": {

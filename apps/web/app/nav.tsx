@@ -11,6 +11,9 @@ const LINKS = [
   { href: '/bots', label: 'Bots' },
   { href: '/approvals', label: 'Approvals' },
   { href: '/workflows', label: 'Workflows' },
+  { href: '/workflows/canvas', label: 'Canvas' },
+  { href: '/notes', label: 'Notes' },
+  { href: '/tasks', label: 'Tasks' },
   { href: '/audit', label: 'Audit' },
   { href: '/providers', label: 'Providers' },
 ];

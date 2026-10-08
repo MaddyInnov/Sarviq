@@ -19,5 +19,7 @@ jobs:
           cache: npm
 
       - run: npm ci
-      - run: npm test
+      # Build before test: the api workspace imports @mvp/*/dist/*,
+      # so compiled output must exist before vitest runs.
       - run: npm run build
+      - run: npm test

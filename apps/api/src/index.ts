@@ -33,6 +33,10 @@ import { createRouter } from './routes.js';
 import { createWebhookRouter } from './webhooks.js';
 import { mountWebAssets } from './web-assets.js';
 import { runChatCli } from './cli.js';
+// Phase 3: scheduled workflows create tasks; the platform also serves its
+// own tools as an MCP server (two-way MCP).
+import { makeTaskCreator } from './tasks.js';
+import { PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime';
 
 // Pipe/JSON chat mode: `mvp-server chat --bot <id> [--json]`. Parsed at the
 // very top, before boot(), so `chat` never starts the HTTP server.
@@ -59,6 +63,44 @@ function resolveSeedDir(configured: string): string {
   }
   console.log(`[seed] SEED_DIR not found — extracted ${entries.length} embedded seed file(s) to ${dir}`);
   return dir;
+}
+
+/**
+ * Phase 3: build the platform's own MCP server (two-way MCP) over the real
+ * tool registry. External clients (Claude Code, etc.) can list/call our
+ * tools and chat with a bot; the governance approval policy still applies —
+ * require-approval tools never execute silently (see mcp-server.ts).
+ */
+function buildPlatformMcpServer(opts: {
+  toolRegistry: Map<string, import('@mvp/agent-runtime').ToolDefinition>;
+  /** The GovernanceAdapter (runtime governance surface), not the raw gateway. */
+  governance: import('@mvp/agent-runtime').GovernanceGateway;
+  agentRuntime: AgentRuntime;
+  bots: BotConfig[];
+}): PlatformMcpServer {
+  const fallbackBot = opts.bots[0];
+  return new PlatformMcpServer({
+    tools: toolProviderFromRegistry(opts.toolRegistry),
+    governance: opts.governance,
+    botId: 'mcp-gateway',
+    chat: fallbackBot
+      ? {
+          description: `Chat with the "${fallbackBot.id}" bot (one turn).`,
+          handler: async (message: string) => {
+            let content = '';
+            await opts.agentRuntime.runTurn({
+              bot: fallbackBot,
+              message: String(message),
+              taskType: 'chat',
+              onEvent: (e) => {
+                if (e.type === 'token' && typeof e.content === 'string') content += e.content;
+              },
+            });
+            return content;
+          },
+        }
+      : undefined,
+  });
 }
 
 async function boot(): Promise<void> {
@@ -174,6 +216,20 @@ async function boot(): Promise<void> {
     }
   });
 
+  // Phase 3: two-way MCP over stdio — serve the platform's tools to an
+  // external MCP client on stdin/stdout instead of starting HTTP.
+  // Usage: mvp-server --mcp-stdio
+  if (process.argv.includes('--mcp-stdio')) {
+    const mcpServer = buildPlatformMcpServer({
+      toolRegistry,
+      governance: governanceAdapter,
+      agentRuntime,
+      bots: seed.bots,
+    });
+    await mcpServer.serveStdio();
+    return;
+  }
+
   // Phase 2: crash-resume — incomplete runs from a previous (crashed)
   // process resume from their last checkpoint before anything new fires.
   // Then start the trigger scheduler (cron) and mount webhook triggers.
@@ -183,7 +239,39 @@ async function boot(): Promise<void> {
   }
   const triggerStore = new TriggerStore(path.join(config.dataDir, 'triggers.db'));
   const scheduler = new Scheduler();
-  scheduler.start(workflowRunner, triggerStore);
+  // Phase 3: every scheduled workflow run leaves a task so the user can see
+  // what ran and when (wired via the tasks module; failures never break the
+  // scheduler tick).
+  const createTask = makeTaskCreator({ dataDir: config.dataDir });
+  scheduler.start(workflowRunner, triggerStore, (trigger, runId) => {
+    try {
+      createTask({
+        title: `Scheduled workflow ran: ${trigger.workflowId}`,
+        notes: `Trigger ${trigger.id} (${trigger.kind}) fired — run ${runId}.`,
+        dueAt: null,
+      });
+    } catch (err) {
+      console.error(
+        `[tasks] failed to record scheduled run ${runId}:`,
+        err instanceof Error ? err.message : err,
+      );
+    }
+  });
+
+  // Phase 3: two-way MCP over HTTP+SSE on a separate port when configured.
+  // External clients connect to http://127.0.0.1:<port>/sse.
+  let mcpServer: PlatformMcpServer | undefined;
+  const mcpPort = Number(process.env.MCP_SERVER_PORT ?? 0);
+  if (Number.isFinite(mcpPort) && mcpPort > 0) {
+    mcpServer = buildPlatformMcpServer({
+      toolRegistry,
+      governance: governanceAdapter,
+      agentRuntime,
+      bots: seed.bots,
+    });
+    const { url } = await mcpServer.serveHttp({ port: mcpPort });
+    console.log(`[mcp] platform MCP server on ${url}`);
+  }
 
   // 4. HTTP layer. API routes first, then the frontend.
   const app = express();
@@ -204,6 +292,7 @@ async function boot(): Promise<void> {
       governanceAdapter,
       workflowRunner,
       mcpConnections,
+      mcpServer,
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).

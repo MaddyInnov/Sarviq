@@ -5,6 +5,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { ToolContext, ToolDefinition } from '../types.js';
+import { executeSandboxedCommand, sandboxBackend } from './sandbox.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -82,7 +83,11 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
   return {
     name: 'run_command',
     description:
-      'Run a shell command (sh -c) with the workspace as cwd. Destructive patterns are refused. ' +
+      'Run a shell command (sh -c). Destructive patterns are refused. ' +
+      'Executes inside an E2B cloud sandbox when E2B_API_KEY is set, else a local Docker container ' +
+      '(isolated: no workspace files, no network by default); ' +
+      'falls back to host execution with the workspace as cwd only when no sandbox backend is available ' +
+      '(result carries sandboxed:false). ' +
       'Stdout/stderr are truncated to 8KB.',
     parameters: {
       type: 'object',
@@ -104,6 +109,23 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
         typeof args.timeoutMs === 'number' && args.timeoutMs > 0
           ? Math.min(args.timeoutMs, 120_000)
           : DEFAULT_COMMAND_TIMEOUT_MS;
+      // Phase 3: prefer the sandboxed backend (E2B cloud, else Docker).
+      // Host execution remains only as a last resort so the tool keeps
+      // working on machines with neither; the result is flagged.
+      if (sandboxBackend() !== 'none') {
+        const result = await executeSandboxedCommand(command, {
+          timeoutMs,
+          maxOutputBytes: MAX_OUTPUT_BYTES * 4,
+        });
+        return {
+          exitCode: result.exitCode,
+          timedOut: result.timedOut ?? false,
+          stdout: truncate(result.stdout, MAX_OUTPUT_BYTES),
+          stderr: truncate(result.stderr, MAX_OUTPUT_BYTES),
+          sandboxed: true,
+          backend: sandboxBackend(),
+        };
+      }
       try {
         const { stdout, stderr } = await execFileAsync('sh', ['-c', command], {
           cwd: workspaceDir,
@@ -115,6 +137,7 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
           exitCode: 0,
           stdout: truncate(stdout, MAX_OUTPUT_BYTES),
           stderr: truncate(stderr, MAX_OUTPUT_BYTES),
+          sandboxed: false,
         };
       } catch (err) {
         const e = err as {
@@ -130,12 +153,14 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
             timedOut: true,
             stdout: truncate(e.stdout ?? '', MAX_OUTPUT_BYTES),
             stderr: truncate(e.stderr ?? '', MAX_OUTPUT_BYTES),
+            sandboxed: false,
           };
         }
         return {
           exitCode: typeof e.code === 'number' ? e.code : 1,
           stdout: truncate(e.stdout ?? '', MAX_OUTPUT_BYTES),
           stderr: truncate(e.stderr ?? e.message ?? '', MAX_OUTPUT_BYTES),
+          sandboxed: false,
         };
       }
     },

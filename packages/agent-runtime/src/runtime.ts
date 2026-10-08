@@ -23,6 +23,8 @@ import {
 import { SessionStore } from './sessions.js';
 import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
+import { routeModel } from './routing.js';
+import type { TaskType } from './routing.js';
 
 export interface AgentRuntimeOptions {
   dbPath: string;
@@ -45,6 +47,12 @@ export interface RunTurnOptions {
   sessionId?: string;
   providerId?: string;
   model?: string;
+  /**
+   * Task type for smart model routing (Phase 3). Only consulted when no
+   * model is pinned at the call site or on the bot — then the router picks
+   * the cheapest capable model for this task type. Defaults to 'chat'.
+   */
+  taskType?: TaskType;
   onEvent: (e: StreamEvent) => void | Promise<void>;
   maxIterations?: number;
   approvalTimeoutMs?: number;
@@ -195,8 +203,27 @@ export class AgentRuntime {
   }
 
   async runTurn(opts: RunTurnOptions): Promise<TokenUsage> {
-    const providerId = opts.providerId ?? opts.bot.provider ?? this.defaultProviderId;
-    const model = opts.model ?? opts.bot.model ?? getDefaultModel(providerId) ?? 'default';
+    // Model resolution (Phase 3 smart routing):
+    // 1. Call-site providerId/model always win outright.
+    // 2. A bot-pinned model wins (user override per bot).
+    // 3. Otherwise the router picks the cheapest capable model for the task
+    //    type, scoped to the bot's provider when the bot pins one.
+    let providerId: string;
+    let model: string;
+    if (opts.providerId !== undefined || opts.model !== undefined) {
+      providerId = opts.providerId ?? opts.bot.provider ?? this.defaultProviderId;
+      model = opts.model ?? opts.bot.model ?? getDefaultModel(providerId) ?? 'default';
+    } else if (opts.bot.model) {
+      providerId = opts.bot.provider ?? this.defaultProviderId;
+      model = opts.bot.model;
+    } else {
+      const routed = routeModel({
+        taskType: opts.taskType ?? 'chat',
+        providerHint: opts.bot.provider,
+      });
+      providerId = routed.providerId;
+      model = routed.modelId;
+    }
     // FREE_MODELS_ONLY fail-closed guard: when the env var is '1'/'true',
     // non-free models are rejected before any provider is touched. This is
     // the single choke point both the API chat route and the CLI pipe mode

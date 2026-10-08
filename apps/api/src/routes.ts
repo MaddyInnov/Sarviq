@@ -20,6 +20,11 @@ import type { AppConfig } from './config.js';
 import type { GovernanceAdapter } from './governance-adapter.js';
 import type { McpConnection } from './tool-registry.js';
 import { saveBotPolicy } from './bot-policies.js';
+// Phase 3: connected apps (OAuth), messaging gateway, notes, tasks/calendar.
+import { registerOAuthRoutes } from './oauth.js';
+import { registerMessagingRoutes } from './messaging.js';
+import { registerNotesRoutes } from './notes.js';
+import { registerTasksRoutes } from './tasks.js';
 import {
   connectBridge,
   disconnectBridge,
@@ -47,6 +52,12 @@ export interface RouteDeps {
   governanceAdapter: GovernanceAdapter;
   workflowRunner: WorkflowRunner;
   mcpConnections: McpConnection[];
+  /**
+   * Phase 3: two-way MCP server bridge (set by index.ts when MCP_SERVER_PORT
+   * is configured). Lets the approvals inbox close the loop on approvals
+   * that originated from external MCP clients.
+   */
+  mcpServer?: { decideApproval(approvalId: string, decision: 'approved' | 'denied'): void };
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -84,11 +95,6 @@ function sseHeaders(res: express.Response): void {
 }
 
 /** Normalize an optional model override: empty string falls back to undefined. */
-function normalizeModel(explicit: unknown, botModel: string): string | undefined {
-  const m = typeof explicit === 'string' && explicit.trim() ? explicit.trim() : botModel.trim();
-  return m ? m : undefined;
-}
-
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
   const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner } = deps;
@@ -198,12 +204,21 @@ export function createRouter(deps: RouteDeps): express.Router {
     };
 
     try {
+      // Phase 3: pass the RAW explicit values (no bot-default merging here).
+      // runTurn applies bot defaults, then smart model routing when nothing
+      // is pinned; taskType selects the routing profile.
+      const rawTaskType = body.taskType;
+      const taskType =
+        rawTaskType === 'code' || rawTaskType === 'chat' || rawTaskType === 'reasoning' || rawTaskType === 'simple-qa'
+          ? rawTaskType
+          : undefined;
       await agentRuntime.runTurn({
         bot,
         message: body.message,
         sessionId: body.sessionId,
-        providerId: body.provider ?? bot.provider,
-        model: normalizeModel(body.model, bot.model),
+        providerId: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
+        model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+        taskType,
         onEvent,
       });
       // The runtime should emit done/error itself; emit a terminal event only
@@ -258,6 +273,17 @@ export function createRouter(deps: RouteDeps): express.Router {
         return;
       }
       const decided = governance.decide(realId, body.decision, { note: body.note });
+      // Phase 3: close the loop for approvals that originated from external
+      // MCP clients — the platform MCP server holds the pending call and
+      // mints the single-use grant on decision.
+      if (deps.mcpServer) {
+        try {
+          deps.mcpServer.decideApproval(realId, body.decision);
+        } catch {
+          // The approval wasn't an MCP-server one (or was already consumed);
+          // the gateway decision above is authoritative.
+        }
+      }
       res.json(decided);
     } catch (err) {
       res.status(500).json(errorBody('Failed to decide approval', err instanceof Error ? err.message : String(err)));
@@ -523,6 +549,20 @@ export function createRouter(deps: RouteDeps): express.Router {
       res.status(500).json(errorBody('Dry run failed', err instanceof Error ? err.message : String(err)));
     }
   });
+
+  // ---- Phase 3: connected apps (OAuth) + messaging gateway ---------------
+  // Both modules register relative paths on the main router, so they land
+  // under /api/oauth/... and /api/messaging/....
+  registerOAuthRoutes(router, { config, governance });
+  registerMessagingRoutes(router, { config, governance });
+
+  // ---- Phase 3: user notes + tasks/calendar ------------------------------
+  // Notes live on a sub-router mounted at /api/notes; tasks registers
+  // /api/tasks and /api/events on the main router itself.
+  const notesRouter = express.Router();
+  registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
+  router.use('/notes', notesRouter);
+  registerTasksRoutes(router, { dataDir: config.dataDir });
 
   return router;
 }

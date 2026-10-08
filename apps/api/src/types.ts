@@ -14,6 +14,8 @@ export interface ChatRequestBody {
   sessionId?: string;
   provider?: string;
   model?: string;
+  /** Task type for Phase 3 smart model routing (only used when no model is pinned). */
+  taskType?: 'code' | 'chat' | 'reasoning' | 'simple-qa';
 }
 
 export interface DecideApprovalBody {
