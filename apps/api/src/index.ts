@@ -341,6 +341,49 @@ async function boot(): Promise<void> {
     // Runtime telemetry: one guarded record per workflow run + per-node steps.
     telemetry,
   });
+
+  // Companion app (phone → PC remote control). The hub is created here (not
+  // in routes.ts) so the WebSocket upgrade handler below shares the same
+  // instance as the REST routes. Approval lifecycle events raised anywhere
+  // (web chat, workflows, MCP) are pushed live to connected phones; the app
+  // refetches the full list on push.
+  const { CompanionStore, CompanionHub } = await import('./companion.js');
+  const companionStore = new CompanionStore(config.dataDir);
+  // CompanionHub is a value here (dynamic import); name its instance type.
+  let companionHub!: InstanceType<typeof CompanionHub>;
+  companionHub = new CompanionHub(
+    companionStore,
+    (action, fields) => {
+      governance.audit(action, fields);
+      try {
+        if (action === 'approval.created' || action === 'approval.decided') {
+          companionHub.broadcast({
+            type: 'approval',
+            event: action === 'approval.created' ? 'created' : 'decided',
+            approval: {},
+          });
+        } else if (action.startsWith('companion.')) {
+          companionHub.broadcast({ type: 'activity', summary: action });
+        }
+      } catch {
+        // Pushes must never break auditing.
+      }
+    },
+    {
+      snapshot: () => {
+        try {
+          return {
+            pendingApprovals: governance.listApprovals('pending').length,
+            activeRuns: workflowRunner
+              .listRuns()
+              .filter((r) => r.status === 'running' || r.status === 'paused').length,
+          };
+        } catch {
+          return {};
+        }
+      },
+    },
+  );
   // Run health scoring + regression detection (features #2/#5): persisted
   // scores and metric samples in <dataDir>/run-health.db.
   const { RunHealthStore } = await import('@mvp/run-health');
@@ -558,6 +601,7 @@ async function boot(): Promise<void> {
       dotStore,
       preferenceStore,
       phone: { store: phoneStore, hub: phoneHub, adb: phoneAdb },
+      companion: { store: companionStore, hub: companionHub },
       recordingStore,
       chatQueueStore,
       mcpServers: seed.mcpServers,
@@ -611,11 +655,15 @@ async function boot(): Promise<void> {
 
   // Remote-phone control: WebSocket endpoint for live sessions at
   // /api/phone/ws (REST routes live under /api/phone via routes.ts).
-  // Unknown upgrade paths are destroyed so nothing else hijacks upgrades.
+  // Companion app: push channel at /api/companion/ws (REST under
+  // /api/companion). Unknown upgrade paths are destroyed so nothing else
+  // hijacks upgrades.
   server.on('upgrade', (req, socket, head) => {
     const path = req.url?.split('?')[0];
     if (path === '/api/phone/ws') {
       phoneHub.handleUpgrade(req, socket, head);
+    } else if (path === '/api/companion/ws') {
+      companionHub.handleUpgrade(req, socket, head);
     } else {
       socket.destroy();
     }

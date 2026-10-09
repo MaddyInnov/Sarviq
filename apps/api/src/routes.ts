@@ -63,6 +63,8 @@ import { registerSpaceRoutes, resolveSpaceForRun, SpaceHttpError, type SpaceRunC
 import { registerPhoneRoutes } from './phone-routes.js';
 import type { AdbPhoneProvider } from './phone-adb.js';
 import type { PhoneSessionHub, PhoneStore } from './phone.js';
+import { getLanIp, registerCompanionRoutes } from './companion-routes.js';
+import type { CompanionHub, CompanionStore } from './companion.js';
 import { TieredMemoryStore } from '@mvp/agent-runtime';
 import { PERSONAS, MBTI_TYPES, QUIZ_QUESTIONS, scoreQuiz, resolvePersona } from '@mvp/agent-runtime';
 import { saveBotPersona } from './bot-personas.js';
@@ -160,6 +162,15 @@ export interface RouteDeps {
     hub: PhoneSessionHub;
     adb: AdbPhoneProvider;
   };
+  /**
+   * Companion app module (phone → PC remote control). Created by index.ts
+   * so the WebSocket upgrade handler shares the same hub instance as the
+   * REST routes. Optional: omitted in tests that don't exercise companion.
+   */
+  companion?: {
+    store: CompanionStore;
+    hub: CompanionHub;
+  };
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -212,7 +223,11 @@ export function createRouter(deps: RouteDeps): express.Router {
   // per session. A new message on a session aborts the previous turn — the
   // runtime withdraws its pending approvals fail-closed and emits
   // 'interrupted' on the old stream.
-  const activeTurns = new Map<string, AbortController>();
+  //
+  // The companion app (phone → PC) reads this map for its run list and can
+  // abort turns through it (see the runControls passed to the companion
+  // routes below); the hub itself never mutates it.
+  const activeTurns = new Map<string, { controller: AbortController; botId: string; startedAt: number }>();
 
   // Resolve a bot's effective workspace root (Octop-style per-bot isolation).
   // Bots without a workspace use the global workspaceDir.
@@ -941,6 +956,23 @@ export function createRouter(deps: RouteDeps): express.Router {
   //   turn completes (queue-at-boundary). If no turn is in-flight, runs now.
   router.post('/chat', async (req, res) => {
     const body = (req.body ?? {}) as Partial<ChatRequestBody>;
+    // Companion app (phone → PC): optional device-token auth. Requests
+    // without an Authorization header behave exactly as before; a Bearer
+    // token is validated against the companion store when the module is
+    // configured, and rejected with 401 when invalid. The action is
+    // audit-logged (metadata only, never the message content).
+    let companionDevice: { id: string; name: string } | null = null;
+    const authHeader = req.headers.authorization;
+    if (deps.companion && typeof authHeader === 'string' && /^Bearer\s+/i.test(authHeader)) {
+      const presented = authHeader.replace(/^Bearer\s+/i, '').trim();
+      const device = presented ? deps.companion.store.findDeviceByToken(presented) : undefined;
+      if (!device) {
+        res.status(401).json(errorBody('Invalid companion device token'));
+        return;
+      }
+      deps.companion.store.touchDevice(device.id);
+      companionDevice = { id: device.id, name: device.name };
+    }
     if (typeof body.botId !== 'string' || !body.botId) {
       res.status(400).json(errorBody('botId is required'));
       return;
@@ -953,6 +985,21 @@ export function createRouter(deps: RouteDeps): express.Router {
     if (!bot) {
       res.status(404).json(errorBody(`Unknown bot "${body.botId}"`));
       return;
+    }
+    const chatMessage0 = body.message;
+    const sessionId0 = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    if (companionDevice) {
+      governance.audit('companion.chat_send', {
+        actor: 'api',
+        toolName: 'companion',
+        detail: {
+          deviceId: companionDevice.id,
+          botId: bot.id,
+          sessionId: sessionId0,
+          messageLength: chatMessage0.length,
+          via: 'chat-direct',
+        },
+      });
     }
 
     // Spaces: resolve the active space from the `X-Sarviq-Space` header or
@@ -1012,6 +1059,20 @@ export function createRouter(deps: RouteDeps): express.Router {
       return;
     }
 
+    // Companion run controls: a session paused from the phone rejects new
+    // turns with 423 until resumed (same pattern as paused Spaces). Queued
+    // messages are unaffected — they simply wait for the resume.
+    if (sessionKey && deps.companion?.store.isSessionPaused(sessionKey)) {
+      res
+        .status(423)
+        .json(
+          errorBody(
+            `Session "${sessionKey}" is paused from the companion app — resume it before starting new turns`,
+          ),
+        );
+      return;
+    }
+
     sseHeaders(res);
     let closed = false;
     let terminalEmitted = false;
@@ -1056,8 +1117,8 @@ export function createRouter(deps: RouteDeps): express.Router {
     turnController = new AbortController();
     if (sessionKey) {
       const prev = activeTurns.get(sessionKey);
-      if (prev) prev.abort('superseded by a newer message');
-      activeTurns.set(sessionKey, turnController);
+      if (prev) prev.controller.abort('superseded by a newer message');
+      activeTurns.set(sessionKey, { controller: turnController, botId: bot.id, startedAt: Date.now() });
     }
 
     // Helper: run one turn's agent loop on this SSE stream.
@@ -1182,7 +1243,7 @@ export function createRouter(deps: RouteDeps): express.Router {
         res.write(`data: ${JSON.stringify({ type: 'error', message })}\n\n`);
       }
     } finally {
-      if (sessionKey && activeTurns.get(sessionKey) === turnController) {
+      if (sessionKey && activeTurns.get(sessionKey)?.controller === turnController) {
         activeTurns.delete(sessionKey);
       }
       finish();
@@ -1729,6 +1790,75 @@ export function createRouter(deps: RouteDeps): express.Router {
       audit: (action, fields) => governance.audit(action, fields),
     });
     router.use('/phone', phoneRouter);
+  }
+
+  // Companion app (phone → PC remote control). REST only — the live
+  // WebSocket endpoint (/api/companion/ws) is wired to the HTTP server's
+  // 'upgrade' event in index.ts, sharing deps.companion.hub.
+  if (deps.companion) {
+    const companionRouter = express.Router();
+    registerCompanionRoutes(companionRouter, {
+      store: deps.companion.store,
+      hub: deps.companion.hub,
+      audit: (action, fields) => governance.audit(action, fields),
+      lanIp: getLanIp(),
+      port: config.port,
+      version: '0.1.0',
+      localChatUrl: `http://127.0.0.1:${config.port}/api/chat`,
+      governance,
+      idResolver: governanceAdapter,
+      workflowRunner,
+      workflowLabel: (workflowId: string) => {
+        try {
+          return workflowRunner.getWorkflow(workflowId).name;
+        } catch {
+          return undefined;
+        }
+      },
+      chatQueueStore,
+      omniStore,
+      dataDir: config.dataDir,
+      runControls: {
+        activeTurns: () =>
+          [...activeTurns.entries()].map(([sessionId, t]) => ({
+            sessionId,
+            botId: t.botId,
+            startedAt: t.startedAt,
+          })),
+        abortTurn: (sessionId: string) => {
+          const t = activeTurns.get(sessionId);
+          if (!t) return false;
+          t.controller.abort('cancelled from companion app');
+          return true;
+        },
+      },
+      mcpServer: deps.mcpServer,
+      recordPreference: (botId, toolName, decision) => {
+        try {
+          const learned = preferenceStore.recordDecision(botId, toolName, decision);
+          if (learned) {
+            console.log(
+              `[preferences] learned ${learned.preference} for ${botId}/${toolName} (${learned.observations} observations)`,
+            );
+          }
+        } catch {
+          // Preference recording must never break approval decisions.
+        }
+      },
+    });
+    router.use('/companion', companionRouter);
+
+    // Live run-status pushes to connected companion phones.
+    workflowRunner.onRunUpdate((run) => {
+      try {
+        deps.companion?.hub.broadcast({
+          type: 'run-status',
+          run: { id: run.id, workflowId: run.workflowId, state: run.status },
+        });
+      } catch {
+        // Pushes must never break the workflow runner.
+      }
+    });
   }
 
   return router;

@@ -6,12 +6,14 @@ import { NotesPanel } from '../../components/panels/notes-panel';
 import { TasksPanel } from '../../components/panels/tasks-panel';
 import { FilesPanel } from '../../components/panels/files-panel';
 import PhonePanel from '../../components/panels/phone-panel';
+import DevicesPanel from '../../components/panels/devices-panel';
 
 const TABS = [
   { id: 'notes', label: 'Notes' },
   { id: 'tasks', label: 'Tasks' },
   { id: 'files', label: 'Files' },
-  { id: 'phone', label: 'Phone' },
+  { id: 'phone', label: 'Phone', title: 'Control your phone' },
+  { id: 'devices', label: 'Devices', title: 'Control Sarviq from your phone' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -21,7 +23,7 @@ export default function WorkspacePage() {
   return (
     <div>
       <h1 className="page-title">Workspace</h1>
-      <p className="page-sub">Notes, tasks, files — and your phone — in one personal working surface.</p>
+      <p className="page-sub">Notes, tasks, files — control your phone from here, or control Sarviq from your phone — in one personal working surface.</p>
       <div className="tabs" role="tablist" aria-label="Workspace sections">
         {TABS.map((t) => (
           <button
@@ -30,6 +32,7 @@ export default function WorkspacePage() {
             aria-selected={tab === t.id}
             className={`tab${tab === t.id ? ' active' : ''}`}
             onClick={() => setTab(t.id)}
+            title={'title' in t ? t.title : undefined}
           >
             {t.label}
           </button>
@@ -42,6 +45,8 @@ export default function WorkspacePage() {
           <TasksPanel hideHeader />
         ) : tab === 'phone' ? (
           <PhonePanel />
+        ) : tab === 'devices' ? (
+          <DevicesPanel />
         ) : (
           <FilesPanel />
         )}

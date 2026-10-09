@@ -302,3 +302,77 @@ export function getRuleFirings(params?: {
   const qs = q.toString();
   return optionalJson(`/api/processing-rules/firing-log${qs ? `?${qs}` : ''}`);
 }
+
+// ---- Companion (phone → PC remote control) ---------------------------------------
+
+export interface CompanionDevice {
+  id: string;
+  name: string;
+  platform: string;
+  pairedAt: number;
+  lastSeen: number;
+  online: boolean;
+}
+
+export interface CompanionQr {
+  ok: boolean;
+  qrPayload: string;
+}
+
+export interface CompanionCode {
+  ok: boolean;
+  ott: string;
+  qrPayload: string;
+  expiresAt: number;
+}
+
+/**
+ * Pairing QR payload for the companion app (e.g.
+ * "sarviq://pair?host=192.168.1.5&port=4000&token=ABC123").
+ * Throws EndpointMissingError (404) when the companion service is not up —
+ * callers show a "companion service unavailable" state in that case.
+ */
+export function getCompanionQr(): Promise<CompanionQr> {
+  return sarviqJson('/api/companion/pairing/qr');
+}
+
+/** Request a fresh 6-digit one-time pairing code (+ its QR payload). */
+export function requestCompanionCode(): Promise<CompanionCode> {
+  return sarviqJson('/api/companion/pairing/code', { method: 'POST' });
+}
+
+/** Pending on-phone pairing approvals, if the server exposes them. */
+export interface CompanionPendingPairing {
+  token: string;
+  deviceName?: string;
+  platform?: string;
+  requestedAt?: number;
+}
+
+export function getCompanionPending(): Promise<{ ok: boolean; pending: CompanionPendingPairing[] } | null> {
+  return optionalJson('/api/companion/pairing/pending');
+}
+
+export function approveCompanionPairing(token: string): Promise<{ ok: boolean }> {
+  return sarviqJson('/api/companion/pairing/approve', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function rejectCompanionPairing(token: string): Promise<{ ok: boolean }> {
+  return sarviqJson('/api/companion/pairing/reject', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ token }),
+  });
+}
+
+export function listCompanionDevices(): Promise<{ ok: boolean; devices: CompanionDevice[] }> {
+  return sarviqJson('/api/companion/devices');
+}
+
+export function revokeCompanionDevice(id: string): Promise<{ ok: boolean }> {
+  return sarviqJson(`/api/companion/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
