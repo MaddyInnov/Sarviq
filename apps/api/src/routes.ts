@@ -71,6 +71,7 @@ import { UsageMeter, BillingLedger, MockBillingProvider, CostTracker } from '@mv
 import type { McpScopeStore, PlatformToolDef } from '@mvp/agent-runtime';
 import { registerMcpToolScopeRoutes } from './mcp-tools-routes.js';
 import { registerProcessingRuleRoutes } from './processing-rules-routes.js';
+import { registerRedteamRoutes } from './redteam-routes.js';
 // The marketplace registry ships inside the compiled binary via this JSON
 // import (resolveJsonModule); it is seeded into the data dir at boot.
 import marketplaceRegistryJson from '@mvp/marketplace/registry/registry.json' with { type: 'json' };
@@ -1538,6 +1539,9 @@ export function createRouter(deps: RouteDeps): express.Router {
 
   // ---- Processing rules + firing log -------------------------------------
   registerProcessingRuleRoutes(router, { dataDir: config.dataDir, governance });
+
+  // ---- Red-team robustness suite (defensive testing harness) --------------
+  registerRedteamRoutes(router, { dataDir: config.dataDir, agentRuntime, bots });
 
   // ---- Phase 4: marketplace + billing ---------------------------------
   // The registry JSON is bundled into the binary; seed it into the data dir

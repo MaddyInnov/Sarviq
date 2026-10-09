@@ -11,7 +11,8 @@
     "@mvp/vault": "*",
     "@mvp/protocols": "*",
     "@mvp/voice": "*",
-    "@mvp/muse-modules": "*"
+    "@mvp/muse-modules": "*",
+    "@mvp/redteam": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

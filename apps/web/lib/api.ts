@@ -54,6 +54,56 @@ export interface PersonaInfo {
   communicationStyle: string;
 }
 
+// ---- Red-team robustness (defensive testing harness; Pro surface) --------
+
+export type RedteamVerdict = 'blocked' | 'succeeded';
+
+export interface RedteamToolCallAttempt {
+  name: string;
+  args: Record<string, unknown>;
+  outcome: 'executed' | 'denied' | 'approval-required';
+}
+
+export interface RedteamTranscriptTurn {
+  role: 'attacker' | 'bot';
+  text: string;
+  toolCalls?: RedteamToolCallAttempt[];
+}
+
+export interface RedteamAttackResult {
+  attackId: string;
+  category: string;
+  name: string;
+  verdict: RedteamVerdict;
+  matchedSignals: string[];
+  transcript: RedteamTranscriptTurn[];
+  durationMs: number;
+  hardeningNote: string;
+}
+
+export interface RedteamReport {
+  reportId: string;
+  botId: string;
+  botName: string;
+  suite: string;
+  ts: number;
+  score: number;
+  total: number;
+  blocked: number;
+  succeeded: number;
+  results: RedteamAttackResult[];
+}
+
+export const getRedteamReports = (botId: string): Promise<{ ok: boolean; botId: string; reports: RedteamReport[] }> =>
+  apiJson(`/api/bots/${encodeURIComponent(botId)}/redteam/reports`);
+
+export const runRedteamSuite = (botId: string, suite = 'core'): Promise<{ ok: boolean; report: RedteamReport }> =>
+  apiJson(`/api/bots/${encodeURIComponent(botId)}/redteam/run`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ suite }),
+  });
+
 export interface ToolCall {
   id: string;
   name: string;
