@@ -114,9 +114,10 @@ export class NoteStore {
       ...current,
       title: input.title === undefined ? current.title : requireTitle(input.title),
       content: input.content === undefined ? current.content : requireContent(input.content),
-      // Monotonic: an update must always sort after the previous state, even
-      // when two ops land in the same millisecond.
-      updatedAt: Math.max(Date.now(), current.updatedAt + 1),
+      // Monotonic across the whole store: an update must always sort first,
+      // even when two ops land in the same millisecond or the system clock
+      // steps backward between operations (VM clock skew on CI).
+      updatedAt: rows.reduce((m, r) => Math.max(m, r.updatedAt), Date.now()) + 1,
     };
     rows[idx] = next;
     this.writeAll(rows);

@@ -39,6 +39,13 @@ export interface ToolContext {
    * ephemeral one. Undefined → normal ephemeral sandbox behavior.
    */
   persistentSandboxId?: string;
+  /**
+   * Per-turn workspace override (Spaces feature). When set, tool calls in
+   * this turn resolve their workspace from this value (same semantics as a
+   * per-bot workspace) instead of the bot's configured workspace.
+   * Set by the runtime from RunTurnOptions.workspaceOverride.
+   */
+  spaceWorkspaceOverride?: string;
 }
 
 export interface ToolDefinition {

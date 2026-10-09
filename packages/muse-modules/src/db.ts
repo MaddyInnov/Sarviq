@@ -203,6 +203,17 @@ CREATE TABLE IF NOT EXISTS mm_kb_chunks (
   embedding TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_mm_kb_chunks_doc ON mm_kb_chunks (document_id, idx);
+-- Lexical leg of KB hybrid search: FTS5/BM25 over chunk text + document
+-- title. Synced manually in KnowledgeBaseStore.addDocument/deleteDocument/
+-- deleteCorpus (chunk ids are TEXT primary keys, so the external-content
+-- trigger pattern does not apply).
+CREATE VIRTUAL TABLE IF NOT EXISTS mm_kb_chunks_fts USING fts5(
+  chunk_id UNINDEXED,
+  document_id UNINDEXED,
+  corpus_id UNINDEXED,
+  title,
+  text
+);
 `;
 
 /**

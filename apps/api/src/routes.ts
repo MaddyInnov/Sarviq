@@ -9,7 +9,7 @@
 //   id → real approval id translation.
 
 import express from 'express';
-import { BotMemoryStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir } from '@mvp/agent-runtime';
+import { BotMemoryStore, SpaceStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir } from '@mvp/agent-runtime';
 import type { AgentRuntime, BotConfig, StreamEvent } from '@mvp/agent-runtime';
 // pricing.ts is not re-exported from the agent-runtime index (index untouched);
 // import the built subpath directly.
@@ -53,6 +53,7 @@ import { registerTasksRoutes } from './tasks.js';
 import { registerPagesRoutes } from './pages.js';
 import { registerTerminalRoutes } from './terminal-routes.js';
 import { registerTeamRoutes } from './teams-routes.js';
+import { registerSpaceRoutes, resolveSpaceForRun, SpaceHttpError, type SpaceRunContext } from './spaces-routes.js';
 import { TieredMemoryStore } from '@mvp/agent-runtime';
 import { PERSONAS, MBTI_TYPES, QUIZ_QUESTIONS, scoreQuiz, resolvePersona } from '@mvp/agent-runtime';
 import { saveBotPersona } from './bot-personas.js';
@@ -64,8 +65,12 @@ import { registerVaultRoutes } from './vault.js';
 import { registerProtocolRoutes } from './protocols.js';
 import { registerVoiceRoutes } from './voice.js';
 import { registerMuseModuleRoutes } from './muse-modules.js';
+import { registerEntityTraceRoutes } from './entities.js';
 import { MarketplaceRegistry, MarketplaceInstaller, RevenueLedger } from '@mvp/marketplace';
-import { UsageMeter, BillingLedger, MockBillingProvider } from '@mvp/billing';
+import { UsageMeter, BillingLedger, MockBillingProvider, CostTracker } from '@mvp/billing';
+import type { McpScopeStore, PlatformToolDef } from '@mvp/agent-runtime';
+import { registerMcpToolScopeRoutes } from './mcp-tools-routes.js';
+import { registerProcessingRuleRoutes } from './processing-rules-routes.js';
 // The marketplace registry ships inside the compiled binary via this JSON
 // import (resolveJsonModule); it is seeded into the data dir at boot.
 import marketplaceRegistryJson from '@mvp/marketplace/registry/registry.json' with { type: 'json' };
@@ -101,9 +106,18 @@ export interface RouteDeps {
   /**
    * Phase 3: two-way MCP server bridge (set by index.ts when MCP_SERVER_PORT
    * is configured). Lets the approvals inbox close the loop on approvals
-   * that originated from external MCP clients.
+   * that originated from external MCP clients. listToolDefs() feeds the
+   * MCP tool scope settings API.
    */
-  mcpServer?: { decideApproval(approvalId: string, decision: 'approved' | 'denied'): void };
+  mcpServer?: {
+    decideApproval(approvalId: string, decision: 'approved' | 'denied'): void;
+    listToolDefs(): Promise<PlatformToolDef[]>;
+  };
+  /**
+   * Per-tool MCP scope toggles (mcp-scopes.ts). Shared with the platform
+   * MCP server, which enforces them in the tools/call path.
+   */
+  mcpScopeStore?: McpScopeStore;
   /** Thread automation store (shared with the ThreadScheduler in index.ts). */
   threadScheduleStore: ThreadScheduleStore;
   /** Checkpoint store for rewind (shared with the runtime hook in index.ts). */
@@ -128,6 +142,8 @@ const VALID_APPROVAL_STATUSES: ReadonlySet<string> = new Set(['pending', 'approv
 function errorBody(error: string, detail?: string): ApiError {
   return detail ? { error, detail } : { error };
 }
+
+
 
 function isConfiguredSafe(providerId: string): boolean {
   try {
@@ -159,7 +175,7 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, mcpServer, mcpScopeStore } = deps;
 
   // Mid-turn interruption (Claude Code-style steering): at most one live turn
   // per session. A new message on a session aborts the previous turn — the
@@ -908,6 +924,19 @@ export function createRouter(deps: RouteDeps): express.Router {
       return;
     }
 
+    // Spaces: resolve the active space from the `X-Sarviq-Space` header or
+    // the `spaceId` body field. Unknown → 404, paused → 423 (new runs are
+    // rejected while a space is paused).
+    let spaceCtx: SpaceRunContext | undefined;
+    const spaceId = typeof body.spaceId === 'string' && body.spaceId.trim() ? body.spaceId.trim() : undefined;
+    try {
+      spaceCtx = resolveSpaceForRun({ req, spaceStore, dataDir: config.dataDir, spaceId });
+    } catch (err) {
+      const status = err instanceof SpaceHttpError ? err.status : 500;
+      res.status(status).json(errorBody(err instanceof Error ? err.message : 'Failed to resolve space'));
+      return;
+    }
+
     const sessionKey = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
     const queueMode = body.queueMode === 'queue' ? 'queue' : 'interrupt';
 
@@ -1021,7 +1050,9 @@ export function createRouter(deps: RouteDeps): express.Router {
         message: turnMessage,
         sessionId: body.sessionId,
         providerId: turnOpts.providerId,
-        model: turnOpts.model,
+        // Spaces: an explicit call-site model wins; otherwise the space's
+        // model override applies (bot pin / smart routing as before when unset).
+        model: turnOpts.model ?? spaceCtx?.space.modelOverride,
         taskType: turnOpts.taskType,
         signal: turnController!.signal,
         autoApprove: turnOpts.autoApprove,
@@ -1029,6 +1060,9 @@ export function createRouter(deps: RouteDeps): express.Router {
         maxBudgetUsd: turnOpts.maxBudgetUsd,
         sandboxMode: turnOpts.sandboxMode,
         memoryContext,
+        // Spaces: per-turn workspace + API-key overrides.
+        workspaceOverride: spaceCtx?.space.workspaceOverride,
+        apiKeyOverride: spaceCtx?.apiKeyOverride,
         onEvent,
       });
       // Tiered memory: ingest this turn (L0 events + async L2 distillation).
@@ -1497,6 +1531,14 @@ export function createRouter(deps: RouteDeps): express.Router {
   });
   router.use('/pages', pagesRouter);
 
+  // ---- MCP tool scopes (settings API for the sibling web panel) --------
+  if (mcpServer && mcpScopeStore) {
+    registerMcpToolScopeRoutes(router, { mcpServer, mcpScopeStore, governance });
+  }
+
+  // ---- Processing rules + firing log -------------------------------------
+  registerProcessingRuleRoutes(router, { dataDir: config.dataDir, governance });
+
   // ---- Phase 4: marketplace + billing ---------------------------------
   // The registry JSON is bundled into the binary; seed it into the data dir
   // on first boot (or when the bundled copy changes) so fromFile works
@@ -1524,6 +1566,9 @@ export function createRouter(deps: RouteDeps): express.Router {
     ledger: new BillingLedger(join(config.dataDir, 'billing.db')),
     // MVP: mock billing provider only — real Stripe keys are the founder's step.
     provider: new MockBillingProvider(),
+    // Cost dashboard: per-feature/per-step token + spend breakdown and
+    // monthly feature caps (shares billing.db with the meter/ledger).
+    costTracker: new CostTracker(join(config.dataDir, 'billing.db')),
   });
   router.use('/billing', billingRouter);
 
@@ -1545,6 +1590,14 @@ export function createRouter(deps: RouteDeps): express.Router {
   registerMuseModuleRoutes(modulesRouter, deps);
   router.use('/modules', modulesRouter);
 
+  // ---- Entity tracing (coherence-lite): GET /api/entities/trace?q=... ----
+  const entitiesRouter = express.Router();
+  registerEntityTraceRoutes(entitiesRouter, {
+    dataDir: config.dataDir,
+    memoryStore: deps.tieredMemoryStore,
+  });
+  router.use('/entities', entitiesRouter);
+
   // ---- Octop parity: interactive terminal + agent teams --------------------
   const terminalRouter = express.Router();
   registerTerminalRoutes(terminalRouter, {
@@ -1562,6 +1615,13 @@ export function createRouter(deps: RouteDeps): express.Router {
     getBots: () => bots,
   });
   router.use('/teams', teamsRouter);
+
+  // Spaces: user-level contexts (Work/Personal, ...) with per-space model /
+  // API-key / workspace overrides and pause/resume.
+  const spaceStore = new SpaceStore(config.dataDir);
+  const spacesRouter = express.Router();
+  registerSpaceRoutes(spacesRouter, { spaceStore, dataDir: config.dataDir });
+  router.use('/spaces', spacesRouter);
 
   return router;
 }

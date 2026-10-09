@@ -14,6 +14,9 @@ import type {
 } from './types.js';
 import { addUsage, emptyUsage, withToolCalls } from './types.js';
 import type { AuditEntry, GovernanceDecision, GovernanceGateway } from './governance.js';
+// Privacy tiers: type-only (erased at compile) so the runtime never depends
+// on @mvp/governance at runtime. See RunTurnOptions.privacyGate.
+import type { EgressGate, TieredItem } from '@mvp/governance';
 import { createProvider } from './providers/factory.js';
 import { reviewToolCall } from './reviewer.js';
 import {
@@ -28,6 +31,7 @@ import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
 import { routeModel } from './routing.js';
 import type { TaskType } from './routing.js';
+import type { LearnedRoutingRule } from './routing-learn.js';
 import { resolvePersona } from './personas.js';
 
 export interface AgentRuntimeOptions {
@@ -71,6 +75,12 @@ export interface RunTurnOptions {
    * the cheapest capable model for this task type. Defaults to 'chat'.
    */
   taskType?: TaskType;
+  /**
+   * Learned routing rules from user corrections (routing-learn.ts), newest
+   * first. Only consulted when the router runs (no pinned model); the
+   * first matching rule wins over the built-in heuristics. Optional.
+   */
+  routingRules?: LearnedRoutingRule[];
   onEvent: (e: StreamEvent) => void | Promise<void>;
   maxIterations?: number;
   approvalTimeoutMs?: number;
@@ -117,6 +127,36 @@ export interface RunTurnOptions {
    * the host computes it via TieredMemoryStore.recallForPrompt().
    */
   memoryContext?: string;
+  /**
+   * Per-turn workspace override (Spaces feature). When set, tool calls in
+   * this turn resolve their workspace from this value (same semantics as a
+   * per-bot workspace: relative → <dataDir>/workspaces/<v>, absolute must
+   * stay inside dataDir) instead of the bot's configured workspace.
+   */
+  workspaceOverride?: string;
+  /**
+   * Per-turn provider API key override (Spaces feature: a space's apiKeyRef
+   * resolved server-side from the vault). When set, the turn's provider is
+   * constructed with this key instead of the env/local configured key.
+   * The value lives in memory for the turn only — never persisted, logged,
+   * or serialized.
+   */
+  apiKeyOverride?: string;
+  /**
+   * Privacy-tier enforcement at the provider (cloud egress) choke point.
+   * When `privacyGate` is set, every provider.chat call first asserts the
+   * gate over `egressItems` (tier-tagged data the host is about to send to
+   * the cloud model, e.g. recalled memory atoms). A `local-only` item
+   * throws PrivacyTierDeniedError — fail closed, with an audit entry —
+   * before any network call is made. Unset → no check (previous behavior).
+   */
+  privacyGate?: Pick<EgressGate, 'assertEgress'>;
+  /**
+   * Tier-tagged items accompanying this turn's cloud egress. Only
+   * consulted when `privacyGate` is set. Item contents are never logged;
+   * only ids/tiers reach the audit trail.
+   */
+  egressItems?: TieredItem[];
 }
 
 export interface PreviewToolInfo {
@@ -322,6 +362,8 @@ export class AgentRuntime {
       const routed = routeModel({
         taskType: opts.taskType ?? 'chat',
         providerHint: opts.bot.provider,
+        message: opts.message,
+        learnedRules: opts.routingRules,
       });
       providerId = routed.providerId;
       model = routed.modelId;
@@ -331,7 +373,11 @@ export class AgentRuntime {
     // the single choke point both the API chat route and the CLI pipe mode
     // flow through.
     assertModelAllowed(providerId, model);
-    const provider: LLMProvider = this.resolveProvider(providerId);
+    // Spaces: a per-turn API key override bypasses the cached provider so
+    // this turn (and only this turn) authenticates with the space's key.
+    const provider: LLMProvider = opts.apiKeyOverride
+      ? createProvider(providerId, { apiKey: opts.apiKeyOverride })
+      : this.resolveProvider(providerId);
     const maxIterations = opts.maxIterations ?? DEFAULT_MAX_ITERATIONS;
     const approvalTimeoutMs = opts.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
     const emit = async (e: StreamEvent): Promise<void> => {
@@ -343,6 +389,8 @@ export class AgentRuntime {
       sessionId,
       botId: opts.bot.id,
       persistentSandboxId: opts.persistentSandboxId,
+      // Spaces: per-turn workspace override for tool calls.
+      spaceWorkspaceOverride: opts.workspaceOverride,
     };
 
     const { prompt: systemPrompt } = await this.buildSystemPrompt(opts.bot, opts.memoryContext);
@@ -366,6 +414,15 @@ export class AgentRuntime {
     try {
       for (let iteration = 0; iteration < maxIterations; iteration++) {
         opts.signal?.throwIfAborted();
+        // Privacy-tier gate: the provider call is a cloud egress. When the
+        // host attached tier-tagged items, a single `local-only` item denies
+        // the call fail-closed (with an audit entry) before any network I/O.
+        opts.privacyGate?.assertEgress(opts.egressItems ?? [], {
+          sessionId,
+          botId: ctx.botId,
+          where: 'provider.chat',
+          iteration,
+        });
         const turn = await provider.chat(messages, tools, {
           model,
           onToken: (t) => {

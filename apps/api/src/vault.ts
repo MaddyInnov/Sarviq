@@ -9,9 +9,11 @@
 //
 // Routes (router mounted at /api):
 //   GET    /vault              → SecretMeta[] (values are NEVER listed)
-//   POST   /vault              → { name, value, description? } → SecretMeta (201)
+//   POST   /vault              → { name, value, description?, tier? } → SecretMeta (201)
 //   GET    /vault/:name        → Secret (the only read that returns a value)
-//   PUT    /vault/:name        → { value?, description? } → SecretMeta
+//   PUT    /vault/:name        → { value?, description?, tier? } → SecretMeta
+// Secrets carry a privacy tier (default local-only); `tier` optionally
+// overrides it (metadata|cloud-ok|local-only).
 //   DELETE /vault/:name        → { ok: true }
 //   GET    /wallet             → { provider, chargesEnabled, methods }
 //   GET    /wallet/methods     → PaymentMethod[]
@@ -28,10 +30,26 @@
 import express from 'express';
 import type { Request, Response } from 'express';
 import { MockWalletProvider, SecureVault, isVaultError, isWalletError } from '@mvp/vault';
+import { isPrivacyTier } from '@mvp/governance';
+import type { PrivacyTier } from '@mvp/governance';
 import { getOAuthStatus } from './oauth.js';
 import type { RouteDeps } from './routes.js';
 
 type VaultDeps = Pick<RouteDeps, 'config' | 'governance'>;
+
+/**
+ * Optional tier override from a request body; undefined = keep the
+ * write-time default. Returns { ok: false } (after sending a 400) for an
+ * invalid tier so callers stay flat.
+ */
+function tierParam(v: unknown, res: Response): { ok: true; tier: PrivacyTier | undefined } | { ok: false } {
+  if (v === undefined) return { ok: true, tier: undefined };
+  if (!isPrivacyTier(v)) {
+    res.status(400).json(errorBody('tier must be one of metadata|cloud-ok|local-only'));
+    return { ok: false };
+  }
+  return { ok: true, tier: v };
+}
 
 function errorBody(error: string, detail?: string): { error: string; detail?: string } {
   return detail ? { error, detail } : { error };
@@ -69,12 +87,15 @@ export function registerVaultRoutes(router: express.Router, deps: VaultDeps): vo
   });
 
   vaultRouter.post('/', (req: Request, res: Response) => {
+    const tp = tierParam((req.body as { tier?: unknown } | undefined)?.tier, res);
+    if (!tp.ok) return;
     try {
       const body = (req.body ?? {}) as { name?: unknown; value?: unknown; description?: unknown };
       const meta = vaultOf(req).create(
         body.name,
         body.value,
         typeof body.description === 'string' ? body.description : undefined,
+        { tier: tp.tier },
       );
       governance.audit('vault.secret_created', {
         actor: callerOf(req),
@@ -105,6 +126,8 @@ export function registerVaultRoutes(router: express.Router, deps: VaultDeps): vo
   });
 
   vaultRouter.put('/:name', (req: Request, res: Response) => {
+    const tp = tierParam((req.body as { tier?: unknown } | undefined)?.tier, res);
+    if (!tp.ok) return;
     try {
       const body = (req.body ?? {}) as { value?: unknown; description?: unknown };
       const meta = vaultOf(req).update(
@@ -115,6 +138,7 @@ export function registerVaultRoutes(router: express.Router, deps: VaultDeps): vo
           : typeof body.description === 'string'
             ? body.description
             : undefined,
+        { tier: tp.tier },
       );
       governance.audit('vault.secret_updated', {
         actor: callerOf(req),

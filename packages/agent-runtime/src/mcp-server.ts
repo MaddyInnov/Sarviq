@@ -61,6 +61,7 @@ import {
 import type { GovernanceGateway } from './governance.js';
 import { tagUntrustedToolOutput } from './runtime.js';
 import type { ToolCall, ToolContext, ToolDefinition } from './types.js';
+import { describeScope, requiredScopeForTool, type McpScopeStore } from './mcp-scopes.js';
 
 /** Minimal tool description the MCP server needs (a subset of ToolDefinition). */
 export interface PlatformToolDef {
@@ -116,6 +117,13 @@ export interface PlatformMcpServerOptions {
   serverInfo?: { name: string; version: string };
   /** TTL for a granted approval before the re-call handshake expires. */
   approvalTtlMs?: number;
+  /**
+   * Per-tool scope toggles (see mcp-scopes.ts). When set, every tools/call
+   * is checked against the tool's REQUIRED scope before governance runs:
+   * a disabled scope denies the call with a clear `scope_denied` error.
+   * Unset → no scope enforcement (all tools behave as before).
+   */
+  scopes?: McpScopeStore;
 }
 
 export interface ServeHandle {
@@ -180,6 +188,7 @@ export class PlatformMcpServer {
   private readonly chat?: { handler: ChatHandler; description?: string };
   private readonly serverInfo: { name: string; version: string };
   private readonly approvalTtlMs: number;
+  private readonly scopeStore?: McpScopeStore;
   private readonly servers = new Set<Server>();
 
   /** approvalId → pending call awaiting a human decision. */
@@ -195,6 +204,17 @@ export class PlatformMcpServer {
     this.chat = opts.chat;
     this.serverInfo = opts.serverInfo ?? { name: 'mvp-platform-mcp', version: '0.1.0' };
     this.approvalTtlMs = opts.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
+    this.scopeStore = opts.scopes;
+  }
+
+  /**
+   * All tool definitions exposed over MCP (provider tools + the optional
+   * `chat` tool). Public so the settings API can list tools with their
+   * scopes; the protocol handler uses the same source.
+   */
+  async listToolDefs(): Promise<PlatformToolDef[]> {
+    const defs = await this.tools.listTools();
+    return this.chat ? [...defs, this.chatToolDef()] : defs;
   }
 
   private ctx(): ToolContext {
@@ -233,8 +253,7 @@ export class PlatformMcpServer {
   }
 
   private async listMcpTools(): Promise<Tool[]> {
-    const defs = await this.tools.listTools();
-    const all = this.chat ? [...defs, this.chatToolDef()] : defs;
+    const all = await this.listToolDefs();
     return all.map((d) => ({
       name: d.name,
       description: d.description,
@@ -285,6 +304,30 @@ export class PlatformMcpServer {
       name,
       args: (args ?? {}) as Record<string, unknown>,
     };
+    // Scope gate (mcp-scopes.ts): the tool's REQUIRED scope toggle must be
+    // ON, otherwise the call is denied here — before grants, governance, or
+    // execution — with a clear, actionable error.
+    if (this.scopeStore) {
+      const required = requiredScopeForTool(name);
+      const toggles = this.scopeStore.get(name);
+      if (!toggles[required]) {
+        this.audit({ type: 'mcp.tool.scope_denied', call, detail: { requiredScope: required } });
+        return jsonResult(
+          {
+            status: 'denied',
+            code: 'scope_denied',
+            tool: name,
+            requiredScope: required,
+            message:
+              `Tool "${name}" requires the "${required}" scope (${describeScope(required)}), ` +
+              `which is currently disabled. Enable it via PATCH /api/mcp/tools/${encodeURIComponent(name)}/scopes ` +
+              `with { "${required}": true }.`,
+          },
+          true,
+        );
+      }
+    }
+
     const key = `${name}\n${stableStringify(call.args)}`;
 
     // 0. Single-use grant from a prior human approval? Consume and execute.

@@ -33,6 +33,12 @@ export interface ChatRequestBody {
    *   current turn completes (queue-at-boundary, Claude Code style).
    */
   queueMode?: 'interrupt' | 'queue';
+  /**
+   * Space to run in (Spaces feature). Alternative to the `X-Sarviq-Space`
+   * request header. The space's model/workspace overrides apply to the
+   * run; paused spaces reject the request with 423.
+   */
+  spaceId?: string;
 }
 
 export interface DecideApprovalBody {

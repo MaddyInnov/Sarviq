@@ -46,7 +46,7 @@ describe('TerminalManager', () => {
 
   it('creates a host session and round-trips input/output', async () => {
     const children: FakeChild[] = [];
-    const mgr = new TerminalManager(fakeSpawn(children));
+    const mgr = new TerminalManager(fakeSpawn(children), { pty: () => undefined, docker: () => false });
     const session = await mgr.create({ workspaceDir: dir });
     expect(session.status).toBe('open');
     expect(session.backend).toBe('host');
@@ -81,7 +81,7 @@ describe('TerminalManager', () => {
 
   it('lists sessions and rejects oversized writes', async () => {
     const children: FakeChild[] = [];
-    const mgr = new TerminalManager(fakeSpawn(children));
+    const mgr = new TerminalManager(fakeSpawn(children), { pty: () => undefined, docker: () => false });
     const a = await mgr.create({ workspaceDir: dir, name: 'a' });
     const b = await mgr.create({ workspaceDir: dir, name: 'b' });
     expect(mgr.list().map((s) => s.name).sort()).toEqual(['a', 'b']);
@@ -94,7 +94,7 @@ describe('TerminalManager', () => {
 
   it('emitForTest injects output for subscribers', async () => {
     const children: FakeChild[] = [];
-    const mgr = new TerminalManager(fakeSpawn(children));
+    const mgr = new TerminalManager(fakeSpawn(children), { pty: () => undefined, docker: () => false });
     const s = await mgr.create({ workspaceDir: dir });
     const seen: string[] = [];
     mgr.subscribe(s.id, (c) => seen.push(c));

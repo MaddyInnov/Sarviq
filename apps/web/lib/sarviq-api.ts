@@ -1,0 +1,268 @@
+// SPDX-License-Identifier: Apache-2.0
+// Client helpers for the Laya-inspired Activity surfaces: Spaces, Daily
+// Briefing, Omni summary, cost breakdown, and MCP tool scopes.
+//
+// Defensive by design: sibling agents are still building these endpoints.
+// Every reader that the UI calls goes through `optionalJson`, which returns
+// `null` when the endpoint is missing (404) or unreachable — panels render
+// an EmptyState in that case instead of an error.
+//
+// The active space id is persisted in localStorage under `sarviq:space` and
+// sent on every request as the `X-Sarviq-Space` header via `sarviqFetch`.
+
+'use client';
+
+import { getApiBase } from './api';
+
+export const SPACE_STORAGE_KEY = 'sarviq:space';
+export const SPACE_HEADER = 'X-Sarviq-Space';
+
+// ---- Active-space persistence ------------------------------------------------
+
+/** Pure: build a headers record carrying X-Sarviq-Space (testable, no DOM). */
+export function spaceHeaders(
+  spaceId: string | null,
+  extra?: Record<string, string>,
+): Record<string, string> {
+  const h: Record<string, string> = { ...(extra ?? {}) };
+  if (spaceId) h[SPACE_HEADER] = spaceId;
+  return h;
+}
+
+export function getActiveSpaceId(): string | null {
+  try {
+    return localStorage.getItem(SPACE_STORAGE_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export function setActiveSpaceId(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(SPACE_STORAGE_KEY, id);
+    else localStorage.removeItem(SPACE_STORAGE_KEY);
+  } catch {
+    // ignore (private mode etc.)
+  }
+}
+
+// ---- Fetch wrapper ------------------------------------------------------------
+
+export class EndpointMissingError extends Error {
+  constructor(public readonly path: string) {
+    super(`Endpoint not available: ${path}`);
+    this.name = 'EndpointMissingError';
+  }
+}
+
+function withSpaceHeader(init?: RequestInit): RequestInit {
+  const spaceId = getActiveSpaceId();
+  const headers = spaceHeaders(spaceId, {
+    ...(init?.headers as Record<string, string> | undefined),
+  });
+  return { ...init, headers };
+}
+
+/** fetch that always carries the active-space header (when a space is set). */
+export async function sarviqFetch(path: string, init?: RequestInit): Promise<Response> {
+  return fetch(`${getApiBase()}${path}`, withSpaceHeader(init));
+}
+
+async function sarviqJson<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await sarviqFetch(path, init);
+  if (!res.ok) {
+    if (res.status === 404) throw new EndpointMissingError(path);
+    let detail = '';
+    try {
+      detail = ((await res.json()) as { error?: string }).error ?? '';
+    } catch {
+      // ignore
+    }
+    throw new Error(`API ${res.status}: ${detail || res.statusText}`);
+  }
+  return (await res.json()) as T;
+}
+
+/**
+ * Defensive reader for not-yet-built endpoints: returns `null` when the
+ * endpoint is missing (404) or the network fails. Callers show an empty
+ * state in that case, never an error box.
+ */
+export async function optionalJson<T>(path: string, init?: RequestInit): Promise<T | null> {
+  try {
+    return await sarviqJson<T>(path, init);
+  } catch (err) {
+    if (err instanceof EndpointMissingError) return null;
+    if (err instanceof TypeError) return null; // network unreachable
+    throw err;
+  }
+}
+
+// ---- Spaces -------------------------------------------------------------------
+
+export interface Space {
+  id: string;
+  name: string;
+  modelOverride?: string | null;
+  workspaceOverride?: string | null;
+  paused?: boolean;
+}
+
+export const listSpaces = (): Promise<Space[]> => sarviqJson('/api/spaces');
+
+export function createSpace(name: string): Promise<Space> {
+  return sarviqJson('/api/spaces', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+}
+
+export function patchSpace(
+  id: string,
+  patch: Partial<Pick<Space, 'name' | 'modelOverride' | 'workspaceOverride' | 'paused'>>,
+): Promise<Space> {
+  return sarviqJson(`/api/spaces/${encodeURIComponent(id)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch),
+  });
+}
+
+export function deleteSpace(id: string): Promise<{ ok: boolean }> {
+  return sarviqJson(`/api/spaces/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---- Daily briefing -------------------------------------------------------------
+
+export interface BriefingItem {
+  id?: string;
+  title: string;
+  detail?: string;
+  ts?: number;
+  kind?: string;
+}
+
+export interface Briefing {
+  generatedAt: number;
+  overnight: BriefingItem[];
+  calendar: BriefingItem[];
+  approvals: BriefingItem[];
+  summary?: string;
+}
+
+export const getBriefing = (): Promise<Briefing | null> => optionalJson('/api/briefing');
+
+// ---- Omni rolling summary --------------------------------------------------------
+
+export interface OmniSummary {
+  attention: BriefingItem[];
+  recent: BriefingItem[];
+  period: BriefingItem[];
+  milestones: BriefingItem[];
+  pins: BriefingItem[];
+  versions: Array<{ id: string; createdAt: number; label?: string }>;
+}
+
+export const getOmniSummary = (versionId?: string): Promise<OmniSummary | null> =>
+  optionalJson(`/api/summary/omni${versionId ? `?version=${encodeURIComponent(versionId)}` : ''}`);
+
+// ---- Cost breakdown ----------------------------------------------------------------
+
+export interface FeatureCost {
+  feature: string;
+  tokens: number;
+  cost: number;
+}
+
+export interface StepCost {
+  step: string;
+  tokens: number;
+  cost: number;
+}
+
+export interface CostCap {
+  feature: string;
+  cap: number;
+  used: number;
+  exceeded: boolean;
+}
+
+export interface UsageBreakdown {
+  byFeature: FeatureCost[];
+  byStep: StepCost[];
+  caps: CostCap[];
+}
+
+export const getUsageBreakdown = async (
+  period: 'week' | 'month' = 'month',
+): Promise<UsageBreakdown | null> => {
+  const b = await optionalJson<{ byFeature?: FeatureCost[]; byStep?: StepCost[] }>(
+    `/api/billing/usage/breakdown?period=${period}`,
+  );
+  if (b === null) return null;
+  // Caps live on a separate endpoint and are reported in USD cents.
+  const rawCaps = await optionalJson<
+    { feature: string; capCents: number | null; spentCents: number; capExceeded: boolean }[]
+  >('/api/billing/usage/caps');
+  const caps: CostCap[] = (Array.isArray(rawCaps) ? rawCaps : [])
+    .filter((c) => c.capCents !== null)
+    .map((c) => ({
+      feature: c.feature,
+      cap: (c.capCents ?? 0) / 100,
+      used: c.spentCents / 100,
+      exceeded: c.capExceeded,
+    }));
+  return { byFeature: b.byFeature ?? [], byStep: b.byStep ?? [], caps };
+};
+
+// ---- MCP tool scopes -----------------------------------------------------------------
+
+export interface McpToolScopes {
+  read: boolean;
+  write: boolean;
+  egress: boolean;
+}
+
+export interface McpTool {
+  id: string;
+  name: string;
+  scopes: McpToolScopes;
+}
+
+export const getMcpTools = (): Promise<McpTool[] | null> => optionalJson('/api/mcp/tools');
+
+export function patchMcpToolScopes(
+  id: string,
+  scopes: McpToolScopes,
+): Promise<McpTool> {
+  return sarviqJson(`/api/mcp/tools/${encodeURIComponent(id)}/scopes`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(scopes),
+  });
+}
+
+// ---- Processing rules (firing log UI hook, read-only for now) ------------------------
+
+export interface RuleFiring {
+  id?: string;
+  ruleId?: string;
+  ruleName?: string;
+  status?: string;
+  ts?: number;
+  detail?: string;
+}
+
+export function getRuleFirings(params?: {
+  rule?: string;
+  status?: string;
+  since?: string;
+}): Promise<RuleFiring[] | null> {
+  const q = new URLSearchParams();
+  if (params?.rule) q.set('ruleId', params.rule);
+  if (params?.status) q.set('status', params.status);
+  if (params?.since) q.set('since', params.since);
+  const qs = q.toString();
+  return optionalJson(`/api/processing-rules/firing-log${qs ? `?${qs}` : ''}`);
+}

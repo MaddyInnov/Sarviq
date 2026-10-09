@@ -22,6 +22,7 @@
 import { randomUUID } from 'node:crypto';
 import { ValidationError, NotFoundError } from '../errors.js';
 import type { ModuleDb } from '../db.js';
+import { buildFtsMatchQuery, reciprocalRankFuse } from '@mvp/agent-runtime';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -68,6 +69,21 @@ export interface KbQueryOptions {
   query: string;
   topK?: number;
   corpusIds?: string[];
+  /**
+   * Opt-in hybrid retrieval: vector (cosine) + lexical (FTS5/BM25) fused
+   * with Reciprocal Rank Fusion (k=60). Default false — query() stays
+   * vector-only unless this is set, preserving existing behavior.
+   */
+  hybrid?: boolean;
+}
+
+/**
+ * A hybrid-search hit: same shape as KbRetrievedChunk, except `score` is
+ * the RRF fused score (higher = better, not a cosine), plus the legs that
+ * retrieved the chunk.
+ */
+export interface KbHybridHit extends KbRetrievedChunk {
+  sources: Array<'vector' | 'lexical'>;
 }
 
 // ---------------------------------------------------------------------------
@@ -282,6 +298,18 @@ export function extractText(fileName: string, mimeType: string, buf: Uint8Array)
 const MAX_DOCS = 500;
 const MAX_CHUNKS_PER_DOC = 2000;
 
+/** Chunk row with the embedding JSON parsed (internal retrieval view). */
+interface KbChunkRow {
+  id: string;
+  document_id: string;
+  idx: number;
+  text: string;
+  page: number | null;
+  embedding: number[];
+  doc_title: string;
+  corpus_id: string | null;
+}
+
 interface CorpusRow {
   id: string;
   name: string;
@@ -366,6 +394,14 @@ export class KnowledgeBaseStore {
 
   deleteCorpus(id: string): void {
     // Unlink documents (keep them, corpus becomes null) — safer than cascade.
+    // Keep the FTS mirror in sync: null the corpus_id there first, while the
+    // documents table still knows which docs belonged to this corpus.
+    this.mdb.db
+      .prepare(
+        `UPDATE mm_kb_chunks_fts SET corpus_id = NULL
+         WHERE document_id IN (SELECT id FROM mm_kb_documents WHERE corpus_id = ?)`,
+      )
+      .run(id);
     this.mdb.db.prepare('UPDATE mm_kb_documents SET corpus_id = NULL WHERE corpus_id = ?').run(id);
     const r = this.mdb.db.prepare('DELETE FROM mm_kb_corpora WHERE id = ?').run(id);
     if (r.changes === 0) throw new NotFoundError(`corpus "${id}" not found`);
@@ -411,10 +447,16 @@ export class KnowledgeBaseStore {
     const insChunk = this.mdb.db.prepare(
       'INSERT INTO mm_kb_chunks (id, document_id, idx, text, page, embedding) VALUES (?, ?, ?, ?, ?, ?)',
     );
+    const insFts = this.mdb.db.prepare(
+      'INSERT INTO mm_kb_chunks_fts (chunk_id, document_id, corpus_id, title, text) VALUES (?, ?, ?, ?, ?)',
+    );
     const txn = () => {
       insDoc.run(doc.id, doc.corpusId, doc.title, doc.fileName, doc.mimeType, doc.charCount, doc.chunkCount, doc.createdAt);
       chunks.forEach((text, i) => {
-        insChunk.run(randomUUID(), doc.id, i, text, null, JSON.stringify(Array.from(vectors[i])));
+        const chunkId = randomUUID();
+        insChunk.run(chunkId, doc.id, i, text, null, JSON.stringify(Array.from(vectors[i])));
+        // Lexical leg of hybrid search (FTS5/BM25 over title + text).
+        insFts.run(chunkId, doc.id, doc.corpusId, doc.title, text);
       });
     };
     inTransaction(this.mdb.db, txn);
@@ -439,6 +481,7 @@ export class KnowledgeBaseStore {
   deleteDocument(id: string): void {
     inTransaction(this.mdb.db, () => {
       this.mdb.db.prepare('DELETE FROM mm_kb_chunks WHERE document_id = ?').run(id);
+      this.mdb.db.prepare('DELETE FROM mm_kb_chunks_fts WHERE document_id = ?').run(id);
       const r = this.mdb.db.prepare('DELETE FROM mm_kb_documents WHERE id = ?').run(id);
       if (r.changes === 0) throw new NotFoundError(`document "${id}" not found`);
     });
@@ -446,17 +489,14 @@ export class KnowledgeBaseStore {
 
   // ---- Retrieval ----------------------------------------------------------
 
-  async query(opts: KbQueryOptions): Promise<KbRetrievedChunk[]> {
-    const q = opts.query.trim();
-    if (!q) throw new ValidationError('query is required');
-    const topK = Math.min(Math.max(opts.topK ?? 5, 1), 20);
-
+  /** All chunks (optionally corpus-scoped) with parsed embeddings. */
+  private chunkRows(corpusIds?: string[]): KbChunkRow[] {
     let sql = `SELECT c.id, c.document_id, c.idx, c.text, c.page, c.embedding, d.title AS doc_title, d.corpus_id
                FROM mm_kb_chunks c JOIN mm_kb_documents d ON d.id = c.document_id`;
-    const params: Array<string | number | null> = [];
-    if (opts.corpusIds && opts.corpusIds.length > 0) {
-      sql += ` WHERE d.corpus_id IN (${opts.corpusIds.map(() => '?').join(',')})`;
-      params.push(...opts.corpusIds);
+    const params: string[] = [];
+    if (corpusIds && corpusIds.length > 0) {
+      sql += ` WHERE d.corpus_id IN (${corpusIds.map(() => '?').join(',')})`;
+      params.push(...corpusIds);
     }
     const rows = this.mdb.db.prepare(sql).all(...params) as unknown as Array<{
       id: string;
@@ -468,20 +508,57 @@ export class KnowledgeBaseStore {
       doc_title: string;
       corpus_id: string | null;
     }>;
-    if (rows.length === 0) return [];
-
-    const [qv] = await this.embedder.embed([q]);
-    const scored = rows.map((r) => {
-      let vec: number[];
+    return rows.map((r) => {
+      let embedding: number[] = [];
       try {
-        vec = JSON.parse(r.embedding) as number[];
+        embedding = JSON.parse(r.embedding) as number[];
       } catch {
-        vec = [];
+        embedding = [];
       }
-      return { r, score: cosineSimilarity(qv, vec) };
+      return {
+        id: r.id,
+        document_id: r.document_id,
+        idx: r.idx,
+        text: r.text,
+        page: r.page,
+        embedding,
+        doc_title: r.doc_title,
+        corpus_id: r.corpus_id,
+      };
     });
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topK).map(({ r, score }) => ({
+  }
+
+  /** Vector leg: chunk ids ranked by cosine similarity, best first. */
+  private async rankVectorIds(query: string, corpusIds: string[] | undefined, depth: number): Promise<string[]> {
+    const rows = this.chunkRows(corpusIds);
+    if (rows.length === 0) return [];
+    const [qv] = await this.embedder.embed([query]);
+    return rows
+      .map((r) => ({ id: r.id, score: cosineSimilarity(qv, r.embedding) }))
+      .filter((x) => x.score > 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, depth)
+      .map((x) => x.id);
+  }
+
+  /** Lexical leg: chunk ids ranked by FTS5 BM25, best first. */
+  private rankLexicalIds(query: string, corpusIds: string[] | undefined, depth: number): string[] {
+    const match = buildFtsMatchQuery(query);
+    if (!match) return [];
+    let sql = `SELECT chunk_id AS id FROM mm_kb_chunks_fts WHERE mm_kb_chunks_fts MATCH ?`;
+    const params: Array<string | number> = [match];
+    if (corpusIds && corpusIds.length > 0) {
+      sql += ` AND corpus_id IN (${corpusIds.map(() => '?').join(',')})`;
+      params.push(...corpusIds);
+    }
+    sql += ` ORDER BY bm25(mm_kb_chunks_fts) LIMIT ?`;
+    params.push(depth);
+    const rows = this.mdb.db.prepare(sql).all(...params) as unknown as Array<{ id: string }>;
+    return rows.map((r) => r.id);
+  }
+
+  private toRetrievedChunk(r: KbChunkRow, score: number): KbRetrievedChunk {
+    return {
       chunkId: r.id,
       documentId: r.document_id,
       documentTitle: r.doc_title,
@@ -489,8 +566,67 @@ export class KnowledgeBaseStore {
       idx: r.idx,
       text: r.text,
       page: r.page,
-      score: Math.round(score * 10000) / 10000,
-    }));
+      score,
+    };
+  }
+
+  /**
+   * Vector-only retrieval (original behavior). Pass `hybrid: true` to use
+   * the hybrid (vector + BM25 + RRF) path instead.
+   */
+  async query(opts: KbQueryOptions): Promise<KbRetrievedChunk[]> {
+    if (opts.hybrid) return this.queryHybrid(opts);
+    const q = opts.query.trim();
+    if (!q) throw new ValidationError('query is required');
+    const topK = Math.min(Math.max(opts.topK ?? 5, 1), 20);
+
+    const rows = this.chunkRows(opts.corpusIds);
+    if (rows.length === 0) return [];
+
+    const [qv] = await this.embedder.embed([q]);
+    const scored = rows.map((r) => ({ r, score: cosineSimilarity(qv, r.embedding) }));
+    scored.sort((a, b) => b.score - a.score);
+    return scored
+      .slice(0, topK)
+      .map(({ r, score }) => this.toRetrievedChunk(r, Math.round(score * 10000) / 10000));
+  }
+
+  /**
+   * Hybrid retrieval: vector (cosine) + lexical (FTS5/BM25) legs, each run
+   * over a deeper candidate pool (4× topK), fused with Reciprocal Rank
+   * Fusion (k=60). `score` on the returned chunks is the RRF fused score
+   * (higher = better), NOT a cosine similarity. Additive — query() without
+   * `hybrid: true` is untouched.
+   */
+  async queryHybrid(opts: KbQueryOptions): Promise<KbHybridHit[]> {
+    const q = opts.query.trim();
+    if (!q) throw new ValidationError('query is required');
+    const topK = Math.min(Math.max(opts.topK ?? 5, 1), 20);
+    const depth = Math.min(topK * 4, 40);
+
+    const [vectorRanked, lexicalRanked] = await Promise.all([
+      this.rankVectorIds(q, opts.corpusIds, depth),
+      Promise.resolve(this.rankLexicalIds(q, opts.corpusIds, depth)),
+    ]);
+    const fused = reciprocalRankFuse([vectorRanked, lexicalRanked], 60).slice(0, topK);
+    if (fused.length === 0) return [];
+
+    const vecSet = new Set(vectorRanked);
+    const lexSet = new Set(lexicalRanked);
+    const byId = new Map(this.chunkRows(opts.corpusIds).map((r) => [r.id, r]));
+    const hits: KbHybridHit[] = [];
+    for (const f of fused) {
+      const row = byId.get(f.id);
+      if (!row) continue; // chunk deleted between legs; skip
+      const sources: Array<'vector' | 'lexical'> = [];
+      if (vecSet.has(f.id)) sources.push('vector');
+      if (lexSet.has(f.id)) sources.push('lexical');
+      hits.push({
+        ...this.toRetrievedChunk(row, Math.round(f.score * 1e6) / 1e6),
+        sources,
+      });
+    }
+    return hits;
   }
 }
 

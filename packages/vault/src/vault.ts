@@ -16,12 +16,22 @@
 
 import { join } from 'node:path';
 import { readEncryptedJson, writeEncryptedJson } from './crypto.js';
+// Privacy-tier classification for secrets (see @mvp/governance
+// privacy-tiers.ts). Vault secrets default to `local-only` at write time.
+import type { PrivacyTier } from '@mvp/governance';
+import { isPrivacyTier, resolveTier } from '@mvp/governance';
 
 export interface SecretMeta {
   name: string;
   description?: string;
   createdAt: number;
   updatedAt: number;
+  /**
+   * Privacy tier (write-time tag). Vault secrets default to `local-only`:
+   * they must never be sent to a cloud provider or any network egress.
+   * Overridable per secret via create/update opts.
+   */
+  tier: PrivacyTier;
 }
 
 export interface Secret extends SecretMeta {
@@ -108,6 +118,14 @@ export class SecureVault {
     if (!payload || payload.version !== 1 || !Array.isArray(payload.secrets) || !Array.isArray(payload.audit)) {
       throw vaultError(`vault store at ${this.filePath} is corrupt — refusing to read secrets`);
     }
+    // Backward compatibility: secrets written before tiers existed have no
+    // tier field — fail closed to `local-only` (secrets never silently
+    // become egressable).
+    for (const s of payload.secrets) {
+      if (!isPrivacyTier((s as { tier?: unknown }).tier)) {
+        (s as { tier: PrivacyTier }).tier = 'local-only';
+      }
+    }
     return payload;
   }
 
@@ -121,13 +139,18 @@ export class SecureVault {
   list(): SecretMeta[] {
     const payload = this.load();
     return payload.secrets
-      .map(({ name, description, createdAt, updatedAt }) => ({ name, description, createdAt, updatedAt }))
+      .map(({ name, description, createdAt, updatedAt, tier }) => ({ name, description, createdAt, updatedAt, tier }))
       .sort((a, b) => a.name.localeCompare(b.name));
   }
 
-  create(name: unknown, value: unknown, description?: string): SecretMeta {
+  /**
+   * Create a secret. `opts.tier` overrides the write-time default
+   * (`local-only` for vault secrets — see resolveTier).
+   */
+  create(name: unknown, value: unknown, description?: string, opts: { tier?: PrivacyTier } = {}): SecretMeta {
     const n = requireName(name);
     const v = requireValue(value);
+    const tier = resolveTier('vault', opts.tier);
     const payload = this.load();
     if (payload.secrets.some((s) => s.name === n)) {
       throw vaultError(`secret "${n}" already exists`);
@@ -138,6 +161,7 @@ export class SecureVault {
       ...(typeof description === 'string' && description ? { description } : {}),
       createdAt: now,
       updatedAt: now,
+      tier,
     };
     this.save(
       { ...payload, secrets: [...payload.secrets, { ...meta, value: v }] },
@@ -155,10 +179,11 @@ export class SecureVault {
       this.save(payload, { ts: Date.now(), actor: this.actor, action: 'read-denied', name: n });
       return undefined;
     }
-    return { name: found.name, description: found.description, value: found.value, createdAt: found.createdAt, updatedAt: found.updatedAt };
+    return { name: found.name, description: found.description, value: found.value, createdAt: found.createdAt, updatedAt: found.updatedAt, tier: found.tier };
   }
 
-  update(name: unknown, value?: unknown, description?: string): SecretMeta {
+  /** Update a secret; `opts.tier` re-tags it (explicit override only). */
+  update(name: unknown, value?: unknown, description?: string, opts: { tier?: PrivacyTier } = {}): SecretMeta {
     const n = requireName(name);
     const payload = this.load();
     const idx = payload.secrets.findIndex((s) => s.name === n);
@@ -168,6 +193,7 @@ export class SecureVault {
       ...current,
       value: value === undefined ? current.value : requireValue(value),
       description: description === undefined ? current.description : description || undefined,
+      ...(opts.tier !== undefined ? { tier: resolveTier('vault', opts.tier) } : {}),
       updatedAt: Math.max(Date.now(), current.updatedAt + 1),
     };
     const secrets = [...payload.secrets];

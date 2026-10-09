@@ -88,10 +88,21 @@ export function makeWorkspaceResolver(opts: {
   globalWorkspaceDir: string;
   dataDir: string;
 }): (ctx: ToolContext) => string {
-  return (ctx) =>
-    resolveBotWorkspaceDir({
+  return (ctx) => {
+    // Spaces: a per-turn workspace override wins over the bot's workspace.
+    // It goes through the same resolution (and confinement) as bot
+    // workspaces, so it can never escape the data directory.
+    if (ctx?.spaceWorkspaceOverride) {
+      return resolveBotWorkspaceDir({
+        botWorkspace: ctx.spaceWorkspaceOverride,
+        globalWorkspaceDir: opts.globalWorkspaceDir,
+        dataDir: opts.dataDir,
+      });
+    }
+    return resolveBotWorkspaceDir({
       botWorkspace: ctx ? opts.getBotWorkspace(ctx.botId) : undefined,
       globalWorkspaceDir: opts.globalWorkspaceDir,
       dataDir: opts.dataDir,
     });
+  };
 }

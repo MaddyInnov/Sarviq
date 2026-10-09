@@ -4,6 +4,17 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import type { ToolContext, ToolDefinition } from './types.js';
+// Privacy tiers (write-time tags; local-only atoms never reach cloud
+// prompts — see @mvp/governance privacy-tiers.ts).
+import type { PrivacyTier } from '@mvp/governance';
+import { isPrivacyTier, resolveTier, tierAtMost } from '@mvp/governance';
+import {
+  TrigramEmbedder,
+  buildFtsMatchQuery,
+  cosineSimilarity,
+  reciprocalRankFuse,
+  type SyncEmbedder,
+} from './hybrid-search.js';
 
 const { DatabaseSync } = process.getBuiltinModule('node:sqlite') as typeof import('node:sqlite');
 type DatabaseSyncType = InstanceType<typeof DatabaseSync>;
@@ -159,6 +170,8 @@ export interface MemoryEvent {
   role: 'user' | 'assistant';
   text: string;
   toolCalls: string[];
+  /** Privacy tier (write-time tag; defaults to `cloud-ok`). */
+  tier: PrivacyTier;
 }
 
 /** L2: a distilled durable fact card. */
@@ -170,6 +183,8 @@ export interface AtomCard {
   confidence: number;
   sourceTurn: string;
   createdAt: number;
+  /** Privacy tier (write-time tag; defaults to `cloud-ok`). */
+  tier: PrivacyTier;
 }
 
 /** L3: an entity page aggregating atoms. */
@@ -204,7 +219,8 @@ const ATOM_TABLE = `
     entities_json TEXT NOT NULL,
     confidence REAL NOT NULL,
     source_turn TEXT NOT NULL,
-    created_at INTEGER NOT NULL
+    created_at INTEGER NOT NULL,
+    tier TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_memory_atoms_bot ON memory_atoms(bot_id);
   CREATE INDEX IF NOT EXISTS idx_memory_atoms_norm ON memory_atoms(bot_id, fact_norm);
@@ -230,13 +246,36 @@ const EVENT_TABLE = `
     session_id TEXT NOT NULL,
     role TEXT NOT NULL,
     text TEXT NOT NULL,
-    tool_calls_json TEXT NOT NULL
+    tool_calls_json TEXT NOT NULL,
+    tier TEXT
   );
   CREATE INDEX IF NOT EXISTS idx_memory_events_bot ON memory_events(bot_id, ts);
 `;
 
+// Lexical leg of hybrid search: FTS5/BM25 over atom facts + entities.
+// Synced manually in storeAtom/deleteAtom (atoms use TEXT primary keys,
+// so the external-content trigger pattern does not apply).
+const ATOM_FTS_TABLE = `
+  CREATE VIRTUAL TABLE IF NOT EXISTS memory_atoms_fts USING fts5(
+    atom_id UNINDEXED,
+    bot_id UNINDEXED,
+    fact,
+    entities
+  );
+`;
+
 function normFact(fact: string): string {
   return fact.toLowerCase().replace(/[^a-z0-9\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * Read a tier column back: NULL or an unknown value falls back to the
+ * write-time default for the memory source (`cloud-ok`) — fail open to the
+ * conversational default, never to `local-only` (which would silently hide
+ * data) and never past it.
+ */
+function readTier(v: unknown): PrivacyTier {
+  return isPrivacyTier(v) ? v : resolveTier('memory');
 }
 
 function normEntity(entity: string): string {
@@ -302,11 +341,26 @@ function extractEntities(text: string): string[] {
 export interface TieredMemoryOptions {
   /** Injected LLM distiller; heuristic fallback when absent. */
   distiller?: LlmDistiller;
+  /**
+   * Embedder for the vector leg of hybrid recall. Defaults to the
+   * zero-dependency TrigramEmbedder (deterministic, offline).
+   */
+  embedder?: SyncEmbedder;
+}
+
+/** One hybrid-recall hit: the atom plus how it was retrieved. */
+export interface HybridRecallHit {
+  atom: AtomCard;
+  /** RRF fused score (higher = better). */
+  score: number;
+  /** Which retrieval legs returned this atom. */
+  sources: Array<'vector' | 'lexical'>;
 }
 
 export class TieredMemoryStore {
   private readonly db: DatabaseSyncType;
   private readonly distiller?: LlmDistiller;
+  private readonly embedder: SyncEmbedder;
 
   constructor(dataDir: string, opts: TieredMemoryOptions = {}) {
     mkdirSync(dataDir, { recursive: true });
@@ -314,12 +368,31 @@ export class TieredMemoryStore {
     this.db.exec(ATOM_TABLE);
     this.db.exec(ENTITY_TABLE);
     this.db.exec(EVENT_TABLE);
+    this.db.exec(ATOM_FTS_TABLE);
+    // Vector leg of hybrid recall: hash embedding per atom. Column added
+    // idempotently so databases created before this feature keep working.
+    const cols = this.db.prepare('PRAGMA table_info(memory_atoms)').all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === 'embedding')) {
+      this.db.exec('ALTER TABLE memory_atoms ADD COLUMN embedding TEXT');
+    }
+    // Privacy tiers (write-time tags). Columns added idempotently so
+    // pre-existing databases keep working; NULL reads back as the
+    // write-time default for the source (cloud-ok for memory).
+    const atomCols = this.db.prepare('PRAGMA table_info(memory_atoms)').all() as Array<{ name: string }>;
+    if (!atomCols.some((c) => c.name === 'tier')) {
+      this.db.exec('ALTER TABLE memory_atoms ADD COLUMN tier TEXT');
+    }
+    const eventCols = this.db.prepare('PRAGMA table_info(memory_events)').all() as Array<{ name: string }>;
+    if (!eventCols.some((c) => c.name === 'tier')) {
+      this.db.exec('ALTER TABLE memory_events ADD COLUMN tier TEXT');
+    }
     this.distiller = opts.distiller;
+    this.embedder = opts.embedder ?? new TrigramEmbedder();
   }
 
   // ---- L0: raw events -----------------------------------------------------
 
-  recordEvent(botId: string, sessionId: string, role: 'user' | 'assistant', text: string, toolCalls: string[] = []): MemoryEvent {
+  recordEvent(botId: string, sessionId: string, role: 'user' | 'assistant', text: string, toolCalls: string[] = [], tier?: PrivacyTier): MemoryEvent {
     const ev: MemoryEvent = {
       id: randomUUID(),
       ts: Date.now(),
@@ -328,10 +401,11 @@ export class TieredMemoryStore {
       role,
       text: text.slice(0, 8000),
       toolCalls,
+      tier: resolveTier('memory', tier),
     };
     this.db
-      .prepare('INSERT INTO memory_events (id, ts, bot_id, session_id, role, text, tool_calls_json) VALUES (?, ?, ?, ?, ?, ?, ?)')
-      .run(ev.id, ev.ts, ev.botId, ev.sessionId, ev.role, ev.text, JSON.stringify(ev.toolCalls));
+      .prepare('INSERT INTO memory_events (id, ts, bot_id, session_id, role, text, tool_calls_json, tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?)')
+      .run(ev.id, ev.ts, ev.botId, ev.sessionId, ev.role, ev.text, JSON.stringify(ev.toolCalls), ev.tier);
     return ev;
   }
 
@@ -341,10 +415,10 @@ export class TieredMemoryStore {
    * Record a completed turn's L0 events and kick off L2 distillation in the
    * background. Never throws into the caller; never blocks the turn.
    */
-  ingestTurn(botId: string, sessionId: string, userText: string, assistantText: string, toolCalls: string[] = []): void {
+  ingestTurn(botId: string, sessionId: string, userText: string, assistantText: string, toolCalls: string[] = [], tier?: PrivacyTier): void {
     try {
-      this.recordEvent(botId, sessionId, 'user', userText);
-      this.recordEvent(botId, sessionId, 'assistant', assistantText, toolCalls);
+      this.recordEvent(botId, sessionId, 'user', userText, [], tier);
+      this.recordEvent(botId, sessionId, 'assistant', assistantText, toolCalls, tier);
     } catch {
       return; // memory must never break chat
     }
@@ -375,7 +449,7 @@ export class TieredMemoryStore {
    * Store one atom, deduped against existing atoms (normalized-text match).
    * Returns the atom id, or the existing id when deduped.
    */
-  storeAtom(botId: string, fact: DistilledFact, sourceTurn: string): string {
+  storeAtom(botId: string, fact: DistilledFact, sourceTurn: string, tier?: PrivacyTier): string {
     const factText = fact.fact.trim().slice(0, 500);
     if (!factText) throw new Error('fact must be non-empty');
     const factNorm = normFact(factText);
@@ -388,11 +462,54 @@ export class TieredMemoryStore {
     const entities = [...new Set(fact.entities.map((e) => e.trim()).filter(Boolean))].slice(0, 10);
     this.db
       .prepare(
-        'INSERT INTO memory_atoms (id, bot_id, fact, fact_norm, entities_json, confidence, source_turn, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO memory_atoms (id, bot_id, fact, fact_norm, entities_json, confidence, source_turn, created_at, tier) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       )
-      .run(id, botId, factText, factNorm, JSON.stringify(entities), Math.min(1, Math.max(0, fact.confidence)), sourceTurn, Date.now());
+      .run(id, botId, factText, factNorm, JSON.stringify(entities), Math.min(1, Math.max(0, fact.confidence)), sourceTurn, Date.now(), resolveTier('memory', tier));
+    this.indexAtomForSearch(botId, id, factText, entities);
     this.refreshEntityPages(botId, entities, id);
     return id;
+  }
+
+  /**
+   * Index one atom for hybrid search: hash embedding (vector leg) + FTS5
+   * row (lexical/BM25 leg). Best-effort — search indexing must never break
+   * atom storage.
+   */
+  private indexAtomForSearch(botId: string, id: string, fact: string, entities: string[]): void {
+    try {
+      const [vec] = this.embedder.embedSync([fact]);
+      this.db.prepare('UPDATE memory_atoms SET embedding = ? WHERE id = ?').run(JSON.stringify(Array.from(vec)), id);
+    } catch {
+      // vector leg degrades gracefully when embedding fails
+    }
+    try {
+      this.db
+        .prepare('INSERT INTO memory_atoms_fts (atom_id, bot_id, fact, entities) VALUES (?, ?, ?, ?)')
+        .run(id, botId, fact, entities.join(' '));
+    } catch {
+      // lexical leg degrades gracefully
+    }
+  }
+
+  /**
+   * Backfill embeddings for atoms stored before hybrid search existed (or
+   * whose embedding failed at write time). Called at the start of
+   * recallHybrid; the sync hash embedder makes this cheap.
+   */
+  private ensureEmbeddings(botId: string): void {
+    const missing = this.db
+      .prepare('SELECT id, fact FROM memory_atoms WHERE bot_id = ? AND embedding IS NULL LIMIT 500')
+      .all(botId) as Array<{ id: string; fact: string }>;
+    if (missing.length === 0) return;
+    const upd = this.db.prepare('UPDATE memory_atoms SET embedding = ? WHERE id = ?');
+    for (const m of missing) {
+      try {
+        const [vec] = this.embedder.embedSync([m.fact]);
+        upd.run(JSON.stringify(Array.from(vec)), m.id);
+      } catch {
+        // leave un-embedded; vector leg simply skips it
+      }
+    }
   }
 
   getAtoms(botId: string, limit = 200): AtomCard[] {
@@ -400,7 +517,7 @@ export class TieredMemoryStore {
       .prepare('SELECT * FROM memory_atoms WHERE bot_id = ? ORDER BY created_at DESC LIMIT ?')
       .all(botId, limit) as Array<{
         id: string; bot_id: string; fact: string; entities_json: string;
-        confidence: number; source_turn: string; created_at: number;
+        confidence: number; source_turn: string; created_at: number; tier: string | null;
       }>;
     return rows.map((r) => ({
       id: r.id,
@@ -410,11 +527,17 @@ export class TieredMemoryStore {
       confidence: r.confidence,
       sourceTurn: r.source_turn,
       createdAt: r.created_at,
+      tier: readTier(r.tier),
     }));
   }
 
   deleteAtom(botId: string, id: string): boolean {
     const res = this.db.prepare('DELETE FROM memory_atoms WHERE bot_id = ? AND id = ?').run(botId, id);
+    try {
+      this.db.prepare('DELETE FROM memory_atoms_fts WHERE atom_id = ?').run(id);
+    } catch {
+      // FTS cleanup is best-effort
+    }
     return res.changes > 0;
   }
 
@@ -487,9 +610,14 @@ export class TieredMemoryStore {
    * Retrieve atoms relevant to `query` (keyword match on entities + fact
    * text, ranked by overlap then confidence) and render a compact
    * "What I remember" block capped at ~500 tokens (~2000 chars).
+   *
+   * Privacy: atoms above `maxTier` are excluded BEFORE ranking. The
+   * default (`cloud-ok`) keeps `local-only` atoms out of cloud prompts —
+   * this is the memory leg of the privacy-tier enforcement.
    */
-  recallForPrompt(botId: string, query: string, maxChars = 2000): string {
-    const atoms = this.getAtoms(botId, 500);
+  recallForPrompt(botId: string, query: string, maxChars = 2000, opts: { maxTier?: PrivacyTier } = {}): string {
+    const maxTier = opts.maxTier ?? 'cloud-ok';
+    const atoms = this.getAtoms(botId, 500).filter((a) => tierAtMost(a.tier, maxTier));
     if (atoms.length === 0) return '';
     const qTokens = new Set(normFact(query).split(' ').filter((t) => t.length > 2));
     if (qTokens.size === 0) return '';
@@ -508,6 +636,108 @@ export class TieredMemoryStore {
     if (scored.length === 0) return '';
     let block = '# What I remember (from past conversations)\n';
     for (const { atom } of scored) {
+      const line = `- ${atom.fact}\n`;
+      if (block.length + line.length > maxChars) break;
+      block += line;
+    }
+    return block;
+  }
+
+  /**
+   * Hybrid recall: vector (hash-embedding cosine) + lexical (FTS5/BM25)
+   * legs fused with Reciprocal Rank Fusion (k=60). Returns the topK atoms
+   * with fused scores and the legs that retrieved each atom.
+   *
+   * Additive path — recallForPrompt() keeps its original keyword-overlap
+   * behavior. Prefer this when you want the best recall.
+   */
+  recallHybrid(botId: string, query: string, topK = 5, maxTier: PrivacyTier = 'cloud-ok'): HybridRecallHit[] {
+    const q = query.trim();
+    if (!q) return [];
+    const k = Math.min(Math.max(topK, 1), 50);
+    const depth = Math.min(k * 4, 100);
+
+    // --- vector leg: brute-force cosine over stored hash embeddings ------
+    let vectorRanked: string[] = [];
+    try {
+      this.ensureEmbeddings(botId);
+      const [qv] = this.embedder.embedSync([q]);
+      const rows = this.db
+        .prepare('SELECT id, embedding FROM memory_atoms WHERE bot_id = ?')
+        .all(botId) as Array<{ id: string; embedding: string | null }>;
+      vectorRanked = rows
+        .map((r) => {
+          let vec: number[] = [];
+          try {
+            vec = r.embedding ? (JSON.parse(r.embedding) as number[]) : [];
+          } catch {
+            vec = [];
+          }
+          return { id: r.id, s: cosineSimilarity(qv, vec) };
+        })
+        .filter((x) => x.s > 0)
+        .sort((a, b) => b.s - a.s)
+        .slice(0, depth)
+        .map((x) => x.id);
+    } catch {
+      // vector leg is best-effort
+    }
+
+    // --- lexical leg: FTS5 BM25 -------------------------------------------
+    let lexicalRanked: string[] = [];
+    const match = buildFtsMatchQuery(q);
+    if (match) {
+      try {
+        const rows = this.db
+          .prepare(
+            `SELECT atom_id AS id FROM memory_atoms_fts
+             WHERE memory_atoms_fts MATCH ? AND bot_id = ?
+             ORDER BY bm25(memory_atoms_fts) LIMIT ?`,
+          )
+          .all(match, botId, depth) as Array<{ id: string }>;
+        lexicalRanked = rows.map((r) => r.id);
+      } catch {
+        // lexical leg is best-effort
+      }
+    }
+
+    // --- RRF fusion ---------------------------------------------------------
+    const fused = reciprocalRankFuse([vectorRanked, lexicalRanked], 60).slice(0, k);
+    if (fused.length === 0) return [];
+    const vecSet = new Set(vectorRanked);
+    const lexSet = new Set(lexicalRanked);
+    const byId = new Map(this.getAtoms(botId, 2000).map((a) => [a.id, a]));
+    const hits: HybridRecallHit[] = [];
+    for (const f of fused) {
+      const atom = byId.get(f.id);
+      // Privacy: drop atoms above maxTier before they can reach a prompt.
+      if (!atom || !tierAtMost(atom.tier, maxTier)) continue;
+      const sources: Array<'vector' | 'lexical'> = [];
+      if (vecSet.has(f.id)) sources.push('vector');
+      if (lexSet.has(f.id)) sources.push('lexical');
+      hits.push({ atom, score: Math.round(f.score * 1e6) / 1e6, sources });
+    }
+    return hits;
+  }
+
+  /**
+   * Render hybrid recall as a "What I remember" prompt block, same shape as
+   * recallForPrompt() but ranked by the hybrid (vector + BM25 + RRF) path.
+   *
+   * Relevance gate: hash embeddings rank *something* for every query, so a
+   * hit is only injected into the prompt when the lexical leg matched it or
+   * it beat the single-leg RRF floor (1/61) via multi-leg agreement —
+   * otherwise gibberish queries would inject irrelevant atoms. Callers that
+   * want unfiltered recall should use recallHybrid() directly.
+   */
+  recallForPromptHybrid(botId: string, query: string, maxChars = 2000, maxTier: PrivacyTier = 'cloud-ok'): string {
+    const RRF_FLOOR = 1 / 61 + 1e-9;
+    const hits = this.recallHybrid(botId, query, 12, maxTier).filter(
+      (h) => h.sources.includes('lexical') || h.score > RRF_FLOOR,
+    );
+    if (hits.length === 0) return '';
+    let block = '# What I remember (from past conversations)\n';
+    for (const { atom } of hits) {
       const line = `- ${atom.fact}\n`;
       if (block.length + line.length > maxChars) break;
       block += line;

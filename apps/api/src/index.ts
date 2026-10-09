@@ -37,7 +37,7 @@ import { runChatCli } from './cli.js';
 // Phase 3: scheduled workflows create tasks; the platform also serves its
 // own tools as an MCP server (two-way MCP).
 import { makeTaskCreator } from './tasks.js';
-import { PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime';
+import { McpScopeStore, PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime';
 // Phase 4: computer-use + muse-module agent tools, policy rules, protocols,
 // and the reminders module (scheduler routing). The computer.ts subpath is
 // imported directly (not re-exported from the agent-runtime index — index
@@ -95,12 +95,15 @@ function buildPlatformMcpServer(opts: {
   governance: import('@mvp/agent-runtime').GovernanceGateway;
   agentRuntime: AgentRuntime;
   bots: BotConfig[];
+  /** Per-tool scope toggles; enforced in the tools/call path (mcp-scopes.ts). */
+  scopes: import('@mvp/agent-runtime').McpScopeStore;
 }): PlatformMcpServer {
   const fallbackBot = opts.bots[0];
   return new PlatformMcpServer({
     tools: toolProviderFromRegistry(opts.toolRegistry),
     governance: opts.governance,
     botId: 'mcp-gateway',
+    scopes: opts.scopes,
     chat: fallbackBot
       ? {
           description: `Chat with the "${fallbackBot.id}" bot (one turn).`,
@@ -307,17 +310,24 @@ async function boot(): Promise<void> {
     }
   });
 
+  // Per-tool MCP scopes (mcp-scopes.ts): one store shared by the platform
+  // MCP server (enforced in the tools/call path) and the settings REST API.
+  // The server object is built unconditionally — it is inert until served —
+  // so GET /api/mcp/tools works even when no MCP transport is configured.
+  const mcpScopeStore = new McpScopeStore(path.join(config.dataDir, 'mcp-scopes.db'));
+  const platformMcpServer = buildPlatformMcpServer({
+    toolRegistry,
+    governance: governanceAdapter,
+    agentRuntime,
+    bots: seed.bots,
+    scopes: mcpScopeStore,
+  });
+
   // Phase 3: two-way MCP over stdio — serve the platform's tools to an
   // external MCP client on stdin/stdout instead of starting HTTP.
   // Usage: mvp-server --mcp-stdio
   if (process.argv.includes('--mcp-stdio')) {
-    const mcpServer = buildPlatformMcpServer({
-      toolRegistry,
-      governance: governanceAdapter,
-      agentRuntime,
-      bots: seed.bots,
-    });
-    await mcpServer.serveStdio();
+    await platformMcpServer.serveStdio();
     return;
   }
 
@@ -398,16 +408,9 @@ async function boot(): Promise<void> {
 
   // Phase 3: two-way MCP over HTTP+SSE on a separate port when configured.
   // External clients connect to http://127.0.0.1:<port>/sse.
-  let mcpServer: PlatformMcpServer | undefined;
   const mcpPort = Number(process.env.MCP_SERVER_PORT ?? 0);
   if (Number.isFinite(mcpPort) && mcpPort > 0) {
-    mcpServer = buildPlatformMcpServer({
-      toolRegistry,
-      governance: governanceAdapter,
-      agentRuntime,
-      bots: seed.bots,
-    });
-    const { url } = await mcpServer.serveHttp({ port: mcpPort });
+    const { url } = await platformMcpServer.serveHttp({ port: mcpPort });
     console.log(`[mcp] platform MCP server on ${url}`);
   }
 
@@ -434,7 +437,8 @@ async function boot(): Promise<void> {
       governanceAdapter,
       workflowRunner,
       mcpConnections,
-      mcpServer,
+      mcpServer: platformMcpServer,
+      mcpScopeStore,
       threadScheduleStore,
       checkpointStore,
       dotStore,

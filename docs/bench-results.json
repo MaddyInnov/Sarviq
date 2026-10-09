@@ -1,49 +1,49 @@
 {
-  "ts": "2026-10-09T11:16:52.869Z",
-  "quick": false,
+  "ts": "2026-10-09T11:51:34.844Z",
+  "quick": true,
   "results": {
     "boot_ms": {
-      "value": 351,
+      "value": 331,
       "unit": "ms"
     },
     "GET /api/health": {
-      "value": "4.7/8.7",
+      "value": "9.1/32.7",
       "unit": "ms p50/p95"
     },
     "GET /api/bots": {
-      "value": "2.8/5.2",
+      "value": "7.7/11.6",
       "unit": "ms p50/p95"
     },
     "GET /api/workflows": {
-      "value": "2.8/5.7",
+      "value": "2.8/4.7",
       "unit": "ms p50/p95"
     },
     "GET /api/preferences": {
-      "value": "3.0/7.7",
+      "value": "2.9/20.6",
       "unit": "ms p50/p95"
     },
     "POST /api/chat first-token": {
-      "value": "8/99",
+      "value": "12/36",
       "unit": "ms p50/p95"
     },
     "workflow 9x50ms sequential": {
-      "value": "462",
+      "value": "468",
       "unit": "ms p50 (floor ~450ms)"
     },
     "workflow 9x50ms parallel": {
-      "value": "57",
+      "value": "54",
       "unit": "ms p50 (floor ~50ms)"
     },
     "parallel speedup": {
-      "value": "8.1x",
+      "value": "8.6x",
       "unit": ""
     },
     "1000 session writes": {
-      "value": "72",
-      "unit": "ms (13813 writes/s)"
+      "value": "74",
+      "unit": "ms (13503 writes/s)"
     },
     "read 100 msgs": {
-      "value": "3.02",
+      "value": "3.27",
       "unit": "ms"
     },
     "query_plans": {
@@ -54,16 +54,12 @@
       "value": "84",
       "unit": "MB"
     },
-    "RSS after 10 chat turns": {
-      "value": "84",
-      "unit": "MB"
-    },
     "mvp-server binary": {
-      "value": "82.6",
+      "value": "82.7",
       "unit": "MB"
     },
     "web static export": {
-      "value": "3.4",
+      "value": "3.5",
       "unit": "MB total"
     },
     "web JS": {

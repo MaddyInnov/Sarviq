@@ -33,6 +33,8 @@ import {
 } from './providers/catalog.js';
 import type { ProviderModelPreset } from './providers/catalog.js';
 import { priceOfModel } from './pricing.js';
+import { matchLearnedRule } from './routing-learn.js';
+import type { LearnedRoutingRule } from './routing-learn.js';
 
 export type TaskType = 'code' | 'chat' | 'reasoning' | 'simple-qa';
 
@@ -54,6 +56,20 @@ export interface RouteModelInput {
    * bridges whose models aren't in the static catalog) keep working.
    */
   providerHint?: string;
+  /**
+   * The user message being routed (optional). Used ONLY to match learned
+   * routing rules that carry message patterns (routing-learn.ts). Never
+   * sent anywhere.
+   */
+  message?: string;
+  /**
+   * Learned routing rules from user corrections (routing-learn.ts), newest
+   * first. The first matching rule wins over the built-in heuristics below
+   * — but never over an explicit `botModel` override, and never against
+   * the free-only guard (fail closed: a rule targeting a paid model is
+   * skipped while the guard is active).
+   */
+  learnedRules?: LearnedRoutingRule[];
 }
 
 export interface RouteModelResult {
@@ -229,6 +245,27 @@ export function routeModel(input: RouteModelInput): RouteModelResult {
     }
   }
   const scope = constrained ? 'free-only pool' : 'full catalog';
+
+  // Learned rules from user corrections (routing-learn.ts): checked after
+  // the explicit override above, before the built-in heuristics. The
+  // free-only guard is fail-closed — a rule pointing at a paid model is
+  // skipped rather than applied.
+  if (input.learnedRules && input.learnedRules.length > 0) {
+    const rule = matchLearnedRule(input.learnedRules, {
+      taskType: input.taskType,
+      message: input.message,
+    });
+    if (rule && (!constrained || isFreeModel(rule.then.providerId, rule.then.modelId))) {
+      const n = rule.count === 1 ? '1 user correction' : `${rule.count} user corrections`;
+      return {
+        providerId: rule.then.providerId,
+        modelId: rule.then.modelId,
+        reason:
+          `learned routing rule (from ${n}): ${rule.description} ` +
+          `→ ${rule.then.providerId}/${rule.then.modelId}.`,
+      };
+    }
+  }
 
   switch (input.taskType) {
     case 'code': {

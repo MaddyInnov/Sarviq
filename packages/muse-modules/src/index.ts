@@ -27,5 +27,6 @@ export * from './social/index.js';
 export * from './meetings/index.js';
 export * from './slides/index.js';
 export * from './knowledge-base/index.js';
+export * from './entities/index.js';
 export { registerMuseModuleTools, museModuleToolPolicies, tagUntrusted } from './tools.js';
 export type { MuseModuleToolOptions } from './tools.js';

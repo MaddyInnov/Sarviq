@@ -6,7 +6,7 @@ import { join } from 'node:path';
 import type { AddressInfo } from 'node:net';
 import express from 'express';
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
-import { BillingLedger, MockBillingProvider, UsageMeter } from '@mvp/billing';
+import { BillingLedger, CostTracker, MockBillingProvider, UsageMeter } from '@mvp/billing';
 import { registerBillingRoutes } from '../src/billing.js';
 
 describe('billing router', () => {
@@ -24,6 +24,7 @@ describe('billing router', () => {
       meter: new UsageMeter(join(dir, 'billing.db')),
       ledger: new BillingLedger(join(dir, 'billing.db')),
       provider: new MockBillingProvider(),
+      costTracker: new CostTracker(join(dir, 'billing.db')),
     });
     app.use('/api/billing', router);
     await new Promise<void>((resolve) => {
@@ -129,5 +130,102 @@ describe('billing router', () => {
     expect(confirmed.status).toBe('succeeded');
     expect(confirmed.mock).toBe(true);
     expect((await api('GET', '/payment-intents/nope')).status).toBe(404);
+  });
+});
+
+describe('cost dashboard', () => {
+  let dir: string;
+  let baseUrl: string;
+  let server: ReturnType<import('node:http').Server> | null = null;
+
+  beforeEach(async () => {
+    dir = mkdtempSync(join(tmpdir(), 'billing-cost-'));
+    const app = express();
+    app.use(express.json());
+    const router = express.Router();
+    registerBillingRoutes(router, {
+      dataDir: dir,
+      meter: new UsageMeter(join(dir, 'billing.db')),
+      ledger: new BillingLedger(join(dir, 'billing.db')),
+      provider: new MockBillingProvider(),
+      costTracker: new CostTracker(join(dir, 'billing.db')),
+    });
+    app.use('/api/billing', router);
+    await new Promise<void>((resolve) => {
+      server = app.listen(0, '127.0.0.1', () => resolve());
+    });
+    const addr = (server as unknown as { address(): AddressInfo }).address();
+    baseUrl = `http://127.0.0.1:${addr.port}/api/billing`;
+  });
+
+  afterEach(async () => {
+    await new Promise<void>((resolve) => (server as unknown as { close(cb: () => void): void }).close(() => resolve()));
+    server = null;
+  });
+
+  async function api(method: string, path = '', body?: unknown): Promise<{ status: number; json: any }> {
+    const res = await fetch(`${baseUrl}${path}`, {
+      method,
+      headers: { 'content-type': 'application/json' },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+    return { status: res.status, json: await res.json() };
+  }
+
+  it('records cost events and serves the breakdown', async () => {
+    const r1 = await api('POST', '/usage/cost-events', {
+      feature: 'chat',
+      step: 'provider.chat',
+      model: 'llama-3.3-70b',
+      inputTokens: 1000,
+      outputTokens: 500,
+      costCents: 42,
+    });
+    expect(r1.status).toBe(201);
+    expect(r1.json.feature).toBe('chat');
+
+    await api('POST', '/usage/cost-events', {
+      feature: 'workflows',
+      step: 'run',
+      inputTokens: 2000,
+      outputTokens: 0,
+      costCents: 100,
+    });
+
+    const b = await api('GET', '/usage/breakdown?period=all');
+    expect(b.status).toBe(200);
+    expect(b.json.totals).toMatchObject({ events: 2, costCents: 142 });
+    expect(b.json.byFeature.map((f: any) => f.feature).sort()).toEqual(['chat', 'workflows']);
+    expect(b.json.byStep.length).toBe(2);
+
+    const bad = await api('GET', '/usage/breakdown?period=fortnight');
+    expect(bad.status).toBe(400);
+
+    const invalid = await api('POST', '/usage/cost-events', { feature: 'x' });
+    expect(invalid.status).toBe(400);
+  });
+
+  it('enforces monthly feature caps with a capExceeded signal', async () => {
+    const set = await api('PUT', '/usage/caps/chat', { monthlyCapCents: 50 });
+    expect(set.status).toBe(200);
+    expect(set.json.capCents).toBe(50);
+    expect(set.json.capExceeded).toBe(false);
+
+    await api('POST', '/usage/cost-events', {
+      feature: 'chat',
+      step: 'provider.chat',
+      inputTokens: 100,
+      outputTokens: 0,
+      costCents: 60,
+    });
+
+    const caps = await api('GET', '/usage/caps');
+    expect(caps.status).toBe(200);
+    const chat = (caps.json as any[]).find((c) => c.feature === 'chat');
+    expect(chat.capExceeded).toBe(true);
+    expect(chat.spentCents).toBe(60);
+
+    const bad = await api('PUT', '/usage/caps/chat', {});
+    expect(bad.status).toBe(400);
   });
 });

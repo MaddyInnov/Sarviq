@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: Apache-2.0
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { decideApproval, getApprovals, allowTool } from '../../lib/api';
 import type { ApprovalRecord } from '../../lib/api';
+import { BulkBar, ShortcutHelp, useActivityShortcuts, type TriageHandlers } from '../activity/triage';
 
 function fmtTs(ts: number): string {
   return new Date(ts).toLocaleString();
@@ -22,6 +23,17 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
   const [decided, setDecided] = useState<ApprovalRecord[]>([]);
   const [error, setError] = useState('');
   const [acting, setActing] = useState<string>('');
+  // --- Bulk triage state -------------------------------------------------
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  /** Local-only archive: no archive endpoint on the backend yet. */
+  const [archived, setArchived] = useState<Set<string>>(new Set());
+  const [focusIdx, setFocusIdx] = useState(0);
+  const [helpOpen, setHelpOpen] = useState(false);
+  const itemRefs = useRef<Array<HTMLDivElement | null>>([]);
+  /** Set when j/k moves focus — only then do we move DOM focus (never on mount). */
+  const focusFromKeys = useRef(false);
+
+  const visible = pending.filter((a) => !archived.has(a.id));
 
   const refresh = useCallback(async () => {
     try {
@@ -66,6 +78,94 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
     }
   };
 
+  const decideMany = useCallback(
+    async (ids: string[], decision: 'approved' | 'denied') => {
+      for (const id of ids) {
+        setActing(id);
+        try {
+          await decideApproval(id, decision);
+        } catch (err) {
+          setError(err instanceof Error ? err.message : String(err));
+          break;
+        }
+      }
+      setActing('');
+      setSelected(new Set());
+      await refresh();
+    },
+    [refresh],
+  );
+
+  /** IDs the focused/selected shortcuts act on: selection wins, else focused item. */
+  const targetIds = useCallback((): string[] => {
+    if (selected.size > 0) return [...selected];
+    const item = visible[Math.min(focusIdx, Math.max(0, visible.length - 1))];
+    return item ? [item.id] : [];
+  }, [selected, visible, focusIdx]);
+
+  const handlers: TriageHandlers = useMemo(
+    () => ({
+      refresh: () => void refresh(),
+      'mark-done': () => {
+        const ids = targetIds();
+        if (ids.length > 0) void decideMany(ids, 'approved');
+      },
+      archive: () => {
+        const ids = targetIds();
+        if (ids.length > 0) {
+          setArchived((prev) => new Set([...prev, ...ids]));
+          setSelected(new Set());
+        }
+      },
+      'toggle-select': () => {
+        const item = visible[Math.min(focusIdx, Math.max(0, visible.length - 1))];
+        if (!item) return;
+        setSelected((prev) => {
+          const next = new Set(prev);
+          if (next.has(item.id)) next.delete(item.id);
+          else next.add(item.id);
+          return next;
+        });
+      },
+      'focus-next': () => {
+        focusFromKeys.current = true;
+        setFocusIdx((i) => Math.min(i + 1, Math.max(0, visible.length - 1)));
+      },
+      'focus-prev': () => {
+        focusFromKeys.current = true;
+        setFocusIdx((i) => Math.max(i - 1, 0));
+      },
+      'clear-selection': () => setSelected(new Set()),
+      close: () => {
+        setSelected(new Set());
+        setHelpOpen(false);
+      },
+      'toggle-help': () => setHelpOpen((v) => !v),
+    }),
+    [refresh, decideMany, targetIds, visible, focusIdx],
+  );
+
+  useActivityShortcuts(true, handlers);
+
+  // Keep keyboard focus on the focused card when j/k moves it.
+  // Never steals focus on mount/refresh — only after a keyboard move.
+  useEffect(() => {
+    if (!focusFromKeys.current) return;
+    focusFromKeys.current = false;
+    const el = itemRefs.current[focusIdx];
+    if (el && document.activeElement && !el.contains(document.activeElement)) {
+      el.focus({ preventScroll: false });
+    }
+  }, [focusIdx]);
+
+  const toggleOne = (id: string) =>
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+
   return (
     <div>
       {!hideHeader && (
@@ -78,12 +178,50 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
       )}
       {error && <div className="error-box">{error}</div>}
 
-      <h3>Pending ({pending.length})</h3>
-      {pending.length === 0 && <p className="muted">Nothing waiting for a decision.</p>}
-      {pending.map((a) => (
-        <div key={a.id} className="card">
+      <div className="row-between">
+        <h3 className="mt0">Pending ({visible.length})</h3>
+        <button
+          className="btn btn-sm"
+          onClick={() => setHelpOpen(true)}
+          title="Keyboard shortcuts (?)"
+          aria-label="Show keyboard shortcuts"
+        >
+          ⌨ ?
+        </button>
+      </div>
+      <BulkBar
+        count={selected.size}
+        busy={acting !== ''}
+        onApprove={() => void decideMany([...selected], 'approved')}
+        onDeny={() => void decideMany([...selected], 'denied')}
+        onArchive={() => {
+          setArchived((prev) => new Set([...prev, ...selected]));
+          setSelected(new Set());
+        }}
+        onClear={() => setSelected(new Set())}
+      />
+      {visible.length === 0 && <p className="muted">Nothing waiting for a decision.</p>}
+      {visible.map((a, idx) => (
+        <div
+          key={a.id}
+          ref={(el) => {
+            itemRefs.current[idx] = el;
+          }}
+          tabIndex={-1}
+          className={`card triage-item${idx === focusIdx ? ' triage-focused' : ''}${
+            selected.has(a.id) ? ' triage-selected' : ''
+          }`}
+        >
           <div className="row-between">
             <div>
+              <input
+                type="checkbox"
+                className="triage-check"
+                checked={selected.has(a.id)}
+                onChange={() => toggleOne(a.id)}
+                onClick={() => setFocusIdx(idx)}
+                aria-label={`Select approval ${a.toolName}`}
+              />{' '}
               <strong className="mono">{a.toolName}</strong>{' '}
               <span className="chip amber">pending</span>
               {a.provenance && (
@@ -163,6 +301,7 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
           </tbody>
         </table>
       </div>
+      <ShortcutHelp open={helpOpen} onClose={() => setHelpOpen(false)} />
     </div>
   );
 }

@@ -17,12 +17,16 @@
 import express, { type Request, type Response, type Router } from 'express';
 import { join } from 'node:path';
 import {
+  TeamDirectoryStore,
   TeamStore,
   buildCoordinatorPrompt,
+  enrichActor,
+  withEnrichedRunActors,
   type AgentRuntime,
   type BotConfig,
   type StreamEvent,
   type Team,
+  type TeamRun,
   type TeamStep,
 } from '@mvp/agent-runtime';
 
@@ -53,8 +57,14 @@ function summarizeResult(result: unknown): string {
 
 export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamStore {
   const store = new TeamStore(join(deps.dataDir));
+  const dirStore = new TeamDirectoryStore(join(deps.dataDir));
   // runId → subscriber set for live SSE progress
   const subscribers = new Map<string, Set<(evt: TeamEvent) => void>>();
+
+  // Every step returned over the API carries an enriched `actor` field:
+  // matched against the team directory ({role, team, relationship}), and
+  // passed through unchanged when unmatched.
+  const enrichRun = (run: TeamRun) => withEnrichedRunActors(run, dirStore);
 
   const publish = (runId: string, evt: TeamEvent): void => {
     const set = subscribers.get(runId);
@@ -101,6 +111,76 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
 
   router.get('/', (_req: Request, res: Response) => {
     res.json({ ok: true, teams: store.listTeams() });
+  });
+
+  // -- Team directory (actor enrichment) ---------------------------------
+  // Registered before the `/:id` routes so `/directory` is never mistaken
+  // for a team id.
+  //
+  //   GET    /directory              → { ok, members }
+  //   POST   /directory              → { name, handle?, email?, role?,
+  //                                     team?, timezone?, notes?,
+  //                                     relationship? } → { ok, member }
+  //   PATCH  /directory/:memberId    → { ok, member }
+  //   DELETE /directory/:memberId    → { ok, deleted }
+
+  router.get('/directory', (_req: Request, res: Response) => {
+    res.json({ ok: true, members: dirStore.listMembers() });
+  });
+
+  router.post('/directory', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    try {
+      const member = dirStore.addMember({
+        name: typeof body.name === 'string' ? body.name : '',
+        handle: typeof body.handle === 'string' ? body.handle : undefined,
+        email: typeof body.email === 'string' ? body.email : undefined,
+        role: typeof body.role === 'string' ? body.role : undefined,
+        team: typeof body.team === 'string' ? body.team : undefined,
+        timezone: typeof body.timezone === 'string' ? body.timezone : undefined,
+        notes: typeof body.notes === 'string' ? body.notes : undefined,
+        relationship: typeof body.relationship === 'string' ? body.relationship : undefined,
+      });
+      res.status(201).json({ ok: true, member });
+    } catch (err) {
+      res.status(400).json(errorBody(err instanceof Error ? err.message : 'Failed to add directory member'));
+    }
+  });
+
+  router.patch('/directory/:memberId', (req: Request, res: Response) => {
+    const memberId = req.params.memberId;
+    if (!validId(memberId)) {
+      res.status(400).json(errorBody('Invalid member id'));
+      return;
+    }
+    const body = (req.body ?? {}) as Record<string, unknown>;
+    const patch: Record<string, string> = {};
+    for (const key of ['name', 'handle', 'email', 'role', 'team', 'timezone', 'notes', 'relationship'] as const) {
+      if (typeof body[key] === 'string') patch[key] = body[key] as string;
+    }
+    try {
+      const member = dirStore.updateMember(memberId, patch);
+      if (!member) {
+        res.status(404).json(errorBody(`Unknown directory member "${memberId}"`));
+        return;
+      }
+      res.json({ ok: true, member });
+    } catch (err) {
+      res.status(400).json(errorBody(err instanceof Error ? err.message : 'Failed to update directory member'));
+    }
+  });
+
+  router.delete('/directory/:memberId', (req: Request, res: Response) => {
+    const memberId = req.params.memberId;
+    if (!validId(memberId)) {
+      res.status(400).json(errorBody('Invalid member id'));
+      return;
+    }
+    if (!dirStore.deleteMember(memberId)) {
+      res.status(404).json(errorBody(`Unknown directory member "${memberId}"`));
+      return;
+    }
+    res.json({ ok: true, deleted: memberId });
   });
 
   router.delete('/:id', (req: Request, res: Response) => {
@@ -217,7 +297,7 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
     }
     const run = store.startRun(id, task);
     executeRun(team, run.id);
-    res.json({ ok: true, run });
+    res.json({ ok: true, run: enrichRun(run) });
   });
 
   router.get('/:id/runs', (req: Request, res: Response) => {
@@ -230,7 +310,7 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
       res.status(404).json(errorBody(`Unknown team "${id}"`));
       return;
     }
-    res.json({ ok: true, runs: store.listRuns(id) });
+    res.json({ ok: true, runs: store.listRuns(id).map(enrichRun) });
   });
 
   router.get('/:id/runs/:runId', (req: Request, res: Response) => {
@@ -239,7 +319,7 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
       res.status(404).json(errorBody('Unknown run'));
       return;
     }
-    res.json({ ok: true, run });
+    res.json({ ok: true, run: enrichRun(run) });
   });
 
   router.get('/:id/runs/:runId/stream', (req: Request, res: Response) => {
@@ -257,7 +337,7 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
     // Replay current state so late joiners see progress so far.
     const current = store.getRun(run.id);
     if (current) {
-      current.steps.forEach((step, index) => {
+      enrichRun(current).steps.forEach((step, index) => {
         res.write(`data: ${JSON.stringify({ kind: step.done ? 'step_done' : 'step_start', index, step })}\n\n`);
       });
       if (current.status === 'done') {
@@ -278,7 +358,12 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
     }
     const send = (evt: TeamEvent): void => {
       try {
-        res.write(`data: ${JSON.stringify(evt)}\n\n`);
+        // Enrich step actors against the team directory for live events too.
+        const out =
+          evt.kind === 'step_start' || evt.kind === 'step_done'
+            ? { ...evt, step: { ...evt.step, actor: enrichActor(evt.step.memberName, dirStore) } }
+            : evt;
+        res.write(`data: ${JSON.stringify(out)}\n\n`);
         if (evt.kind === 'done' || evt.kind === 'failed') {
           res.end();
         }

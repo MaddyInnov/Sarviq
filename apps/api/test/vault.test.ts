@@ -135,4 +135,23 @@ describe('vault router', () => {
     expect(raw).not.toContain('on-disk-secret-abc');
     expect(JSON.parse(raw).alg).toBe('aes-256-gcm');
   });
+
+  it('privacy tiers: defaults to local-only, accepts overrides, rejects bad tiers', async () => {
+    const created = await api('POST', '/vault', { name: 'k1', value: 'v1' });
+    expect(created.status).toBe(201);
+    expect(created.json.tier).toBe('local-only');
+
+    const listed = await api('GET', '/vault');
+    expect(listed.json[0].tier).toBe('local-only');
+    expect((await api('GET', '/vault/k1')).json.tier).toBe('local-only');
+
+    const over = await api('POST', '/vault', { name: 'k2', value: 'v2', tier: 'cloud-ok' });
+    expect(over.json.tier).toBe('cloud-ok');
+
+    const upd = await api('PUT', '/vault/k2', { tier: 'metadata' });
+    expect(upd.json.tier).toBe('metadata');
+
+    const bad = await api('POST', '/vault', { name: 'k3', value: 'v3', tier: 'secret' });
+    expect(bad.status).toBe(400);
+  });
 });

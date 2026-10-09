@@ -917,6 +917,9 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
         query: String(b.query ?? ''),
         topK: typeof b.topK === 'number' ? b.topK : 5,
         corpusIds: Array.isArray(b.corpusIds) ? (b.corpusIds as string[]) : undefined,
+        // Opt-in hybrid retrieval: vector + FTS5/BM25 fused with RRF (k=60).
+        // Default false — existing callers keep vector-only behavior.
+        hybrid: b.hybrid === true,
       });
       res.json({ chunks });
     } catch (err) {

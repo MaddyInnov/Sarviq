@@ -99,6 +99,8 @@ export class TerminalManager {
   /**
    * Injectable process spawner (tests pass a fake; production uses
    * child_process.spawn). Signature mirrors spawn(cmd, args, opts).
+   * `probes` overrides backend detection so tests are hermetic regardless
+   * of whether node-pty/docker exist on the machine running them.
    */
   constructor(
     private readonly spawnFn: (
@@ -106,6 +108,10 @@ export class TerminalManager {
       args: string[],
       opts: { cwd: string; env: NodeJS.ProcessEnv },
     ) => ChildProcess = (cmd, args, opts) => spawn(cmd, args, { ...opts, stdio: ['pipe', 'pipe', 'pipe'] }),
+    private readonly probes: {
+      pty?: () => unknown | undefined;
+      docker?: () => boolean;
+    } = {},
   ) {}
 
   async create(opts: CreateTerminalOptions): Promise<TerminalSession> {
@@ -125,7 +131,7 @@ export class TerminalManager {
     };
 
     const env: NodeJS.ProcessEnv = { ...process.env, TERM: 'xterm-256color' };
-    const nodePty = tryLoadNodePty();
+    const nodePty = this.probes.pty ? this.probes.pty() : tryLoadNodePty();
 
     if (nodePty && typeof (nodePty as { spawn?: unknown }).spawn === 'function') {
       const ptyMod = nodePty as {
@@ -153,7 +159,8 @@ export class TerminalManager {
       return { ...meta };
     }
 
-    if (dockerAvailable()) {
+    const dockerUp = this.probes.docker ? this.probes.docker() : dockerAvailable();
+    if (dockerUp) {
       try {
         const image = opts.dockerImage || 'alpine';
         const proc = await this.spawnDocker(image, opts.workspaceDir, cols, rows, env);

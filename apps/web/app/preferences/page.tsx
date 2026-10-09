@@ -3,6 +3,8 @@
 import { useEffect, useState } from 'react';
 import { PetPicker } from '../../components/pet/PetPicker';
 import { AccentPicker } from '../../components/accent/AccentPicker';
+import { McpScopesPanel } from '../../components/panels/mcp-scopes-panel';
+import { useUxMode } from '../../lib/ux-mode';
 
 interface LearnedPreference {
   id: string;
@@ -28,6 +30,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export default function PreferencesPage() {
+  const [mode] = useUxMode();
   const [prefs, setPrefs] = useState<LearnedPreference[]>([]);
   const [recordings, setRecordings] = useState<Recording[]>([]);
   const [recording, setRecording] = useState<Recording | null>(null);
@@ -126,6 +129,17 @@ export default function PreferencesPage() {
           </table>
         )}
       </section>
+
+      {mode === 'pro' && (
+        <section className="card">
+          <h2>MCP tool scopes</h2>
+          <p className="muted small">
+            Per-tool capability gates. Turning off <em>Write</em> makes a tool read-only;
+            turning off <em>Egress</em> blocks its network access. Changes apply immediately.
+          </p>
+          <McpScopesPanel />
+        </section>
+      )}
 
       <section className="card">
         <h2>Teach by recording</h2>

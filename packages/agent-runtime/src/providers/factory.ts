@@ -13,17 +13,22 @@ import {
 import { MockProvider } from './mock.js';
 import { OllamaProvider } from './ollama.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
+import { createAgentCliProvider, parseAgentProviderId } from './agent-cli.js';
 
 /**
  * Build an LLMProvider from a catalog preset — or from a `custom-*` provider
  * configured via the Providers settings page (synthesized BYO preset).
  * Reads the key via resolveApiKey (env var, then providers.local.json); never logs it.
  *
+ * `opts.apiKey` (Spaces per-turn key override): when supplied, this key is
+ * used instead of the configured one. The value stays in memory for the
+ * returned provider's lifetime — never persisted or logged.
+ *
  * BYO presets (e.g. omnirush, custom-*) ship with an empty baseUrl. If the user
  * has not configured an endpoint yet, this throws a clear configuration error
  * instead of attempting a request to an empty URL.
  */
-export function createProvider(providerId: string): LLMProvider {
+export function createProvider(providerId: string, opts?: { apiKey?: string }): LLMProvider {
   // Demo mock provider for the video guide / screenshots (DEMO_MOCK=1 only).
   // Scripted two-step turn: announce a file write, then confirm after the
   // approval-gated tool call completes. Clearly labeled "(mock)" in the UI.
@@ -50,6 +55,15 @@ export function createProvider(providerId: string): LLMProvider {
     ]);
   }
 
+  // Agent-CLI inference backend: `agent/<cli-id>/<model>` (e.g.
+  // `agent/claude-code/sonnet`). Runs a locally installed agent CLI under
+  // the user's own subscription login — zero marginal cost, zero API keys
+  // handled by Sarviq. Auth is the CLI's own; the child is spawned without
+  // a shell and its output is marked untrusted (see agent-cli.ts).
+  if (parseAgentProviderId(providerId)) {
+    return createAgentCliProvider(providerId);
+  }
+
   const preset = getProviderPreset(providerId) ?? getCustomProviderPreset(providerId);
   if (!preset) {
     throw new Error(
@@ -65,7 +79,7 @@ export function createProvider(providerId: string): LLMProvider {
     );
   }
 
-  const apiKey = resolveApiKey(providerId);
+  const apiKey = opts?.apiKey ?? resolveApiKey(providerId);
   // Local providers (Ollama): no API key, ever. Skip the key requirement.
   if (preset.local) {
     if (preset.api === 'ollama') {

@@ -16,6 +16,10 @@
 //   GET    /usage/events          → UsageEvent[] (?sessionId=, ?botId=, ?since=, ?limit=)
 //   POST   /usage                 → record one usage event
 //   GET    /usage/cost            → { summary, priceConfig, costCents }
+//   GET    /usage/breakdown       → CostBreakdown (?period=day|week|month|all, ?feature=, ?since=, ?until=)
+//   POST   /usage/cost-events     → record a per-feature/per-step cost event (201)
+//   GET    /usage/caps            → FeatureCapStatus[] (monthly per-feature caps)
+//   PUT    /usage/caps/:feature   → { monthlyCapCents } → FeatureCapStatus
 //   GET    /ledger                → LedgerInvoice[] (?customerId=, ?limit=)
 //   GET    /ledger/:id            → LedgerInvoice
 //   POST   /customers             → { email, name? } → BillingCustomer (mock)
@@ -34,8 +38,8 @@
 
 import { Router } from 'express';
 import type { Request, Response } from 'express';
-import { BillingLedger, costOfUsage, resolvePriceConfig, UsageMeter } from '@mvp/billing';
-import type { BillingProvider, TokenUsageInput, UsageKind } from '@mvp/billing';
+import { BillingLedger, costOfUsage, resolvePriceConfig, UsageMeter, CostTracker } from '@mvp/billing';
+import type { BillingProvider, TokenUsageInput, UsageKind, BreakdownPeriod } from '@mvp/billing';
 import { MockBillingProvider } from '@mvp/billing';
 
 export interface BillingDeps {
@@ -43,6 +47,8 @@ export interface BillingDeps {
   meter: UsageMeter;
   ledger: BillingLedger;
   provider: BillingProvider;
+  /** Per-feature/per-step cost tracking for the cost dashboard. */
+  costTracker: CostTracker;
 }
 
 const VALID_USAGE_KINDS: ReadonlySet<string> = new Set(['tokens', 'workflow', 'sandbox']);
@@ -54,7 +60,7 @@ function numQuery(v: unknown): number | undefined {
 }
 
 export function registerBillingRoutes(router: Router, deps: BillingDeps): void {
-  const { meter, ledger, provider } = deps;
+  const { meter, ledger, provider, costTracker } = deps;
 
   // ---- Usage metering ------------------------------------------------------
 
@@ -146,6 +152,86 @@ export function registerBillingRoutes(router: Router, deps: BillingDeps): void {
       res.json({ summary, priceConfig, costCents: costOfUsage(summary, priceConfig) });
     } catch (err) {
       res.status(500).json({ error: errMessage(err, 'failed to compute usage cost') });
+    }
+  });
+
+  // ---- Cost dashboard: per-feature/per-step breakdown + feature caps ------
+  // GET  /usage/breakdown?period=month&feature=&since=&until=
+  //        → { period, since, until, byFeature[], byStep[], totals }
+  // POST /usage/cost-events
+  //        → { feature, step, model?, inputTokens, outputTokens, costCents?, sessionId?, botId? }
+  // GET  /usage/caps            → FeatureCapStatus[] (capExceeded is the dashboard signal)
+  // PUT  /usage/caps/:feature   → { monthlyCapCents } → FeatureCapStatus
+
+  const VALID_PERIODS: ReadonlySet<string> = new Set(['day', 'week', 'month', 'all']);
+
+  router.get('/usage/breakdown', (req: Request, res: Response) => {
+    try {
+      const periodRaw = typeof req.query.period === 'string' ? req.query.period : 'month';
+      if (!VALID_PERIODS.has(periodRaw)) {
+        res.status(400).json({ error: 'query "period" must be one of day|week|month|all' });
+        return;
+      }
+      res.json(
+        costTracker.breakdown({
+          period: periodRaw as BreakdownPeriod,
+          feature: typeof req.query.feature === 'string' ? req.query.feature : undefined,
+          since: numQuery(req.query.since),
+          until: numQuery(req.query.until),
+        }),
+      );
+    } catch (err) {
+      res.status(500).json({ error: errMessage(err, 'failed to compute cost breakdown') });
+    }
+  });
+
+  router.post('/usage/cost-events', (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as {
+        feature?: unknown;
+        step?: unknown;
+        model?: unknown;
+        inputTokens?: unknown;
+        outputTokens?: unknown;
+        costCents?: unknown;
+        sessionId?: unknown;
+        botId?: unknown;
+      };
+      const event = costTracker.record({
+        feature: body.feature as string,
+        step: body.step as string,
+        model: typeof body.model === 'string' ? body.model : undefined,
+        inputTokens: body.inputTokens as number,
+        outputTokens: body.outputTokens as number,
+        costCents: body.costCents === undefined ? undefined : (body.costCents as number),
+        sessionId: typeof body.sessionId === 'string' ? body.sessionId : undefined,
+        botId: typeof body.botId === 'string' ? body.botId : undefined,
+      });
+      res.status(201).json(event);
+    } catch (err) {
+      res.status(400).json({ error: errMessage(err, 'invalid cost event') });
+    }
+  });
+
+  router.get('/usage/caps', (_req: Request, res: Response) => {
+    try {
+      res.json(costTracker.allCapStatuses());
+    } catch (err) {
+      res.status(500).json({ error: errMessage(err, 'failed to read feature caps') });
+    }
+  });
+
+  router.put('/usage/caps/:feature', (req: Request, res: Response) => {
+    try {
+      const body = (req.body ?? {}) as { monthlyCapCents?: unknown };
+      if (typeof body.monthlyCapCents !== 'number') {
+        res.status(400).json({ error: 'body "monthlyCapCents" must be a number (USD cents)' });
+        return;
+      }
+      costTracker.setFeatureCap(req.params.feature, body.monthlyCapCents);
+      res.json(costTracker.capStatus(req.params.feature));
+    } catch (err) {
+      res.status(400).json({ error: errMessage(err, 'invalid feature cap') });
     }
   });
 

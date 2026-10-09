@@ -6,3 +6,5 @@ export * from './default-policy.js';
 export * from './bot-policy.js';
 export * from './hard-floors.js';
 export * from './gateway.js';
+export * from './privacy-tiers.js';
+export * from './processing-rules.js';
