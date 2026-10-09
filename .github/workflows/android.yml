@@ -36,8 +36,13 @@ jobs:
           distribution: temurin
           java-version: 17
 
-      - name: Set up Android SDK
-        uses: android-actions/setup-android@v3
+      # ubuntu-latest runners ship the Android SDK preinstalled
+      # (ANDROID_HOME/ANDROID_SDK_ROOT are preset) — no setup step needed.
+      - name: Verify Android SDK
+        run: |
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME/platform-tools" | head -5
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --list_installed 2>/dev/null | grep -E "platforms;android-34|build-tools;34" | head -5 || true
 
       - name: Build debug APK
         uses: gradle/gradle-build-action@v3
