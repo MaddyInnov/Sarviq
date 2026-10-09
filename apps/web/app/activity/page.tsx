@@ -10,11 +10,14 @@ import { OmniPanel } from '../../components/activity/omni-panel';
 import { CostPanel } from '../../components/activity/cost-panel';
 import { useUxMode } from '../../lib/ux-mode';
 
+import { RulesPanel } from '../../components/activity/rules-panel';
+
 const TABS = [
   { id: 'briefing', label: 'Briefing', pro: false },
   { id: 'approvals', label: 'Approvals', pro: false },
   { id: 'spaces', label: 'Spaces', pro: false },
   { id: 'summary', label: 'Summary', pro: false },
+  { id: 'rules', label: 'Rules', pro: false },
   { id: 'cost', label: 'Cost', pro: true },
   { id: 'audit', label: 'Audit log', pro: false },
 ] as const;
@@ -32,7 +35,7 @@ export default function ActivityPage() {
       <h1 className="page-title">Activity</h1>
       <p className="page-sub">
         Everything the platform does and asks of you — briefing, human approvals, spaces,
-        summaries, cost, and the audit trail.
+        summaries, processing rules, cost, and the audit trail.
       </p>
       <div className="tabs" role="tablist" aria-label="Activity sections">
         {visibleTabs.map((t) => (
@@ -52,6 +55,7 @@ export default function ActivityPage() {
         {activeTab === "approvals" && <ApprovalsPanel hideHeader />}
         {activeTab === "spaces" && <SpacePanel />}
         {activeTab === "summary" && <OmniPanel />}
+        {activeTab === "rules" && <RulesPanel />}
         {activeTab === "cost" && <CostPanel />}
         {activeTab === "audit" && <AuditPanel hideHeader />}
       </div>

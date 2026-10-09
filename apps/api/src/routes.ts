@@ -9,7 +9,7 @@
 //   id → real approval id translation.
 
 import express from 'express';
-import { BotMemoryStore, SpaceStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir } from '@mvp/agent-runtime';
+import { BotMemoryStore, SpaceStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir, routeMessage } from '@mvp/agent-runtime';
 import type { AgentRuntime, BotConfig, StreamEvent, TokenUsage } from '@mvp/agent-runtime';
 // pricing.ts is not re-exported from the agent-runtime index (index untouched);
 // import the built subpath directly.
@@ -40,6 +40,7 @@ import { confineFile, listWorkspaceFiles, readWorkspaceFile } from './files.js';
 import { saveBotWorkspace } from './bot-workspaces.js';
 import { PreferenceStore } from './preferences.js';
 import { RecordingStore, recordingToWorkflow } from './recordings.js';
+import { registerComputerRecordRoutes } from './computer-record-routes.js';
 import { ChatQueueStore } from './chat-queue.js';
 import {
   createPullRequest,
@@ -55,6 +56,12 @@ import { registerMessagingRoutes } from './messaging.js';
 import { registerNotesRoutes } from './notes.js';
 import { registerAnnotationRoutes } from './annotations.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
+// Feature interconnection (P2-E): notes/pages attachable to bot context,
+// Inbound-webhook → bot-routine triggers live in bot-routines.ts (mounted in
+// index.ts at /api/routines + /webhooks/routines); peer approval for
+// delegation is handled by the runtime delegate gate + teams-routes policy
+// (single implementation — the duplicate modules were removed).
+import { attachNoteContextProvider, registerNoteAttachmentRoutes } from './note-attachments.js';
 import { registerTasksRoutes } from './tasks.js';
 import { registerPagesRoutes } from './pages.js';
 import { registerTerminalRoutes } from './terminal-routes.js';
@@ -73,6 +80,9 @@ import { registerMarketplaceRoutes } from './marketplace.js';
 import { registerBillingRoutes } from './billing.js';
 import { registerTenancyRoutes } from './tenancy.js';
 import { registerVaultRoutes } from './vault.js';
+import { registerComposioRoutes } from './composio.js';
+import { registerDatabasesRoutes } from './databases.js';
+import { registerNotionImportRoutes } from './notion-import.js';
 import { registerProtocolRoutes } from './protocols.js';
 import { registerVoiceRoutes } from './voice.js';
 import { registerMuseModuleRoutes } from './muse-modules.js';
@@ -83,6 +93,13 @@ import type { McpScopeStore, PlatformToolDef } from '@mvp/agent-runtime';
 import { registerMcpToolScopeRoutes } from './mcp-tools-routes.js';
 import { registerProcessingRuleRoutes } from './processing-rules-routes.js';
 import { registerRedteamRoutes } from './redteam-routes.js';
+// Feature #4 (learning-from-corrections routing) + feature #9 (prompt
+// overrides): mounted below so corrections and stage-prompt overrides are
+// real HTTP surface, not dead modules.
+import { registerRoutingLearnRoutes } from './routing-learn-routes.js';
+import { registerPromptRoutes } from './prompts-routes.js';
+import { loadRoutingRules, logActivePromptOverrides } from '@mvp/agent-runtime';
+import type { LearnedRoutingRule } from '@mvp/agent-runtime';
 // The marketplace registry ships inside the compiled binary via this JSON
 // import (resolveJsonModule); it is seeded into the data dir at boot.
 import marketplaceRegistryJson from '@mvp/marketplace/registry/registry.json' with { type: 'json' };
@@ -101,6 +118,7 @@ import type {
   ChatRequestBody,
   DecideApprovalBody,
   DryRunBody,
+  PolicySimulateBody,
   ProviderKeyBody,
   RunWorkflowBody,
 } from './types.js';
@@ -214,10 +232,33 @@ export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
   const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, runHealth, mcpServer, mcpScopeStore, omniStore, omniCollector } = deps;
 
+  // Feature interconnection (P2-E): attached notes/pages land in bot
+  // context on every turn (chat, thread wakes, workflow bot-turns).
+  // Idempotent — safe if createRouter is called more than once.
+  attachNoteContextProvider(agentRuntime, { dataDir: config.dataDir });
+
   // ---- Run health scoring + regressions (features #2/#5) -------------------
   // Helpers shared by the workflow run payloads below and the /chat turn
   // hook; the /api/health/* routes are registered by registerHealthRoutes.
   const { scoreAndPersistRun, recordTurnHealth } = createHealthScoring(runHealth);
+
+  // Cost dashboard metering (feature #8): ONE shared CostTracker for the
+  // whole router — the chat turn hook below records a cost event per turn
+  // and the billing routes serve GET /api/usage/breakdown from the same
+  // store. Declared up front so the chat route closure can reach it.
+  const costTracker = new CostTracker(join(config.dataDir, 'billing.db'));
+
+  // Learning-from-corrections routing (feature #4): learned rules are
+  // loaded fresh per chat request (cheap JSON read) and fed into
+  // runTurn({ routingRules }); a corrupt/missing file degrades to no
+  // learned rules rather than breaking chat.
+  const loadChatRoutingRules = (): LearnedRoutingRule[] => {
+    try {
+      return loadRoutingRules(config.dataDir);
+    } catch {
+      return [];
+    }
+  };
 
   // Mid-turn interruption (Claude Code-style steering): at most one live turn
   // per session. A new message on a session aborts the previous turn — the
@@ -333,7 +374,15 @@ export function createRouter(deps: RouteDeps): express.Router {
   });
 
   router.post('/thread-schedules', (req, res) => {
-    const body = (req.body ?? {}) as { botId?: unknown; sessionId?: unknown; cron?: unknown; prompt?: unknown };
+    const body = (req.body ?? {}) as {
+      botId?: unknown;
+      sessionId?: unknown;
+      cron?: unknown;
+      prompt?: unknown;
+      kind?: unknown;
+      workflowId?: unknown;
+      workflowInput?: unknown;
+    };
     try {
       const botId = typeof body.botId === 'string' ? body.botId : '';
       const sessionId = typeof body.sessionId === 'string' ? body.sessionId : '';
@@ -341,11 +390,27 @@ export function createRouter(deps: RouteDeps): express.Router {
         throw new Error(`Unknown bot "${botId}"`);
       }
       if (!sessionId.trim()) throw new Error('sessionId is required');
+      // Routines → workflows link: kind 'workflow' starts a workflow run on
+      // schedule instead of waking a chat thread.
+      const kind = body.kind === 'workflow' ? 'workflow' : 'bot-turn';
+      let workflowId: string | undefined;
+      if (kind === 'workflow') {
+        workflowId = typeof body.workflowId === 'string' ? body.workflowId.trim() : '';
+        if (!workflowId) throw new Error('workflowId is required for workflow schedules');
+        try {
+          workflowRunner.getWorkflow(workflowId);
+        } catch {
+          throw new Error(`Unknown workflow "${workflowId}"`);
+        }
+      }
       const s = threadSchedules.create({
         botId,
         sessionId: sessionId.trim(),
         cron: typeof body.cron === 'string' ? body.cron : '',
         prompt: typeof body.prompt === 'string' ? body.prompt : '',
+        kind,
+        workflowId,
+        workflowInput: body.workflowInput,
       });
       res.json({ ok: true, schedule: s });
     } catch (err) {
@@ -644,6 +709,14 @@ export function createRouter(deps: RouteDeps): express.Router {
     recordingStore.markConverted(rec.id, `recording-${rec.id}`);
     res.json({ ok: true, workflow });
   });
+
+  // ---- Teach-by-recording: computer view ----------------------------------
+  // Mount point for the /api/computer/record/* namespace. The computer view
+  // (workstream A) POSTs coordinate input events here while the user
+  // demonstrates a task; /convert compiles them into a reusable workflow
+  // registered with the workflow runner (visible in the Workflows
+  // destination). Start/stop/convert are audit-logged inside the factory.
+  registerComputerRecordRoutes(router, { recordingStore, workflowRunner, governance });
 
   // ---- GitHub / PR integration --------------------------------------------
   // Codex-style loop: the agent writes code (write_file/edit_file), reviews
@@ -1160,6 +1233,9 @@ export function createRouter(deps: RouteDeps): express.Router {
           maxBudgetUsd: turnOpts.maxBudgetUsd,
           sandboxMode: turnOpts.sandboxMode,
           memoryContext,
+          // Learning-from-corrections routing (feature #4): stored rules
+          // reloaded per turn so a recorded correction changes routing.
+          routingRules: loadChatRoutingRules(),
           // Spaces: per-turn workspace + API-key overrides.
           workspaceOverride: spaceCtx?.space.workspaceOverride,
           apiKeyOverride: spaceCtx?.apiKeyOverride,
@@ -1182,6 +1258,25 @@ export function createRouter(deps: RouteDeps): express.Router {
           });
         } catch {
           // Metrics must never break chat.
+        }
+        // Cost dashboard metering (feature #8): one cost event per turn so
+        // GET /api/usage/breakdown shows real spend. Cost in USD cents is
+        // auto-estimated from tokens by CostTracker (local price config,
+        // no paid APIs). Metering must never break chat.
+        if (turnUsage) {
+          try {
+            costTracker.record({
+              feature: 'chat',
+              step: 'turn',
+              model: turnOpts.model ?? turnOpts.providerId ?? bot.model ?? 'auto',
+              inputTokens: turnUsage.promptTokens,
+              outputTokens: turnUsage.completionTokens,
+              sessionId: sessionKey ?? undefined,
+              botId: bot.id,
+            });
+          } catch {
+            // Metering must never break chat.
+          }
         }
       }
       // Tiered memory: ingest this turn (L0 events + async L2 distillation).
@@ -1586,7 +1681,22 @@ export function createRouter(deps: RouteDeps): express.Router {
   // pending approvals, and the run-health regression detector; the summary
   // prefers a local Ollama model with a deterministic template fallback.
   // The web UI's briefing panel is coded against GET /api/briefing.
-  registerBriefingRoutes(router, { dataDir: config.dataDir, governance, runHealth });
+  // Feature interconnection: the digest also pulls from notes and recent
+  // workflow runs (the live runner satisfies the structural source type).
+  registerBriefingRoutes(router, { dataDir: config.dataDir, governance, runHealth, workflowSource: workflowRunner });
+
+  // Learning-from-corrections routing (feature #4): corrections recorded
+  // here are learned locally (pattern → rule template) and reloaded by the
+  // chat route on every turn, so corrections actually update routing.
+  const routingLearnRouter = express.Router();
+  registerRoutingLearnRoutes(routingLearnRouter, { dataDir: config.dataDir });
+  router.use('/routing', routingLearnRouter);
+
+  // Stage-prompt overrides (feature #9): boot log of which overrides are
+  // live (the summarizer stage resolves through the same store, so edits
+  // under ~/.sarviq/prompts/*.md hot-reload without a restart).
+  logActivePromptOverrides();
+  registerPromptRoutes(router);
 
   // ---- Dry run ------------------------------------------------------------
   router.post('/dry-run', async (req, res) => {
@@ -1612,6 +1722,59 @@ export function createRouter(deps: RouteDeps): express.Router {
     }
   });
 
+  // ---- Policy simulator (P3-B: open-dots parity) -------------------------
+  // Side-effect-free dry-run of the policy engine: returns the decision
+  // the gateway WOULD make for a proposed tool call (effect, matched rule,
+  // hard-floor/denylist hits, whether a live call would mint an approval)
+  // WITHOUT creating approvals or writing audit entries. Lets policy
+  // authors test rules safely before they govern real runs.
+  router.post('/policy/simulate', async (req, res) => {
+    const body = (req.body ?? {}) as Partial<PolicySimulateBody>;
+    if (typeof body.toolName !== 'string' || !body.toolName.trim()) {
+      res.status(400).json(errorBody('toolName is required'));
+      return;
+    }
+    if (body.args !== undefined && (typeof body.args !== 'object' || body.args === null || Array.isArray(body.args))) {
+      res.status(400).json(errorBody('args must be an object'));
+      return;
+    }
+    const botId = typeof body.botId === 'string' && body.botId ? body.botId : 'global';
+    if (body.botId && !bots.find((b) => b.id === body.botId)) {
+      res.status(404).json(errorBody(`Unknown bot "${body.botId}"`));
+      return;
+    }
+    try {
+      const result = await governanceAdapter.simulatePolicy(
+        botId,
+        body.toolName.trim(),
+        (body.args ?? {}) as Record<string, unknown>,
+      );
+      res.json({ toolName: body.toolName.trim(), botId, ...result });
+    } catch (err) {
+      res.status(500).json(errorBody('Policy simulation failed', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  // ---- Action registry (P3-B: open-dots parity) --------------------------
+  // Read-only listing of every registered tool (the action registry the
+  // agent can call): name, description, and parameter schema. Lets the web
+  // UI, external clients, and the policy simulator enumerate available
+  // actions without executing anything.
+  router.get('/tools', async (_req, res) => {
+    try {
+      const defs = mcpServer ? await mcpServer.listToolDefs() : [];
+      res.json({
+        tools: defs.map((t) => ({
+          name: t.name,
+          description: t.description,
+          parameters: t.parameters,
+        })),
+      });
+    } catch (err) {
+      res.status(500).json(errorBody('Failed to list tools', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
   // ---- Phase 3: connected apps (OAuth) + messaging gateway ---------------
   // Both modules register relative paths on the main router, so they land
   // under /api/oauth/... and /api/messaging/....
@@ -1624,9 +1787,27 @@ export function createRouter(deps: RouteDeps): express.Router {
     config,
     governance,
     onMention: async (info) => {
+      // Bot picker for inbound mentions: an explicit MESSAGING_DEFAULT_BOT
+      // always wins (manual override). Otherwise the fast message router
+      // (packages/agent-runtime/src/message-router.ts — pure keyword/topic
+      // heuristics, no LLM call) picks the best-fit bot from the message
+      // text. Set MESSAGE_ROUTER_ENABLED=0 to restore the legacy first-bot
+      // fallback. See docs/message-router.md.
       const defaultBotId = process.env.MESSAGING_DEFAULT_BOT;
-      const bot =
-        (defaultBotId ? bots.find((b) => b.id === defaultBotId) : undefined) ?? bots[0];
+      let bot = defaultBotId ? bots.find((b) => b.id === defaultBotId) : undefined;
+      if (!bot && process.env.MESSAGE_ROUTER_ENABLED !== '0') {
+        const routed = routeMessage(
+          info.text,
+          bots.map((b) => ({
+            id: b.id,
+            name: b.name,
+            description: b.description,
+            keywords: b.routeKeywords,
+          })),
+        );
+        bot = bots.find((b) => b.id === routed.botId);
+      }
+      bot ??= bots[0];
       if (!bot) return undefined;
       let reply = '';
       try {
@@ -1634,6 +1815,9 @@ export function createRouter(deps: RouteDeps): express.Router {
           bot,
           message: info.text,
           sessionId: `mention-${info.providerId}-${info.chatId}`,
+          // Learning-from-corrections routing (feature #4): inbound mentions
+          // honor the same learned rules as the chat route.
+          routingRules: loadChatRoutingRules(),
           onEvent: async (event) => {
             if (event.type === 'token') reply += event.content;
           },
@@ -1660,6 +1844,13 @@ export function createRouter(deps: RouteDeps): express.Router {
   registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
   router.use('/notes', notesRouter);
   registerTasksRoutes(router, { dataDir: config.dataDir });
+
+  // ---- Feature interconnection (P2-E) -------------------------------------
+  // Notes/pages attachable to bot context (API surface; the context
+  // provider is wired on agentRuntime at the top of createRouter).
+  const noteAttachmentsRouter = express.Router();
+  registerNoteAttachmentRoutes(noteAttachmentsRouter, { dataDir: config.dataDir });
+  router.use('/note-attachments', noteAttachmentsRouter);
 
   // ---- External-assistant annotations (human review queue) ----------------
   // Separate router at /api/annotations, structurally apart from every
@@ -1722,14 +1913,26 @@ export function createRouter(deps: RouteDeps): express.Router {
     // MVP: mock billing provider only — real Stripe keys are the founder's step.
     provider: new MockBillingProvider(),
     // Cost dashboard: per-feature/per-step token + spend breakdown and
-    // monthly feature caps (shares billing.db with the meter/ledger).
-    costTracker: new CostTracker(join(config.dataDir, 'billing.db')),
+    // monthly feature caps (shares billing.db with the meter/ledger; the
+    // same instance the chat route records turn cost events into).
+    costTracker,
   });
   router.use('/billing', billingRouter);
 
   // ---- Phase 4: tenancy + vault (mounted at /api) ----------------------
   registerTenancyRoutes(router, { config, governance });
   registerVaultRoutes(router, { config, governance });
+  // Composio connector: platform API key in the vault, per-bot app toggles.
+  registerComposioRoutes(router, { config, governance, bots });
+  // Notion parity: databases/table view + Notion HTML/ZIP import.
+  {
+    const databasesRouter = express.Router();
+    registerDatabasesRoutes(databasesRouter, { dataDir: config.dataDir });
+    router.use('/databases', databasesRouter);
+    const notionRouter = express.Router();
+    registerNotionImportRoutes(notionRouter, { dataDir: config.dataDir });
+    router.use('/notion', notionRouter);
+  }
 
   // ---- Phase 4: protocols + voice --------------------------------------
   const protocolsRouter = express.Router();
@@ -1768,6 +1971,9 @@ export function createRouter(deps: RouteDeps): express.Router {
     dataDir: config.dataDir,
     agentRuntime,
     getBots: () => bots,
+    // Peer-delegation approval broker (workstream C): the teams API gates
+    // bot→bot delegation on user approval through the approvals inbox.
+    delegationBroker: deps.governanceAdapter,
   });
   router.use('/teams', teamsRouter);
 

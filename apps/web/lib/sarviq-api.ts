@@ -148,6 +148,14 @@ export interface Briefing {
   overnight: BriefingItem[];
   calendar: BriefingItem[];
   approvals: BriefingItem[];
+  /**
+   * Notes changed since the previous briefing (feature interconnection).
+   * Optional so the panel keeps working against briefing backends that do
+   * not emit it yet.
+   */
+  notes?: BriefingItem[];
+  /** Recent workflow runs (feature interconnection). Same optional rule. */
+  workflows?: BriefingItem[];
   summary?: string;
   /**
    * Health regression alerts (feature #5). Optional so the panel keeps
@@ -282,12 +290,16 @@ export function patchMcpToolScopes(
 // ---- Processing rules (firing log UI hook, read-only for now) ------------------------
 
 export interface RuleFiring {
-  id?: string;
+  id?: string | number;
   ruleId?: string;
   ruleName?: string;
+  itemId?: string;
+  itemKind?: string;
+  action?: string;
   status?: string;
   ts?: number;
-  detail?: string;
+  reason?: string;
+  detail?: unknown;
 }
 
 export function getRuleFirings(params?: {
@@ -301,6 +313,54 @@ export function getRuleFirings(params?: {
   if (params?.since) q.set('since', params.since);
   const qs = q.toString();
   return optionalJson(`/api/processing-rules/firing-log${qs ? `?${qs}` : ''}`);
+}
+
+export interface ProcessingRule {
+  id: string;
+  name: string;
+  enabled: boolean;
+  match?: unknown;
+  actions?: unknown[];
+  createdAt?: number;
+  updatedAt?: number;
+}
+
+export function getProcessingRules(): Promise<ProcessingRule[] | null> {
+  return optionalJson('/api/processing-rules');
+}
+
+// ---- Entity tracing (lite) -------------------------------------------------------
+
+export interface EntityTraceMatch {
+  source: 'knowledge-base' | 'memory';
+  chunkId?: string;
+  documentId?: string;
+  documentTitle?: string;
+  atomId?: string;
+  botId?: string;
+  text?: string;
+  fact?: string;
+  score?: number;
+}
+
+export interface EntityTraceResult {
+  entity: string;
+  summary?: string;
+  summaryKind?: 'extractive' | 'generated';
+  matches: EntityTraceMatch[];
+  counts?: { knowledgeBase?: number; memory?: number };
+}
+
+export function traceEntityApi(params: {
+  q: string;
+  botId?: string;
+  topK?: number;
+}): Promise<EntityTraceResult | null> {
+  const q = new URLSearchParams();
+  q.set('q', params.q);
+  if (params.botId) q.set('botId', params.botId);
+  if (params.topK) q.set('topK', String(params.topK));
+  return optionalJson(`/api/entities/trace?${q.toString()}`);
 }
 
 // ---- Companion (phone → PC remote control) ---------------------------------------
@@ -383,4 +443,98 @@ export function listCompanionDevices(): Promise<{ ok: boolean; devices: Companio
 
 export function revokeCompanionDevice(id: string): Promise<{ ok: boolean }> {
   return sarviqJson(`/api/companion/devices/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+// ---- Feature interconnection (P2-E) --------------------------------------------
+
+export type AttachmentKind = 'note' | 'page';
+
+export interface NoteAttachment {
+  id: string;
+  kind: AttachmentKind;
+  refId: string;
+  title: string;
+  botId?: string;
+  sessionId?: string;
+  createdAt: number;
+}
+
+export function listNoteAttachments(filter?: {
+  botId?: string;
+  sessionId?: string;
+}): Promise<{ ok: boolean; attachments: NoteAttachment[] }> {
+  const q = new URLSearchParams();
+  if (filter?.botId) q.set('botId', filter.botId);
+  if (filter?.sessionId) q.set('sessionId', filter.sessionId);
+  const qs = q.toString();
+  return sarviqJson(`/api/note-attachments${qs ? `?${qs}` : ''}`);
+}
+
+export function attachNote(input: {
+  kind: AttachmentKind;
+  refId: string;
+  botId?: string;
+  sessionId?: string;
+}): Promise<{ ok: boolean; attachment: NoteAttachment }> {
+  return sarviqJson('/api/note-attachments', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function detachNote(id: string): Promise<{ ok: boolean }> {
+  return sarviqJson(`/api/note-attachments/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export interface BotRoutine {
+  id: string;
+  name: string;
+  botId: string;
+  prompt: string;
+  sessionId?: string;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export function listBotRoutines(): Promise<{ ok: boolean; routines: BotRoutine[] }> {
+  return sarviqJson('/api/bot-routines');
+}
+
+export function createBotRoutine(input: {
+  botId: string;
+  name?: string;
+  prompt: string;
+  sessionId?: string;
+}): Promise<{ ok: boolean; routine: BotRoutine & { secret: string } }> {
+  return sarviqJson('/api/bot-routines', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deleteBotRoutine(id: string): Promise<{ ok: boolean }> {
+  return sarviqJson(`/api/bot-routines/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export interface PeerApproval {
+  id: string;
+  fromBotId: string;
+  toBotId: string;
+  task: string;
+  sessionId: string;
+  status: 'pending' | 'approved' | 'denied' | 'expired';
+  governanceApprovalId: string;
+  createdAt: number;
+  decidedAt?: number;
+}
+
+export function listPeerApprovals(status?: string): Promise<{ ok: boolean; approvals: PeerApproval[] }> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : '';
+  return sarviqJson(`/api/peer-approvals${qs}`);
+}
+
+export function decidePeerApproval(id: string, decision: 'approve' | 'deny'): Promise<{ ok: boolean }> {
+  return sarviqJson(`/api/peer-approvals/${encodeURIComponent(id)}/${decision}`, { method: 'POST' });
 }

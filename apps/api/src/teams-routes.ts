@@ -8,6 +8,16 @@
 //   GET    /:id/runs                → run history
 //   GET    /:id/runs/:runId         → run detail
 //   GET    /:id/runs/:runId/stream  → SSE: step_start | step_done | done | failed
+//   GET    /:id/delegation-policy   → { delegationPolicy, delegationPolicyOverrides }
+//   PATCH  /:id/delegation-policy   → { delegationPolicy?, delegationPolicyOverrides? }
+//
+// Peer-delegation approval (workstream C): when the coordinator's `delegate`
+// tool targets another bot, the run's delegate gate consults the team's
+// delegation policy ('approve-once-per-team' | 'always-ask' | 'always-allow',
+// per-bot overrides supported). Unless the policy says 'always-allow' (or a
+// grant already covers the team), the gate mints an approval through the
+// approval broker — the user decides in the approvals inbox/cards — and a
+// denial aborts the subtask with a clear message.
 //
 // A run is one coordinator turn: the coordinator breaks the task into steps
 // and assigns each step to the best-fit member via the `delegate` tool's
@@ -17,13 +27,19 @@
 import express, { type Request, type Response, type Router } from 'express';
 import { join } from 'node:path';
 import {
+  DEFAULT_DELEGATION_POLICY,
+  DELEGATION_POLICIES,
   TeamDirectoryStore,
   TeamStore,
   buildCoordinatorPrompt,
   enrichActor,
+  isDelegationPolicy,
+  resolveDelegationPolicy,
   withEnrichedRunActors,
   type AgentRuntime,
   type BotConfig,
+  type DelegateGate,
+  type DelegationPolicy,
   type StreamEvent,
   type Team,
   type TeamRun,
@@ -34,6 +50,105 @@ export interface TeamRouteDeps {
   dataDir: string;
   agentRuntime: AgentRuntime;
   getBots: () => BotConfig[];
+  /**
+   * Approval broker for team peer-delegation (workstream C). When set,
+   * bot→bot delegation in coordinator runs is gated on user approval per
+   * the team's delegation policy; the broker mints the approval card and
+   * the user decides in the approvals inbox. Unset → the peer-approval gate
+   * allows delegations (pre-workstream behaviour) with a console warning.
+   *
+   * HOST WIRING: pass `deps.governanceAdapter` (GovernanceAdapter
+   * implements this interface structurally via
+   * requestPeerDelegationApproval + awaitDecision).
+   */
+  delegationBroker?: DelegationApprovalBroker;
+}
+
+/**
+ * Minimal approval-broker surface the delegation gate needs: mint a
+ * peer-delegation approval card, then wait for the human decision.
+ */
+export interface DelegationApprovalBroker {
+  requestPeerDelegationApproval(args: {
+    sessionId: string;
+    botId: string;
+    fromBotId: string;
+    toBotId: string;
+    task: string;
+    policy: DelegationPolicy;
+  }): Promise<string>;
+  awaitDecision(approvalId: string, opts?: { timeoutMs?: number }): Promise<'approved' | 'denied'>;
+}
+
+/**
+ * Build the delegate gate for one team's coordinator runs. The gate runs
+ * before governance on every `delegate` tool call:
+ * - self-delegation (no `bot` arg, or `bot` === caller) is a plain subagent
+ *   spawn, not peer delegation → allow.
+ * - 'always-allow' → allow.
+ * - 'approve-once-per-team' with an existing grant → allow.
+ * - otherwise mint an approval through the broker and await the user's
+ *   decision; 'approved' → allow (recording the grant for
+ *   approve-once-per-team), anything else → deny with a clear message that
+ *   aborts the subtask.
+ */
+export function createDelegationGate(
+  teamId: string,
+  opts: { store: TeamStore; broker?: DelegationApprovalBroker },
+): DelegateGate {
+  return async (call, ctx) => {
+    const team = opts.store.getTeam(teamId);
+    const targetBotId =
+      typeof call.args?.bot === 'string' && call.args.bot ? call.args.bot : ctx.botId;
+    if (!team || targetBotId === ctx.botId) return { decision: 'allow' };
+    const policy = resolveDelegationPolicy(team, targetBotId);
+    if (policy === 'always-allow') return { decision: 'allow' };
+    if (policy === 'approve-once-per-team' && opts.store.hasDelegationGrant(teamId)) {
+      return { decision: 'allow' };
+    }
+    if (!opts.broker) {
+      console.warn(
+        `[teams] delegation approval broker not wired; allowing peer delegation in team "${teamId}" without approval`,
+      );
+      return { decision: 'allow' };
+    }
+    const taskText = typeof call.args?.task === 'string' ? call.args.task : '';
+    let approvalId: string;
+    try {
+      approvalId = await opts.broker.requestPeerDelegationApproval({
+        sessionId: ctx.sessionId,
+        botId: ctx.botId,
+        fromBotId: ctx.botId,
+        toBotId: targetBotId,
+        task: taskText,
+        policy,
+      });
+    } catch (err) {
+      return {
+        decision: 'deny',
+        reason: `could not request delegation approval: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    let verdict: 'approved' | 'denied';
+    try {
+      verdict = await opts.broker.awaitDecision(approvalId);
+    } catch (err) {
+      return {
+        decision: 'deny',
+        reason: `delegation approval failed: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    if (verdict !== 'approved') {
+      return {
+        decision: 'deny',
+        reason:
+          `the delegation was not approved (team "${team.name}", policy "${policy}"): ` +
+          `subtask for member bot "${targetBotId}" was not started. Reassign the step or proceed without it.`,
+      };
+    }
+    if (policy === 'approve-once-per-team') opts.store.recordDelegationGrant(teamId);
+    return { decision: 'allow' };
+  };
 }
 
 function errorBody(message: string, detail?: string): Record<string, unknown> {
@@ -79,12 +194,25 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
   };
 
   router.post('/', (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as { name?: unknown; coordinatorBotId?: unknown; memberBotIds?: unknown };
+    const body = (req.body ?? {}) as {
+      name?: unknown;
+      coordinatorBotId?: unknown;
+      memberBotIds?: unknown;
+      delegationPolicy?: unknown;
+    };
     const name = typeof body.name === 'string' ? body.name : '';
     const coordinatorBotId = typeof body.coordinatorBotId === 'string' ? body.coordinatorBotId : '';
     const memberBotIds = Array.isArray(body.memberBotIds)
       ? (body.memberBotIds as unknown[]).filter((x): x is string => typeof x === 'string')
       : [];
+    const delegationPolicy =
+      body.delegationPolicy === undefined ? undefined : body.delegationPolicy;
+    if (delegationPolicy !== undefined && !isDelegationPolicy(delegationPolicy)) {
+      res
+        .status(400)
+        .json(errorBody(`delegationPolicy must be one of: ${DELEGATION_POLICIES.join(', ')}`));
+      return;
+    }
     const bots = new Map(deps.getBots().map((b) => [b.id, b]));
     if (!coordinatorBotId || !bots.has(coordinatorBotId)) {
       res.status(400).json(errorBody('coordinatorBotId must be a known bot id'));
@@ -106,11 +234,93 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
       }
     }
     const team = store.createTeam(name, coordinatorBotId, members);
-    res.json({ ok: true, team });
+    if (delegationPolicy) store.setDelegationPolicy(team.id, delegationPolicy);
+    res.json({ ok: true, team: store.getTeam(team.id) ?? team });
   });
 
   router.get('/', (_req: Request, res: Response) => {
     res.json({ ok: true, teams: store.listTeams() });
+  });
+
+  // -- Delegation policy (workstream C) -----------------------------------
+  //   GET    /:id/delegation-policy   → { ok, teamId, delegationPolicy,
+  //                                       delegationPolicyOverrides }
+  //   PATCH  /:id/delegation-policy   → { delegationPolicy?,
+  //                                       delegationPolicyOverrides? }
+  //                                     → { ok, team }
+  //
+  // Controls how bot→bot delegation in coordinator runs is gated on user
+  // approval: 'approve-once-per-team' (default), 'always-ask',
+  // 'always-allow'. Overrides map a member bot id to its own policy.
+  // Changing the policy revokes any existing approve-once grant.
+
+  router.get('/:id/delegation-policy', (req: Request, res: Response) => {
+    const team = store.getTeam(req.params.id);
+    if (!team) {
+      res.status(404).json(errorBody(`Unknown team "${req.params.id}"`));
+      return;
+    }
+    res.json({
+      ok: true,
+      teamId: team.id,
+      delegationPolicy: team.delegationPolicy ?? DEFAULT_DELEGATION_POLICY,
+      delegationPolicyOverrides: team.delegationPolicyOverrides ?? {},
+    });
+  });
+
+  router.patch('/:id/delegation-policy', (req: Request, res: Response) => {
+    const id = req.params.id;
+    if (!validId(id)) {
+      res.status(400).json(errorBody('Invalid team id'));
+      return;
+    }
+    const team = store.getTeam(id);
+    if (!team) {
+      res.status(404).json(errorBody(`Unknown team "${id}"`));
+      return;
+    }
+    const body = (req.body ?? {}) as {
+      delegationPolicy?: unknown;
+      delegationPolicyOverrides?: unknown;
+    };
+    const policy =
+      body.delegationPolicy === undefined
+        ? (team.delegationPolicy ?? DEFAULT_DELEGATION_POLICY)
+        : body.delegationPolicy;
+    if (!isDelegationPolicy(policy)) {
+      res
+        .status(400)
+        .json(errorBody(`delegationPolicy must be one of: ${DELEGATION_POLICIES.join(', ')}`));
+      return;
+    }
+    let overrides: Record<string, DelegationPolicy> | undefined;
+    if (body.delegationPolicyOverrides !== undefined) {
+      const raw = body.delegationPolicyOverrides;
+      if (typeof raw !== 'object' || raw === null || Array.isArray(raw)) {
+        res.status(400).json(errorBody('delegationPolicyOverrides must be an object of botId → policy'));
+        return;
+      }
+      overrides = {};
+      for (const [botId, p] of Object.entries(raw as Record<string, unknown>)) {
+        if (!team.memberBotIds.includes(botId)) {
+          res.status(400).json(errorBody(`override bot "${botId}" is not a member of this team`));
+          return;
+        }
+        if (!isDelegationPolicy(p)) {
+          res
+            .status(400)
+            .json(errorBody(`override for "${botId}" must be one of: ${DELEGATION_POLICIES.join(', ')}`));
+          return;
+        }
+        overrides[botId] = p;
+      }
+    }
+    const updated = store.setDelegationPolicy(id, policy, overrides ?? team.delegationPolicyOverrides);
+    if (body.delegationPolicy !== undefined) {
+      // A policy change invalidates any approve-once grant.
+      store.revokeDelegationGrant(id);
+    }
+    res.json({ ok: true, team: updated });
   });
 
   // -- Team directory (actor enrichment) ---------------------------------
@@ -228,6 +438,9 @@ export function registerTeamRoutes(router: Router, deps: TeamRouteDeps): TeamSto
           message: prompt,
           sessionId: `team_${team.id}_${runId}`,
           taskType: 'chat',
+          // Peer-delegation approval (workstream C): bot→bot delegation is
+          // gated on user approval per the team's delegation policy.
+          delegateGate: createDelegationGate(team.id, { store, broker: deps.delegationBroker }),
           onEvent: async (e: StreamEvent) => {
             if (e.type === 'token') {
               resultText += e.content;

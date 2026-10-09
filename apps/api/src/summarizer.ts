@@ -9,8 +9,22 @@
 
 import { createProvider } from '@mvp/agent-runtime';
 import type { ChatMessage } from '@mvp/agent-runtime';
+import { PromptOverrideStore } from '@mvp/agent-runtime';
 
 const MAX_INPUT_CHARS = 24_000;
+
+/**
+ * Stage-prompt overrides (`~/.sarviq/prompts/summarizer.md`, hot-reloaded).
+ * The store is module-level so the override file is re-read by mtime on
+ * every summarization — no restart, no watcher needed.
+ */
+const promptOverrides = new PromptOverrideStore();
+
+/** Built-in summarizer stage prompt (loses to ~/.sarviq/prompts/summarizer.md). */
+const BUILTIN_SUMMARIZER_PROMPT =
+  'Summarize this agent conversation into a compact briefing for continuing the work. ' +
+  'Capture: the user goal, key decisions made, files touched, tool results that matter, ' +
+  'and open threads. Be dense and factual. Under 800 tokens.';
 
 function renderMessage(m: ChatMessage): string {
   const content = typeof m.content === 'string' ? m.content : '[non-text content]';
@@ -35,21 +49,26 @@ function extractiveFallback(messages: ChatMessage[]): string {
 /**
  * Build the default SessionSummarizer. Safe to use without any API key
  * (falls back to extractive). Uses only free-tier-friendly models.
+ *
+ * `promptStore` (tests): stage-prompt override store; defaults to the
+ * module-level store against ~/.sarviq/prompts.
  */
-export function createSummarizer(): (messages: ChatMessage[]) => Promise<string> {
+export function createSummarizer(promptStore?: PromptOverrideStore): (messages: ChatMessage[]) => Promise<string> {
   return async (messages: ChatMessage[]): Promise<string> => {
     if (messages.length === 0) return '[empty range]';
     const input = messages.map(renderMessage).join('\n\n').slice(0, MAX_INPUT_CHARS);
+    // Stage-prompt override: a user-authored ~/.sarviq/prompts/summarizer.md
+    // wins; otherwise the built-in prompt below. Resolved per call so edits
+    // hot-reload without a restart.
+    const store = promptStore ?? promptOverrides;
+    const systemPrompt = store.resolve('summarizer', BUILTIN_SUMMARIZER_PROMPT).text;
     try {
       const provider = createProvider('groq');
       const turn = await provider.chat(
         [
           {
             role: 'system',
-            content:
-              'Summarize this agent conversation into a compact briefing for continuing the work. ' +
-              'Capture: the user goal, key decisions made, files touched, tool results that matter, ' +
-              'and open threads. Be dense and factual. Under 800 tokens.',
+            content: systemPrompt,
           },
           { role: 'user', content: input },
         ],

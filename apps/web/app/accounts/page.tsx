@@ -155,6 +155,294 @@ function ConnectedAccounts() {
 }
 
 // ---------------------------------------------------------------------------
+// Composio connector (Workstream E)
+// ---------------------------------------------------------------------------
+
+interface ComposioAppEntry {
+  appId: string;
+  name: string;
+  description?: string;
+  logo?: string;
+  enabled?: boolean;
+}
+
+interface ComposioStatus {
+  connected: boolean;
+}
+
+interface ComposioAppsResponse {
+  connected: boolean;
+  apps: ComposioAppEntry[];
+  error?: string;
+}
+
+interface WebBot {
+  id: string;
+  name: string;
+}
+
+async function fetchBots(): Promise<WebBot[]> {
+  const res = await fetch(`${base()}/api/bots`);
+  if (!res.ok) throw new Error(`Failed to load bots (${res.status})`);
+  return (await res.json()) as WebBot[];
+}
+
+function ComposioPanel() {
+  const [connected, setConnected] = useState<boolean | null>(null);
+  const [apps, setApps] = useState<ComposioAppEntry[]>([]);
+  const [bots, setBots] = useState<WebBot[]>([]);
+  const [botId, setBotId] = useState('');
+  const [filter, setFilter] = useState('');
+  const [apiKey, setApiKey] = useState('');
+  const [error, setError] = useState<string | null>(null);
+  const [notice, setNotice] = useState('');
+  const [busy, setBusy] = useState('');
+  const [loaded, setLoaded] = useState(false);
+
+  const refreshStatus = useCallback(async () => {
+    const status = await api<ComposioStatus>('GET', '/api/composio/status');
+    setConnected(status.connected);
+    return status.connected;
+  }, []);
+
+  const refreshApps = useCallback(
+    async (forBotId: string) => {
+      if (!forBotId) {
+        setApps([]);
+        return;
+      }
+      const data = await api<ComposioAppsResponse>(
+        'GET',
+        `/api/composio/apps?botId=${encodeURIComponent(forBotId)}`,
+      );
+      if (data.error) throw new Error(data.error);
+      setApps(data.apps);
+    },
+    [],
+  );
+
+  const boot = useCallback(async () => {
+    setError(null);
+    try {
+      const [isConnected, botList] = await Promise.all([refreshStatus(), fetchBots()]);
+      setBots(botList);
+      const nextBotId = botId || botList[0]?.id || '';
+      setBotId(nextBotId);
+      setLoaded(true);
+      if (isConnected && nextBotId) await refreshApps(nextBotId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [refreshStatus, refreshApps]);
+
+  useEffect(() => {
+    void boot();
+  }, [boot]);
+
+  const changeBot = async (next: string) => {
+    setBotId(next);
+    setError(null);
+    try {
+      await refreshApps(next);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  };
+
+  const connect = async () => {
+    const key = apiKey.trim();
+    if (!key) {
+      setError('Paste your Composio API key first.');
+      return;
+    }
+    setBusy('connect');
+    setError(null);
+    setNotice('');
+    try {
+      await api('POST', '/api/composio/connect', { apiKey: key });
+      setApiKey('');
+      setNotice('Composio connected. The key is stored encrypted server-side.');
+      const isConnected = await refreshStatus();
+      if (isConnected && botId) await refreshApps(botId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const disconnect = async () => {
+    setBusy('disconnect');
+    setError(null);
+    setNotice('');
+    try {
+      await api('DELETE', '/api/composio/connect');
+      setConnected(false);
+      setApps([]);
+      setNotice('Composio disconnected — the API key was deleted.');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const toggle = async (appId: string, enabled: boolean) => {
+    if (!botId) return;
+    setBusy(appId);
+    setError(null);
+    try {
+      await api('POST', `/api/composio/apps/${encodeURIComponent(appId)}`, { botId, enabled });
+      setApps((prev) => prev.map((a) => (a.appId === appId ? { ...a, enabled } : a)));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setBusy('');
+    }
+  };
+
+  const q = filter.trim().toLowerCase();
+  const shown = q
+    ? apps.filter(
+        (a) =>
+          a.name.toLowerCase().includes(q) ||
+          a.appId.toLowerCase().includes(q) ||
+          (a.description ?? '').toLowerCase().includes(q),
+      )
+    : apps;
+
+  return (
+    <Section
+      title="Composio"
+      hint="Let bots act inside 1,000+ external apps (Gmail, Slack, GitHub, …) through one Composio API key. App access is enabled per bot."
+    >
+      <ErrorLine error={error} />
+      {notice && (
+        <div className="card" style={{ borderColor: '#bbf7d0', background: '#f0fdf4' }}>
+          {notice}
+        </div>
+      )}
+      {!loaded && <p className="small muted">Loading…</p>}
+      {loaded && connected === false && (
+        <div>
+          <div
+            className="card"
+            style={{ borderStyle: 'dashed', textAlign: 'center', padding: 24 }}
+          >
+            <p style={{ fontSize: 32, margin: '0 0 8px' }} aria-hidden="true">
+              🔌
+            </p>
+            <p>
+              <strong>Composio is not connected.</strong>
+            </p>
+            <p className="small muted">
+              Connect a Composio API key to give your bots access to 1,000+ external
+              apps. The key is stored in the encrypted vault and is never shown
+              again.
+            </p>
+            <p className="small">
+              <a href="https://dashboard.composio.dev" target="_blank" rel="noreferrer">
+                Get a free API key
+              </a>{' '}
+              <span className="muted">(dashboard.composio.dev → Settings → API Keys, PLATFORM mode)</span>
+            </p>
+          </div>
+          <div style={{ display: 'flex', gap: 8, marginTop: 12 }}>
+            <input
+              className="input mono"
+              type="password"
+              autoComplete="off"
+              placeholder="paste Composio API key (ak_…)"
+              value={apiKey}
+              onChange={(e) => setApiKey(e.target.value)}
+              style={{ flex: 1 }}
+            />
+            <button
+              className="btn btn-primary"
+              disabled={busy === 'connect' || !apiKey.trim()}
+              onClick={() => void connect()}
+            >
+              {busy === 'connect' ? 'Connecting…' : 'Connect'}
+            </button>
+          </div>
+        </div>
+      )}
+      {loaded && connected === true && (
+        <div>
+          <div className="row-between">
+            <div>
+              <span className="chip green">connected</span>{' '}
+              <span className="small muted">key stored in the vault (never shown)</span>
+            </div>
+            <button
+              className="btn btn-sm btn-danger"
+              disabled={busy === 'disconnect'}
+              onClick={() => void disconnect()}
+            >
+              {busy === 'disconnect' ? 'Disconnecting…' : 'Disconnect'}
+            </button>
+          </div>
+          <div className="row-between" style={{ marginTop: 12, gap: 8, flexWrap: 'wrap' }}>
+            <label className="small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <strong>Bot</strong>
+              <select
+                className="input"
+                value={botId}
+                onChange={(e) => void changeBot(e.target.value)}
+                disabled={bots.length === 0}
+              >
+                {bots.map((b) => (
+                  <option key={b.id} value={b.id}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <input
+              className="input"
+              placeholder="filter apps…"
+              value={filter}
+              onChange={(e) => setFilter(e.target.value)}
+              style={{ maxWidth: 220 }}
+            />
+          </div>
+          {bots.length === 0 && <p className="small muted">No bots yet — create one on the Bots page.</p>}
+          {bots.length > 0 && shown.length === 0 && (
+            <p className="small muted" style={{ marginTop: 8 }}>
+              {apps.length === 0 ? 'No apps returned by Composio.' : 'No apps match the filter.'}
+            </p>
+          )}
+          <div style={{ marginTop: 8 }}>
+            {shown.map((a) => (
+              <div key={a.appId} className="row-between" style={{ padding: '8px 0' }}>
+                <div>
+                  <strong>{a.name}</strong>{' '}
+                  <span className={`chip ${a.enabled ? 'green' : 'gray'}`}>
+                    {a.enabled ? 'enabled' : 'off'}
+                  </span>
+                  {a.description && <div className="small muted">{a.description}</div>}
+                </div>
+                <label className="small" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <input
+                    type="checkbox"
+                    checked={a.enabled ?? false}
+                    disabled={busy === a.appId}
+                    onChange={(e) => void toggle(a.appId, e.target.checked)}
+                    aria-label={`Enable ${a.name} for this bot`}
+                  />
+                  Enable
+                </label>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </Section>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Vault
 // ---------------------------------------------------------------------------
 
@@ -411,6 +699,7 @@ export default function AccountsPage() {
     <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
       <h1>Accounts</h1>
       <ConnectedAccounts />
+      <ComposioPanel />
       <VaultPanel />
       <WalletPanel />
     </div>

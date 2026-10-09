@@ -3420,3 +3420,320 @@ html[data-ux='simple'] .phone-status .dot.on {
     animation: none;
   }
 }
+
+/* ---- Per-bot computer view (Bots → per-bot "Computer" tab) --------------- */
+.computer-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.computer-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+.computer-badges {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+.computer-driving {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 12px;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  background: var(--glass-bg, rgba(255, 255, 255, 0.6));
+  border: 1px solid var(--glass-border, rgba(0, 0, 0, 0.08));
+  color: var(--muted, #777);
+}
+.computer-driving .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #b9bec7;
+}
+.computer-driving.on {
+  color: #b4762a;
+  border-color: rgba(217, 146, 44, 0.45);
+  background: rgba(217, 146, 44, 0.12);
+}
+.computer-driving.on .dot {
+  background: #d9922c;
+  animation: computer-pulse 1.2s ease-in-out infinite;
+}
+.computer-mock {
+  font-size: 0.75rem;
+  font-weight: 600;
+  padding: 4px 12px;
+  border-radius: 999px;
+  background: rgba(120, 130, 150, 0.12);
+  border: 1px dashed var(--glass-border, rgba(0, 0, 0, 0.15));
+  color: var(--muted, #777);
+}
+.computer-actions {
+  display: flex;
+  gap: 8px;
+}
+.computer-error {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(224, 82, 110, 0.1);
+  color: #c04a63;
+}
+.computer-main {
+  display: flex;
+  gap: 16px;
+  flex-wrap: wrap;
+}
+.computer-screen {
+  position: relative;
+  width: min(620px, 100%);
+  aspect-ratio: 16 / 10;
+  border-radius: 16px;
+  overflow: hidden;
+  background: #111;
+  border: 2px solid rgba(0, 0, 0, 0.25);
+  touch-action: none;
+  user-select: none;
+}
+.computer-screen img {
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  display: block;
+  background: #000;
+}
+.computer-screen-empty {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
+  padding: 24px;
+  color: #999;
+  font-size: 0.9rem;
+  line-height: 1.6;
+}
+.computer-status {
+  position: absolute;
+  top: 10px;
+  left: 10px;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.55);
+  color: #fff;
+  font-size: 0.75rem;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+}
+.computer-status .dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #e0526e;
+}
+.computer-status .dot.on {
+  background: #3fd08a;
+  animation: computer-pulse 1.6s ease-in-out infinite;
+}
+.computer-status.no-anim .dot.on,
+.computer-driving.no-anim.on .dot {
+  animation: none;
+}
+@keyframes computer-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+html[data-ux='simple'] .computer-status .dot.on,
+html[data-ux='simple'] .computer-driving.on .dot {
+  animation: none;
+}
+.computer-controls {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 240px;
+  flex: 1;
+  max-width: 420px;
+}
+.computer-hint {
+  font-size: 0.85rem;
+  color: var(--muted, #777);
+}
+.computer-keys {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.computer-textrow {
+  display: flex;
+  gap: 8px;
+}
+.computer-textrow input {
+  flex: 1;
+}
+.computer-meta {
+  font-size: 0.8rem;
+}
+@media (prefers-reduced-motion: reduce) {
+  .computer-status .dot.on,
+  .computer-driving.on .dot {
+    animation: none;
+  }
+}
+
+/* ---- Voice notes + live calls (workstream D) ---------------------------
+ * Clay/glass styling consistent with the 5 themes; colors use the existing
+ * CSS variables so every theme picks them up automatically.
+ */
+.mic-btn.recording {
+  background: #dc2626;
+  color: #fff;
+  border-color: #dc2626;
+  animation: mic-pulse 1.2s ease-in-out infinite;
+}
+.mic-elapsed {
+  font-size: 0.72rem;
+  font-variant-numeric: tabular-nums;
+  margin-left: 2px;
+}
+@keyframes mic-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.45); }
+  50% { box-shadow: 0 0 0 6px rgba(220, 38, 38, 0); }
+}
+html[data-ux='simple'] .mic-btn.recording {
+  animation: none;
+}
+@media (prefers-reduced-motion: reduce) {
+  .mic-btn.recording { animation: none; }
+}
+
+.voice-note {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  padding: 8px 10px;
+  border-radius: 14px;
+  max-width: 340px;
+}
+.voice-note.user {
+  background: rgba(127, 90, 220, 0.12);
+  border: 1px solid rgba(127, 90, 220, 0.25);
+}
+.vn-play {
+  flex: 0 0 auto;
+}
+.vn-track {
+  flex: 1 1 120px;
+  height: 6px;
+  border-radius: 3px;
+  background: rgba(127, 140, 160, 0.25);
+  overflow: hidden;
+}
+.vn-fill {
+  height: 100%;
+  border-radius: 3px;
+  background: linear-gradient(90deg, #7f5adc, #a78bfa);
+  transition: width 0.2s linear;
+}
+.vn-duration {
+  flex: 0 0 auto;
+  color: inherit;
+  opacity: 0.75;
+}
+.vn-transcript {
+  flex: 1 1 100%;
+}
+.vn-transcript summary {
+  cursor: pointer;
+  opacity: 0.8;
+}
+
+.call-panel {
+  margin: 12px;
+}
+.call-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 12px 0;
+}
+.call-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #9ca3af;
+  flex: 0 0 auto;
+}
+.call-dot.phase-listening { background: #dc2626; animation: mic-pulse 1.2s ease-in-out infinite; }
+.call-dot.phase-thinking { background: #f59e0b; }
+.call-dot.phase-speaking { background: #22c55e; }
+.call-dot.phase-error { background: #dc2626; }
+.call-controls {
+  display: flex;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.mic-big {
+  padding: 12px 20px;
+  font-size: 1rem;
+  border-radius: 16px;
+}
+.call-transcript {
+  max-height: 320px;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 4px 2px;
+}
+.call-turn {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.call-line {
+  display: flex;
+  gap: 8px;
+  align-items: baseline;
+  padding: 8px 12px;
+  border-radius: 12px;
+  max-width: 90%;
+}
+.call-line.you {
+  align-self: flex-end;
+  background: rgba(127, 90, 220, 0.12);
+  border: 1px solid rgba(127, 90, 220, 0.25);
+}
+.call-line.bot {
+  align-self: flex-start;
+  background: rgba(120, 140, 160, 0.12);
+  border: 1px solid rgba(120, 140, 160, 0.25);
+}
+.call-speaker {
+  font-weight: 600;
+  font-size: 0.8rem;
+  flex: 0 0 auto;
+  opacity: 0.8;
+}
+.call-text {
+  flex: 1 1 auto;
+}
+.call-time {
+  flex: 0 0 auto;
+}
+
+.lang-switch select {
+  max-width: 130px;
+}

@@ -2,7 +2,8 @@
 // REAL OS automation layer — foreground control of the actual machine.
 //
 // SAFETY: this layer is NEVER selected by default. selectOSLayer() returns
-// the mock unless COMPUTER_USE_REAL=1 is set in the environment. Even then,
+// the mock unless COMPUTER_USE_REAL=1 (or COMPUTER_USE_PLAYWRIGHT=1 for the
+// Playwright browser layer) is set in the environment. Even then,
 // every mutating tool call (click/type/key) still flows through governance
 // (computerUsePolicyRules() → require-approval) before the handler runs —
 // the approval gate is orthogonal to which OS layer is active.
@@ -22,6 +23,7 @@
 import { createRequire } from 'node:module';
 import { MockOSScreenLayer } from './computer.js';
 import type { DisplaySize, OSScreenLayer, Screenshot } from './computer.js';
+import { COMPUTER_USE_PLAYWRIGHT_ENV, PlaywrightOSScreenLayer } from './computer-playwright.js';
 
 // ESM-safe require for optional native dependencies.
 const requireOptional = createRequire(import.meta.url);
@@ -196,11 +198,22 @@ export class RealOSScreenLayer implements OSScreenLayer {
 export const COMPUTER_USE_REAL_ENV = 'COMPUTER_USE_REAL';
 
 /**
- * Select the OS layer: RealOSScreenLayer only when COMPUTER_USE_REAL=1,
- * otherwise the safe MockOSScreenLayer. Optional deps/audit hook are
- * forwarded to the real layer (used by tests and by hosts wiring audit).
+ * Select the OS layer:
+ *   1. Playwright browser layer when COMPUTER_USE_PLAYWRIGHT=1
+ *      (see computer-playwright.ts — browser window as the display,
+ *      pure-JS install via `npm install playwright`).
+ *   2. Real foreground layer when COMPUTER_USE_REAL=1
+ *      (robotjs + screenshot-desktop).
+ *   3. Otherwise the safe MockOSScreenLayer.
+ *
+ * Even with a real layer active, every mutating tool call (click/type/key)
+ * still flows through governance (computerUsePolicyRules() →
+ * require-approval) before the handler runs.
  */
 export function selectOSLayer(deps: RealOSLayerDeps = {}): OSScreenLayer {
+  if (process.env[COMPUTER_USE_PLAYWRIGHT_ENV] === '1') {
+    return new PlaywrightOSScreenLayer({ onRealAction: deps.onRealAction });
+  }
   if (process.env[COMPUTER_USE_REAL_ENV] === '1') {
     return new RealOSScreenLayer(deps);
   }

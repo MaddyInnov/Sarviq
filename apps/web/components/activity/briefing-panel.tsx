@@ -147,6 +147,23 @@ export function BriefingPanel() {
         <h4>Needs your approval</h4>
         <ItemList items={briefing.approvals ?? []} />
       </div>
+      {/* Feature interconnection: notes + workflow runs in the digest. */}
+      {(briefing.notes?.length ?? 0) > 0 || (briefing.workflows?.length ?? 0) > 0 ? (
+        <div className="grid-2">
+          <div className="card">
+            <h4>
+              Notes changed <span className="chip">{briefing.notes?.length ?? 0}</span>
+            </h4>
+            <ItemList items={briefing.notes ?? []} />
+          </div>
+          <div className="card">
+            <h4>
+              Workflow runs <span className="chip">{briefing.workflows?.length ?? 0}</span>
+            </h4>
+            <ItemList items={briefing.workflows ?? []} />
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }

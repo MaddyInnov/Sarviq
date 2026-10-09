@@ -28,9 +28,11 @@ import {
 import { costOfUsage } from './pricing.js';
 import type { TelemetryCollector, TelemetryRunStatus } from './telemetry.js';
 import { SessionStore } from './sessions.js';
-import type { SessionStoreOptions } from './sessions.js';
+import type { HookBus, ToolAfterPayload, ToolBeforePayload } from './hooks.js';
+import type { BranchSessionResult, IdentifiedMessage, SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
 import { routeModel } from './routing.js';
+import { createSystem1Router } from './system1.js';
 import type { TaskType } from './routing.js';
 import type { LearnedRoutingRule } from './routing-learn.js';
 import { resolvePersona } from './personas.js';
@@ -70,15 +72,52 @@ export interface AgentRuntimeOptions {
    * host-supplied privacy-tiers guard. Unset → no recording.
    */
   telemetry?: TelemetryCollector;
+  /**
+   * Plugin hook bus (OpenCode parity, hooks.ts). When set, the runtime emits
+   * `session.created` for new sessions and `tool.before` / `tool.after`
+   * around every tool execution. A `tool.before` handler can cancel the call
+   * (fail-closed: the tool does not run). Handler errors never break a turn.
+   * Optional; unset → no hook traffic (previous behavior).
+   */
+  hooks?: HookBus;
 }
+
+/**
+ * Verdict of a peer-delegation gate (AgentTeams workstream C). The gate —
+ * supplied by the host, e.g. the teams API — mints and awaits its own
+ * approval through the approval broker when the team policy demands it;
+ * the runtime only ever sees allow/deny.
+ */
+export type DelegateGateVerdict = { decision: 'allow' } | { decision: 'deny'; reason: string };
+
+/**
+ * Peer-delegation gate: consulted BEFORE governance whenever a `delegate`
+ * tool call is about to run, so the host can enforce team-level bot→bot
+ * approval policies ('approve-once-per-team' / 'always-ask' /
+ * 'always-allow'). A deny aborts the subtask with the gate's reason.
+ */
+export type DelegateGate = (call: ToolCall, ctx: ToolContext) => Promise<DelegateGateVerdict>;
+
+/**
+ * Host-registered turn context provider. Called with the bot, resolved
+ * session id, and the user's message before the system prompt is built;
+ * a returned string is appended to the system prompt (after memoryContext).
+ * Used by the API layer to inject attached notes/pages into bot context.
+ * Providers must be cheap and must never throw — the runtime swallows
+ * per-provider failures so context can never break a turn.
+ */
+export type TurnContextProvider = (info: {
+  bot: BotConfig;
+  sessionId: string;
+  message: string;
+}) => Promise<string | undefined> | string | undefined;
 
 export interface RunTurnOptions {
   bot: BotConfig;
   message: string;
   sessionId?: string;
   providerId?: string;
-  model?: string;
-  /**
+  model?: string;  /**
    * Task type for smart model routing (Phase 3). Only consulted when no
    * model is pinned at the call site or on the bot — then the router picks
    * the cheapest capable model for this task type. Defaults to 'chat'.
@@ -166,6 +205,16 @@ export interface RunTurnOptions {
    * only ids/tiers reach the audit trail.
    */
   egressItems?: TieredItem[];
+  /**
+   * Peer-delegation gate (AgentTeams workstream C). Consulted BEFORE
+   * governance whenever a `delegate` tool call is about to run, so the
+   * host can enforce team-level bot→bot approval policies
+   * ('approve-once-per-team' / 'always-ask' / 'always-allow'). The gate
+   * mints and awaits its own approval through the approval broker when the
+   * policy demands it; the runtime only sees allow/deny. A deny aborts the
+   * subtask with the gate's reason. Unset → no gating (previous behavior).
+   */
+  delegateGate?: DelegateGate;
 }
 
 export interface PreviewToolInfo {
@@ -241,6 +290,7 @@ export class AgentRuntime {
   private readonly defaultProviderId: string;
   private readonly onBeforeFileMutate?: AgentRuntimeOptions['onBeforeFileMutate'];
   private readonly telemetry?: TelemetryCollector;
+  private readonly hooks?: HookBus;
   /** Provider instances cached per providerId (see resolveProvider). */
   private readonly providerCache = new Map<string, LLMProvider>();
   /**
@@ -249,6 +299,13 @@ export class AgentRuntime {
    */
   private readonly denialCounts = new Map<string, number>();
   private readonly trippedSessions = new Set<string>();
+  /**
+   * Host-registered turn context providers (feature interconnection:
+   * attached notes/pages). Each runs before the system prompt is built;
+   * non-empty results are appended after `memoryContext`. A provider must
+   * never throw into the turn — failures are swallowed per provider.
+   */
+  private readonly contextProviders: TurnContextProvider[] = [];
 
   constructor(opts: AgentRuntimeOptions) {
     this.store = new SessionStore(opts.dbPath, opts.sessionStoreOptions);
@@ -258,10 +315,24 @@ export class AgentRuntime {
     this.defaultProviderId = opts.defaultProviderId ?? 'groq';
     this.onBeforeFileMutate = opts.onBeforeFileMutate;
     this.telemetry = opts.telemetry;
+    this.hooks = opts.hooks;
+  }
+
+  /** Direct access to the session store (host API layers, e.g. worktree binding). */
+  get sessionStore(): SessionStore {
+    return this.store;
   }
 
   close(): void {
     this.store.close();
+  }
+
+  /**
+   * Register a turn context provider (see TurnContextProvider). The API
+   * layer uses this to inject attached notes/pages into bot context.
+   */
+  addContextProvider(fn: TurnContextProvider): void {
+    this.contextProviders.push(fn);
   }
 
   /**
@@ -271,6 +342,29 @@ export class AgentRuntime {
    */
   rewindSession(sessionId: string, keepCount: number): number {
     return this.store.rewindHistory(sessionId, keepCount);
+  }
+
+  /**
+   * Branch a chat thread: create a new session for the same bot, copying
+   * the source thread's history up to and including `fromMessageId`
+   * (a message id from {@link SessionStore.listThreadMessages}).
+   * Returns `{ ok: false, reason }` for unknown threads/messages so HTTP
+   * layers can map to 404s.
+   */
+  branchSession(
+    sessionId: string,
+    fromMessageId: number,
+    opts?: { botId?: string },
+  ): BranchSessionResult {
+    return this.store.branchSession(sessionId, fromMessageId, opts?.botId);
+  }
+
+  /**
+   * Verbatim message log for a chat thread (stable ids, insertion order).
+   * Powers the chat-threads HTTP routes (branch targeting).
+   */
+  listThreadMessages(sessionId: string): IdentifiedMessage[] {
+    return this.store.listThreadMessages(sessionId);
   }
 
   /**
@@ -301,8 +395,29 @@ export class AgentRuntime {
     }
   }
 
-  private async buildSystemPrompt(bot: BotConfig, memoryContext?: string): Promise<{ prompt: string; loadedSkills: string[] }> {
-    // The untrusted-content floor rides along on every turn: the bot's own
+  /**
+   * Combine the call-site memoryContext with every registered context
+   * provider's output. Provider failures are swallowed individually so a
+   * broken provider can never break a turn.
+   */
+  private async combineTurnContext(
+    opts: RunTurnOptions,
+    sessionId: string,
+  ): Promise<string | undefined> {
+    const parts: string[] = [];
+    if (opts.memoryContext?.trim()) parts.push(opts.memoryContext.trim());
+    for (const provider of this.contextProviders) {
+      try {
+        const extra = await provider({ bot: opts.bot, sessionId, message: opts.message });
+        if (extra?.trim()) parts.push(extra.trim());
+      } catch {
+        // Context must never break the turn.
+      }
+    }
+    return parts.length > 0 ? parts.join('\n\n') : undefined;
+  }
+
+  private async buildSystemPrompt(bot: BotConfig, memoryContext?: string): Promise<{ prompt: string; loadedSkills: string[] }> {    // The untrusted-content floor rides along on every turn: the bot's own
     // prompt first, then the security instruction (it must hold regardless
     // of what skills or tool output say later).
     const parts: string[] = [bot.systemPrompt, '\n\n' + UNTRUSTED_CONTENT_INSTRUCTION];
@@ -370,7 +485,12 @@ export class AgentRuntime {
       providerId = opts.bot.provider ?? this.defaultProviderId;
       model = opts.bot.model;
     } else {
-      const routed = routeModel({
+      // Experimental System-1 decision head (system1.ts): when
+      // SYSTEM1_ENABLED is unset (the default) this delegates to
+      // routeModel() untouched — zero behavior change. When enabled with a
+      // working local backend, the fast head labels the intent first and
+      // the existing router still applies overrides + the free-only guard.
+      const routed = await createSystem1Router().route({
         taskType: opts.taskType ?? 'chat',
         providerHint: opts.bot.provider,
         message: opts.message,
@@ -396,6 +516,10 @@ export class AgentRuntime {
     };
 
     const sessionId = opts.sessionId ?? this.store.createSession(opts.bot.id);
+    if (opts.sessionId === undefined && this.hooks) {
+      // session.created hook — never blocks a turn.
+      await this.hooks.emit('session.created', { sessionId, botId: opts.bot.id }).catch(() => undefined);
+    }
     const ctx: ToolContext = {
       sessionId,
       botId: opts.bot.id,
@@ -404,7 +528,10 @@ export class AgentRuntime {
       spaceWorkspaceOverride: opts.workspaceOverride,
     };
 
-    const { prompt: systemPrompt } = await this.buildSystemPrompt(opts.bot, opts.memoryContext);
+    const { prompt: systemPrompt } = await this.buildSystemPrompt(
+      opts.bot,
+      await this.combineTurnContext(opts, sessionId),
+    );
     const { tools } = this.resolveTools(opts.bot);
 
     const userMessage: ChatMessage = { role: 'user', content: opts.message };
@@ -516,6 +643,43 @@ export class AgentRuntime {
           let decision: GovernanceDecision;
           let reason: string | undefined;
           let gatewayApprovalId: string | undefined;
+
+          // Peer-delegation gate (AgentTeams workstream C): team-level
+          // bot→bot approval policy, consulted BEFORE governance. A deny
+          // aborts the subtask with the gate's reason; allow continues
+          // into the normal governance flow below.
+          if (call.name === 'delegate' && opts.delegateGate) {
+            let gateVerdict: DelegateGateVerdict;
+            try {
+              gateVerdict = await opts.delegateGate(call, ctx);
+            } catch (err) {
+              gateVerdict = {
+                decision: 'deny',
+                reason: `delegation gate failed: ${err instanceof Error ? err.message : String(err)}`,
+              };
+            }
+            if (gateVerdict.decision === 'deny') {
+              const result = { denied: true, reason: gateVerdict.reason };
+              this.audit({
+                type: 'tool.delegation_denied',
+                sessionId,
+                botId: ctx.botId,
+                call,
+                detail: { reason: gateVerdict.reason },
+              });
+              await emit({ type: 'tool_result', call, result, denied: true });
+              const toolMsg: ChatMessage = {
+                role: 'tool',
+                content: `Delegation denied: ${gateVerdict.reason}`,
+                toolCallId: call.id,
+                toolName: call.name,
+              };
+              this.store.appendMessage(sessionId, toolMsg);
+              messages.push(toolMsg);
+              continue;
+            }
+          }
+
           try {
             const classified = await this.governance.classify(call, ctx);
             const evaluated = await this.governance.evaluate(call, ctx);
@@ -879,6 +1043,28 @@ export class AgentRuntime {
       }
     }
     await this.governance.runPreHooks(call, ctx);
+    const startedAt = Date.now();
+    if (this.hooks) {
+      // tool.before hook — can cancel the call (fail-closed).
+      const beforePayload: ToolBeforePayload = {
+        sessionId: ctx.sessionId,
+        botId: ctx.botId,
+        toolName: def.name,
+        args: (call.args ?? {}) as Record<string, unknown>,
+      };
+      const before = await this.hooks.emit('tool.before', beforePayload).catch(() => undefined);
+      if (before?.cancelled) {
+        const reason = before.reason ?? 'cancelled by a plugin hook';
+        this.audit({
+          type: 'tool.cancelled',
+          sessionId: ctx.sessionId,
+          botId: ctx.botId,
+          call,
+          detail: { hookCancelled: true, reason },
+        });
+        return { cancelled: true, reason };
+      }
+    }
     let result: unknown;
     try {
       result = await def.handler(call.args, ctx);
@@ -886,6 +1072,18 @@ export class AgentRuntime {
       result = { error: err instanceof Error ? err.message : String(err) };
     }
     await this.governance.runPostHooks(call, result, ctx);
+    if (this.hooks) {
+      // tool.after hook — best-effort, never breaks the turn.
+      const afterPayload: ToolAfterPayload = {
+        sessionId: ctx.sessionId,
+        botId: ctx.botId,
+        toolName: def.name,
+        args: (call.args ?? {}) as Record<string, unknown>,
+        ok: !(result !== null && typeof result === 'object' && 'error' in (result as Record<string, unknown>)),
+        durationMs: Date.now() - startedAt,
+      };
+      await this.hooks.emit('tool.after', afterPayload).catch(() => undefined);
+    }
     this.audit({ type: 'tool.executed', sessionId: ctx.sessionId, botId: ctx.botId, call });
     return result;
   }

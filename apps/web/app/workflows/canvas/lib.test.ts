@@ -150,10 +150,70 @@ describe('helpers', () => {
     expect(suggestNodeId('agent', new Set(['agent', 'agent-2']))).toBe('agent-3');
   });
 
-  it('covers all six runner node types with default configs', () => {
-    expect(NODE_TYPES).toEqual(['trigger', 'agent', 'tool', 'http', 'delay', 'approval']);
+  it('covers all nine runner node types with default configs', () => {
+    expect(NODE_TYPES).toEqual([
+      'trigger',
+      'agent',
+      'tool',
+      'http',
+      'delay',
+      'approval',
+      'if',
+      'set',
+      'code',
+    ]);
     for (const t of NODE_TYPES) {
       expect(typeof DEFAULT_NODE_CONFIGS[t]).toBe('object');
     }
+  });
+
+  it('round-trips if-branch edge labels through the workflow JSON', () => {
+    const graph: CanvasGraph = {
+      id: 'branch',
+      name: 'Branch',
+      nodes: [
+        { id: 'trigger', type: 'trigger', name: 'T', config: {}, x: 0, y: 0 },
+        { id: 'check', type: 'if', name: 'C', config: { condition: 'true' }, x: 0, y: 0 },
+        { id: 'yes', type: 'set', name: 'Y', config: { assignments: {} }, x: 0, y: 0 },
+        { id: 'no', type: 'set', name: 'N', config: { assignments: {} }, x: 0, y: 0 },
+      ],
+      edges: [
+        ['trigger', 'check'],
+        ['check', 'yes', 'true'],
+        ['check', 'no', 'false'],
+      ],
+    };
+    const wf = graphToWorkflow(graph);
+    expect(wf.edges).toEqual([
+      ['trigger', 'check'],
+      ['check', 'yes', 'true'],
+      ['check', 'no', 'false'],
+    ]);
+    const back = workflowToGraph(wf);
+    expect(back.edges).toEqual(graph.edges);
+    expect(validateGraph(graph)).toEqual([]);
+  });
+
+  it('flags branch labels on non-if edges and missing if/set/code configs', () => {
+    const problems = validateGraph({
+      id: 'bad-branch',
+      name: 'Bad',
+      nodes: [
+        { id: 't', type: 'trigger', name: 'T', config: {}, x: 0, y: 0 },
+        { id: 'c', type: 'if', name: 'C', config: {}, x: 0, y: 0 }, // missing condition
+        { id: 's', type: 'set', name: 'S', config: { assignments: 'nope' }, x: 0, y: 0 },
+        { id: 'k', type: 'code', name: 'K', config: {}, x: 0, y: 0 }, // missing code
+      ],
+      edges: [
+        ['t', 's', 'true'], // label on non-if edge
+        ['c', 'k', 'maybe' as 'true'], // invalid label
+      ],
+    });
+    const joined = problems.join('\n');
+    expect(joined).toMatch(/config\.condition/);
+    expect(joined).toMatch(/config\.assignments/);
+    expect(joined).toMatch(/config\.code/);
+    expect(joined).toMatch(/not an if node/);
+    expect(joined).toMatch(/invalid branch label/);
   });
 });

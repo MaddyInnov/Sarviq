@@ -26,6 +26,9 @@ const TYPE_CHIP: Record<CanvasNodeType, string> = {
   http: 'amber',
   delay: 'gray',
   approval: 'red',
+  if: 'blue',
+  set: 'green',
+  code: 'gray',
 };
 
 function freshGraph(): CanvasGraph {
@@ -114,7 +117,11 @@ export default function CanvasPage() {
     setGraph((g) => ({
       ...g,
       nodes: g.nodes.map((n) => (n.id === oldId ? { ...n, id: clean } : n)),
-      edges: g.edges.map(([f, t]) => [f === oldId ? clean : f, t === oldId ? clean : t] as [string, string]),
+      edges: g.edges.map(([f, t, b]) =>
+        (b === undefined
+          ? [f === oldId ? clean : f, t === oldId ? clean : t]
+          : [f === oldId ? clean : f, t === oldId ? clean : t, b]) as [string, string, ('true' | 'false')?],
+      ),
     }));
     setSelectedId(clean);
     setError('');
@@ -133,13 +140,32 @@ export default function CanvasPage() {
   const addEdge = (from: string, to: string) => {
     if (from === to) return;
     setGraph((g) => {
-      if (g.edges.some(([f, t]) => f === from && t === to)) return g;
-      return { ...g, edges: [...g.edges, [from, to]] };
+      // Edges leaving an if node default to the 'true' branch; change the
+      // label in Pro mode by clicking the edge badge.
+      const fromNode = g.nodes.find((n) => n.id === from);
+      const branch = fromNode?.type === 'if' ? ('true' as const) : undefined;
+      if (g.edges.some(([f, t, b]) => f === from && t === to && b === branch)) return g;
+      return { ...g, edges: [...g.edges, branch === undefined ? [from, to] : [from, to, branch]] };
     });
   };
 
-  const deleteEdge = (from: string, to: string) => {
-    setGraph((g) => ({ ...g, edges: g.edges.filter(([f, t]) => !(f === from && t === to)) }));
+  const deleteEdge = (from: string, to: string, branch?: 'true' | 'false') => {
+    setGraph((g) => ({
+      ...g,
+      edges: g.edges.filter(([f, t, b]) => !(f === from && t === to && b === branch)),
+    }));
+  };
+
+  /** Cycle an if-edge's branch label: true → false → unlabeled → true. */
+  const cycleEdgeBranch = (from: string, to: string, branch?: 'true' | 'false') => {
+    setGraph((g) => ({
+      ...g,
+      edges: g.edges.map(([f, t, b]) => {
+        if (f !== from || t !== to || b !== branch) return [f, t, b] as [string, string, ('true' | 'false')?];
+        const next = branch === 'true' ? 'false' : branch === 'false' ? undefined : 'true';
+        return (next === undefined ? [f, t] : [f, t, next]) as [string, string, ('true' | 'false')?];
+      }),
+    }));
   };
 
   // ---- Drag ----------------------------------------------------------------
@@ -361,6 +387,7 @@ export default function CanvasPage() {
           </div>
           <div className="mt small muted">
             Click a node to select it. With a node selected, use “Connect from selected”, then click the target node.
+            Edges from an <span className="mono">if</span> node carry a true/false branch badge — click it to cycle.
           </div>
           <button
             className={`btn btn-sm mt${connectMode ? ' btn-primary' : ''}`}
@@ -384,7 +411,7 @@ export default function CanvasPage() {
                     <path d="M 0 1 L 9 5 L 0 9 z" fill="#9aa4b2" />
                   </marker>
                 </defs>
-                {graph.edges.map(([from, to]) => {
+                {graph.edges.map(([from, to, branch]) => {
                   const a = nodeById(from);
                   const b = nodeById(to);
                   if (!a || !b) return null;
@@ -393,8 +420,9 @@ export default function CanvasPage() {
                   const x2 = b.x;
                   const y2 = b.y + NODE_H / 2;
                   const mx = (x1 + x2) / 2;
+                  const my = (y1 + y2) / 2;
                   return (
-                    <g key={`${from}→${to}`}>
+                    <g key={`${from}→${to}:${branch ?? ''}`}>
                       {pro && (
                         <line
                           x1={x1}
@@ -404,7 +432,7 @@ export default function CanvasPage() {
                           stroke="transparent"
                           strokeWidth={14}
                           style={{ cursor: 'pointer' }}
-                          onClick={() => deleteEdge(from, to)}
+                          onClick={() => deleteEdge(from, to, branch)}
                         >
                           <title>Delete edge (Pro)</title>
                         </line>
@@ -412,10 +440,37 @@ export default function CanvasPage() {
                       <path
                         d={`M ${x1} ${y1} C ${mx} ${y1}, ${mx} ${y2}, ${x2} ${y2}`}
                         fill="none"
-                        stroke="#9aa4b2"
+                        stroke={branch === 'true' ? '#3fb950' : branch === 'false' ? '#f85149' : '#9aa4b2'}
                         strokeWidth={2}
                         markerEnd="url(#arrow)"
                       />
+                      {branch !== undefined && (
+                        <g
+                          onClick={() => cycleEdgeBranch(from, to, branch)}
+                          style={{ cursor: 'pointer' }}
+                        >
+                          <title>Click to cycle branch (true → false → unlabeled)</title>
+                          <rect
+                            x={mx - 24}
+                            y={my - 11}
+                            width={48}
+                            height={22}
+                            rx={11}
+                            fill={branch === 'true' ? '#12261a' : '#2c1414'}
+                            stroke={branch === 'true' ? '#3fb950' : '#f85149'}
+                            strokeWidth={1}
+                          />
+                          <text
+                            x={mx}
+                            y={my + 4}
+                            textAnchor="middle"
+                            fontSize={11}
+                            fill={branch === 'true' ? '#3fb950' : '#f85149'}
+                          >
+                            {branch}
+                          </text>
+                        </g>
+                      )}
                     </g>
                   );
                 })}
@@ -622,6 +677,16 @@ function summarizeConfig(n: CanvasNode): string {
       return `wait ${Number(c['seconds'] ?? 0)}s`;
     case 'approval':
       return 'needs human ok';
+    case 'if':
+      return typeof c['condition'] === 'string' && c['condition']
+        ? `if ${String(c['condition']).slice(0, 28)}`
+        : 'if —';
+    case 'set': {
+      const n = c['assignments'] && typeof c['assignments'] === 'object' ? Object.keys(c['assignments']).length : 0;
+      return `set ${n} field${n === 1 ? '' : 's'}`;
+    }
+    case 'code':
+      return 'js function';
     case 'trigger':
       return 'entry point';
     default:

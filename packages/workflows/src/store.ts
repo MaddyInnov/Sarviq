@@ -79,6 +79,15 @@ export class WorkflowStore {
       );
       CREATE INDEX IF NOT EXISTS idx_runs_workflow ON runs(workflow_id);
       CREATE INDEX IF NOT EXISTS idx_runs_idempotency ON runs(idempotency_key);
+      -- Definition version history: every saveWorkflow that changes the JSON
+      -- archives the previous definition here (version = 1-based sequence).
+      CREATE TABLE IF NOT EXISTS workflow_versions (
+        workflow_id TEXT NOT NULL,
+        version INTEGER NOT NULL,
+        definition_json TEXT NOT NULL,
+        saved_at INTEGER NOT NULL,
+        PRIMARY KEY (workflow_id, version)
+      );
     `);
     // Crash-resume checkpoint columns (added 2026-10-09). ALTER on existing
     // tables is a no-op when the column already exists — ignore that error.
@@ -104,9 +113,44 @@ export class WorkflowStore {
   // -- workflows -----------------------------------------------------------
 
   saveWorkflow(def: WorkflowDefinition): void {
+    const nextJson = JSON.stringify(def);
+    const current = this.getWorkflow(def.id);
+    if (current && JSON.stringify(current) !== nextJson) {
+      // Archive the previous definition before overwriting (version history).
+      const row = this.db
+        .prepare('SELECT COALESCE(MAX(version), 0) AS max_version FROM workflow_versions WHERE workflow_id = ?')
+        .get(def.id) as unknown as { max_version: number };
+      this.db
+        .prepare(
+          'INSERT INTO workflow_versions (workflow_id, version, definition_json, saved_at) VALUES (?, ?, ?, ?)',
+        )
+        .run(def.id, row.max_version + 1, JSON.stringify(current), Date.now());
+    }
     this.db
       .prepare('INSERT INTO workflows (id, definition_json) VALUES (?, ?) ON CONFLICT(id) DO UPDATE SET definition_json = excluded.definition_json')
-      .run(def.id, JSON.stringify(def));
+      .run(def.id, nextJson);
+  }
+
+  /**
+   * Version history for a workflow: [{ version, savedAt }] oldest first.
+   * Version N is the definition that was live before save N+1 overwrote it.
+   */
+  listWorkflowVersions(id: string): { version: number; savedAt: number }[] {
+    const rows = this.db
+      .prepare(
+        'SELECT version, saved_at FROM workflow_versions WHERE workflow_id = ? ORDER BY version ASC',
+      )
+      .all(id) as unknown as { version: number; saved_at: number }[];
+    return rows.map((r) => ({ version: r.version, savedAt: r.saved_at }));
+  }
+
+  /** A previously archived definition, or undefined when absent. */
+  getWorkflowVersion(id: string, version: number): WorkflowDefinition | undefined {
+    const row = this.db
+      .prepare('SELECT definition_json FROM workflow_versions WHERE workflow_id = ? AND version = ?')
+      .get(id, version) as unknown as { definition_json: string } | undefined;
+    if (!row) return undefined;
+    return JSON.parse(row.definition_json) as WorkflowDefinition;
   }
 
   getWorkflow(id: string): WorkflowDefinition | undefined {

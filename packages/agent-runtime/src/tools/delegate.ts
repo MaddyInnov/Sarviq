@@ -87,7 +87,9 @@ export function createDelegateTools(opts: CreateDelegateToolsOptions): ToolDefin
       'Safety: this call goes through the normal tool-approval flow, the child',
       'runs under the same governance policy, and delegation nests at most',
       `${maxDepth} deep (root -> child -> grandchild). A subagent at the depth`,
-      'limit cannot delegate further. Returns the subagent\'s final text.',
+      'limit cannot delegate further. Delegating to a DIFFERENT bot additionally',
+      'requires peer approval (the target bot\'s peer must approve first).',
+      'Returns the subagent\'s final text.',
     ].join('\n'),
     parameters: {
       type: 'object',
@@ -130,7 +132,6 @@ export function createDelegateTools(opts: CreateDelegateToolsOptions): ToolDefin
       // against known bots; falls back to the caller's bot.
       const botOverride = typeof args.bot === 'string' && args.bot.trim() ? args.bot.trim() : undefined;
       const via = args.via === 'acp' ? 'acp' : 'subagent';
-
       // ACP route (Octop parity): hand the subtask to the bot's external
       // coding agent over stdio JSON-RPC instead of the built-in subagent.
       if (via === 'acp') {

@@ -12,7 +12,19 @@ import type { DatabaseSync } from 'node:sqlite';
 
 const { DatabaseSync: DatabaseSyncImpl } = process.getBuiltinModule('node:sqlite');
 
-export type RecordedEventType = 'click' | 'input' | 'navigate' | 'wait';
+export type RecordedEventType =
+  | 'click'
+  | 'input'
+  | 'navigate'
+  | 'wait'
+  // Computer-view events (teach-by-recording for the per-bot computer view):
+  // coordinate-based user input captured while demonstrating a task. These
+  // compile to computer_* tool nodes in a workflow definition.
+  | 'computer_click'
+  | 'computer_type'
+  | 'computer_key'
+  | 'computer_screenshot'
+  | 'computer_wait';
 
 export interface RecordedEvent {
   type: RecordedEventType;
@@ -24,6 +36,14 @@ export interface RecordedEvent {
   url?: string;
   /** Milliseconds to wait (for wait events). */
   ms?: number;
+  /** Click coordinates in physical pixels (computer_click). */
+  x?: number;
+  /** Click coordinates in physical pixels (computer_click). */
+  y?: number;
+  /** Text typed (computer_type). */
+  text?: string;
+  /** Named key pressed, e.g. 'Enter' (computer_key). */
+  key?: string;
   timestamp: number;
 }
 

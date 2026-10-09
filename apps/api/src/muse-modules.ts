@@ -103,6 +103,12 @@ import {
   extractText,
   formatCitedSources,
   appendSourcesSection,
+  GoalMilestoneStore,
+  CommitmentStore,
+  WatcherStore,
+  evaluateWatcher,
+  scheduleWatcher,
+  exportArtifact,
 } from '@mvp/muse-modules';
 import type { RouteDeps } from './routes.js';
 import { MockSTTProvider } from '@mvp/voice';
@@ -123,6 +129,9 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
   const feed = new FeedStore(mdb);
   const reminders = new ReminderStore(mdb);
   const goals = new GoalStore(mdb);
+  const milestones = new GoalMilestoneStore(mdb);
+  const commitments = new CommitmentStore(mdb);
+  const watchers = new WatcherStore(mdb);
   const artifacts = new ArtifactStore(mdb);
   const media = new MockMediaProvider();
   const calls = new CallLog(mdb);
@@ -147,6 +156,8 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
         feed: { briefSet: feed.getBrief() !== null, posts: feed.listPosts().length },
         reminders: { scheduled: reminders.list('scheduled').length },
         goals: { active: goals.list('active').length, completed: goals.list('completed').length },
+        commitments: { open: commitments.list('open').length },
+        watchers: { count: watchers.list().length },
         artifacts: { count: artifacts.list().length },
         threads: { count: threads.list().length },
         ideas: { total: ideas.list().length, active: ideas.list('active').length },
@@ -341,6 +352,36 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
       sendError(res, err, 'failed to read goal history');
     }
   });
+  // ---- Goal milestones (P3-E) --------------------------------------------
+  goalsRouter.post('/:id/milestones', (req, res) => {
+    try {
+      const b = body(req);
+      res.status(201).json(milestones.add(req.params.id, { title: String(b.title ?? '') }));
+    } catch (err) {
+      sendError(res, err, 'failed to add milestone');
+    }
+  });
+  goalsRouter.get('/:id/milestones', (req, res) => {
+    try {
+      res.json(milestones.list(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to list milestones');
+    }
+  });
+  goalsRouter.get('/:id/detail', (req, res) => {
+    try {
+      res.json(milestones.detail(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to read goal detail');
+    }
+  });
+  goalsRouter.post('/:id/milestones/:mid/complete', (req, res) => {
+    try {
+      res.json(milestones.complete(req.params.id, req.params.mid));
+    } catch (err) {
+      sendError(res, err, 'failed to complete milestone');
+    }
+  });
   router.use('/goals', goalsRouter);
 
   // ---- Artifacts ----------------------------------------------------------
@@ -381,7 +422,188 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
       sendError(res, err, 'failed to list artifact versions');
     }
   });
+  // Export the latest version as html (web page), csv (first table), or pdf.
+  artifactsRouter.get('/:id/export', (req, res) => {
+    try {
+      const format = req.query.format as 'html' | 'csv' | 'pdf' | undefined;
+      if (format !== 'html' && format !== 'csv' && format !== 'pdf') {
+        res.status(400).json({ error: 'query "format" must be one of: html, csv, pdf' });
+        return;
+      }
+      const artifact = artifacts.get(req.params.id);
+      const { bytes, contentType, filename } = exportArtifact(artifact, format);
+      res.setHeader('Content-Type', contentType);
+      res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
+      res.send(Buffer.from(bytes));
+    } catch (err) {
+      sendError(res, err, 'failed to export artifact');
+    }
+  });
   router.use('/artifacts', artifactsRouter);
+
+  // ---- Commitments (P3-E) ---------------------------------------------------
+  const commitmentsRouter = Router();
+  commitmentsRouter.get('/', (req, res) => {
+    try {
+      const status = req.query.status as 'open' | 'kept' | 'missed' | 'cancelled' | undefined;
+      res.json(commitments.list(status));
+    } catch (err) {
+      sendError(res, err, 'failed to list commitments');
+    }
+  });
+  commitmentsRouter.post('/', (req, res) => {
+    try {
+      const b = body(req);
+      res.status(201).json(
+        commitments.create({
+          title: String(b.title ?? ''),
+          detail: b.detail as string | undefined,
+          dueAt: b.dueAt as number | undefined,
+          goalId: b.goalId as string | undefined,
+          reminderId: b.reminderId as string | undefined,
+        }),
+      );
+    } catch (err) {
+      sendError(res, err, 'failed to create commitment');
+    }
+  });
+  commitmentsRouter.get('/overdue', (req, res) => {
+    try {
+      res.json(commitments.listOverdue());
+    } catch (err) {
+      sendError(res, err, 'failed to list overdue commitments');
+    }
+  });
+  commitmentsRouter.get('/:id', (req, res) => {
+    try {
+      res.json(commitments.get(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to get commitment');
+    }
+  });
+  commitmentsRouter.post('/:id/resolve', (req, res) => {
+    try {
+      const b = body(req);
+      res.json(
+        commitments.resolve(
+          req.params.id,
+          b.status as 'kept' | 'missed',
+          (b.outcome as string | undefined) ?? '',
+        ),
+      );
+    } catch (err) {
+      sendError(res, err, 'failed to resolve commitment');
+    }
+  });
+  commitmentsRouter.post('/:id/cancel', (req, res) => {
+    try {
+      res.json(commitments.cancel(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to cancel commitment');
+    }
+  });
+  commitmentsRouter.post('/:id/link-reminder', (req, res) => {
+    try {
+      const b = body(req);
+      res.json(commitments.linkReminder(req.params.id, String(b.reminderId ?? '')));
+    } catch (err) {
+      sendError(res, err, 'failed to link reminder');
+    }
+  });
+  router.use('/commitments', commitmentsRouter);
+
+  // ---- Watchers (P3-E) ------------------------------------------------------
+  const watchersRouter = Router();
+  watchersRouter.get('/', (_req, res) => {
+    try {
+      res.json(watchers.list());
+    } catch (err) {
+      sendError(res, err, 'failed to list watchers');
+    }
+  });
+  watchersRouter.post('/', (req, res) => {
+    try {
+      const b = body(req);
+      res.status(201).json(
+        watchers.create({
+          name: String(b.name ?? ''),
+          description: b.description as string | undefined,
+          cron: b.cron as string | undefined,
+        }),
+      );
+    } catch (err) {
+      sendError(res, err, 'failed to create watcher');
+    }
+  });
+  // Create + register a cron evaluation trigger in one call.
+  watchersRouter.post('/scheduled', (req, res) => {
+    const triggers = new TriggerStore(join(dataDir, 'triggers.db'));
+    try {
+      const b = body(req);
+      const { watcher, trigger } = scheduleWatcher(watchers, triggers, {
+        name: String(b.name ?? ''),
+        description: b.description as string | undefined,
+        cron: String(b.cron ?? ''),
+      });
+      res.status(201).json({ watcher, trigger });
+    } catch (err) {
+      sendError(res, err, 'failed to schedule watcher');
+    } finally {
+      triggers.close();
+    }
+  });
+  watchersRouter.get('/:id', (req, res) => {
+    try {
+      res.json(watchers.get(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to get watcher');
+    }
+  });
+  watchersRouter.post('/:id/enable', (req, res) => {
+    try {
+      res.json(watchers.setEnabled(req.params.id, true));
+    } catch (err) {
+      sendError(res, err, 'failed to enable watcher');
+    }
+  });
+  watchersRouter.post('/:id/disable', (req, res) => {
+    try {
+      res.json(watchers.setEnabled(req.params.id, false));
+    } catch (err) {
+      sendError(res, err, 'failed to disable watcher');
+    }
+  });
+  watchersRouter.delete('/:id', (req, res) => {
+    try {
+      watchers.delete(req.params.id);
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, 'failed to delete watcher');
+    }
+  });
+  watchersRouter.get('/:id/events', (req, res) => {
+    try {
+      const limit = Number(req.query.limit ?? 50);
+      res.json(watchers.events(req.params.id, Number.isFinite(limit) ? limit : 50));
+    } catch (err) {
+      sendError(res, err, 'failed to list watcher events');
+    }
+  });
+  // Evaluate with a fresh observation; edge-triggered (fires on false→true).
+  watchersRouter.post('/:id/check', (req, res) => {
+    try {
+      const b = body(req);
+      res.json(
+        evaluateWatcher(watchers, mdb, req.params.id, {
+          condition: b.condition === true,
+          detail: b.detail as string | undefined,
+        }),
+      );
+    } catch (err) {
+      sendError(res, err, 'failed to evaluate watcher');
+    }
+  });
+  router.use('/watchers', watchersRouter);
 
   // ---- Media --------------------------------------------------------------
   const mediaRouter = Router();

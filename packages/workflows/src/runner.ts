@@ -11,6 +11,7 @@ import type {
 import type { GovernanceGateway } from '@mvp/governance';
 import { WorkflowStore } from './store.js';
 import { renderTemplate, type TemplateContext } from './template.js';
+import { evaluateCode, evaluateCondition, type CodeSandboxContext } from './code-sandbox.js';
 import type {
   NodeState,
   NodeStatus,
@@ -117,17 +118,48 @@ export class WorkflowRunner {
     return def;
   }
 
+  /**
+   * Version history of a workflow definition (oldest first). Every
+   * register() that changes the definition archives the previous one.
+   */
+  listWorkflowVersions(id: string): { version: number; savedAt: number }[] {
+    this.getWorkflow(id); // throws on unknown workflow
+    return this.store.listWorkflowVersions(id);
+  }
+
+  /** A previously archived definition version. */
+  getWorkflowVersion(id: string, version: number): WorkflowDefinition {
+    this.getWorkflow(id); // throws on unknown workflow
+    const def = this.store.getWorkflowVersion(id, version);
+    if (!def) throw new Error(`unknown version ${version} of workflow: ${id}`);
+    return def;
+  }
+
   private validateDefinition(def: WorkflowDefinition): void {
     if (!def.id) throw new Error('workflow must have an id');
     const ids = new Set<string>();
+    const byId = new Map<string, WorkflowNode>();
     for (const node of def.nodes) {
       if (!node.id) throw new Error('workflow node must have an id');
       if (ids.has(node.id)) throw new Error(`duplicate node id: ${node.id}`);
       ids.add(node.id);
+      byId.set(node.id, node);
+      this.validateNodeConfig(node);
     }
-    for (const [from, to] of def.edges) {
+    for (const edge of def.edges) {
+      const [from, to, branch] = edge;
       if (!ids.has(from)) throw new Error(`edge references unknown node: ${from}`);
       if (!ids.has(to)) throw new Error(`edge references unknown node: ${to}`);
+      if (branch !== undefined) {
+        if (branch !== 'true' && branch !== 'false') {
+          throw new Error(`edge ${from} → ${to} has invalid branch label: ${String(branch)}`);
+        }
+        if (byId.get(from)?.type !== 'if') {
+          throw new Error(
+            `edge ${from} → ${to} carries a branch label but "${from}" is not an 'if' node`,
+          );
+        }
+      }
     }
     const triggers = def.nodes.filter((n) => n.type === 'trigger');
     if (triggers.length !== 1) {
@@ -156,6 +188,32 @@ export class WorkflowRunner {
     }
     if (visited !== def.nodes.length) {
       throw new Error('workflow contains a cycle and is not a DAG');
+    }
+  }
+
+  /**
+   * Builder-time config checks for node types with required config shapes.
+   * (agent/tool/http checks stay at run time, matching previous behavior.)
+   */
+  private validateNodeConfig(node: WorkflowNode): void {
+    const config = asRecord(node.config);
+    if (node.type === 'if') {
+      const condition = config['condition'];
+      if (typeof condition !== 'string' || condition.trim().length === 0) {
+        throw new Error(`if node ${node.id}: config.condition must be a non-empty string`);
+      }
+    }
+    if (node.type === 'set') {
+      const assignments = config['assignments'];
+      if (assignments !== undefined && (assignments === null || typeof assignments !== 'object' || Array.isArray(assignments))) {
+        throw new Error(`set node ${node.id}: config.assignments must be an object`);
+      }
+    }
+    if (node.type === 'code') {
+      const code = config['code'];
+      if (typeof code !== 'string' || code.trim().length === 0) {
+        throw new Error(`code node ${node.id}: config.code must be a non-empty string`);
+      }
     }
   }
 
@@ -339,6 +397,16 @@ export class WorkflowRunner {
       for (let levelIndex = 0; levelIndex < levels.length; levelIndex++) {
         const current = this.getRunOrThrow(runId);
         if (current.status !== 'running') return; // failed or paused-by-await
+        // Branch gating: an 'if' node deactivates the untaken branch. A node
+        // whose incoming edges are ALL inactive (untaken 'if' branch, or a
+        // skipped/failed predecessor) is marked 'skipped' instead of running.
+        // The skip propagates level by level, so whole subtrees drop out.
+        for (const nodeId of levels[levelIndex]) {
+          const s = current.nodeStates[nodeId]?.status;
+          if (s === 'pending' && !this.hasActiveIncomingEdge(def, current, nodeId)) {
+            this.updateNodeState(runId, nodeId, { status: 'skipped' });
+          }
+        }
         // Crash-resume: never re-execute steps that already completed (or
         // were skipped as unreachable). Only pending / interrupted nodes run.
         const pending = levels[levelIndex].filter((nodeId) => {
@@ -528,9 +596,113 @@ export class WorkflowRunner {
         return { approved: true };
       }
 
+      case 'if': {
+        const config = asRecord(node.config);
+        const rawCondition = config['condition'];
+        if (typeof rawCondition !== 'string' || rawCondition.trim().length === 0) {
+          throw new Error(`if node ${node.id}: config.condition must be a non-empty string`);
+        }
+        const rendered = renderTemplate(rawCondition, ctx);
+        const sandboxCtx = this.buildCodeSandboxContext(run);
+        const condition = await this.evaluateConditionValue(node.id, rendered, sandboxCtx);
+        return { condition };
+      }
+
+      case 'set': {
+        const config = asRecord(node.config);
+        const assignments = asRecord(config['assignments'] ?? {});
+        const output: Record<string, unknown> = {};
+        if (config['includeInput'] === true) {
+          Object.assign(output, asRecord(run.input));
+        }
+        for (const [field, template] of Object.entries(assignments)) {
+          output[field] = renderTemplate(template, ctx);
+        }
+        return output;
+      }
+
+      case 'code': {
+        const config = asRecord(node.config);
+        const code = config['code'];
+        if (typeof code !== 'string' || code.trim().length === 0) {
+          throw new Error(`code node ${node.id}: config.code must be a non-empty string`);
+        }
+        const timeoutMs =
+          typeof config['timeoutMs'] === 'number' ? config['timeoutMs'] : undefined;
+        try {
+          return await evaluateCode(code, this.buildCodeSandboxContext(run), timeoutMs);
+        } catch (err) {
+          throw new Error(
+            `code node ${node.id} failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+      }
+
+      case 'bot-turn': {
+        // Workflow → bot: run a bot turn as a node and store the output.
+        // Unlike the 'agent' node (which always runs in an isolated
+        // per-node session and returns raw text), 'bot-turn' supports
+        // thread continuity: pass config.sessionId to continue an existing
+        // conversation thread, and the output carries the sessionId so
+        // later nodes can chain onto the same thread.
+        const config = asRecord(node.config);
+        const botId = config['botId'];
+        if (typeof botId !== 'string' || botId.length === 0) {
+          throw new Error(`bot-turn node ${node.id}: config.botId is required`);
+        }
+        const bot = this.bots.get(botId);
+        if (!bot) throw new Error(`bot-turn node ${node.id}: unknown bot ${botId}`);
+        const rendered = renderTemplate(config['prompt'] ?? '', ctx);
+        const message = typeof rendered === 'string' ? rendered : JSON.stringify(rendered);
+        const renderedSession = renderTemplate(config['sessionId'] ?? '', ctx);
+        const sessionId =
+          typeof renderedSession === 'string' && renderedSession.length > 0
+            ? renderedSession
+            : `workflow:${runId}:${node.id}`;
+        let text = '';
+        await this.agentRuntime.runTurn({
+          bot,
+          message,
+          sessionId,
+          onEvent: (event: StreamEvent) => {
+            if (event.type === 'token') text += event.content;
+          },
+        });
+        return { text, sessionId };
+      }
+
       default:
         throw new Error(`unsupported node type: ${(node as WorkflowNode).type}`);
     }
+  }
+
+  /**
+   * Resolve an 'if' condition to a boolean. Templates render first; a plain
+   * boolean/number result is used directly, the strings "true"/"false"
+   * parse literally, and anything else is evaluated as a JS expression in
+   * the code sandbox (e.g. "{{nodes.a.output.n}} > 5" renders to "3 > 5").
+   */
+  private async evaluateConditionValue(
+    nodeId: string,
+    rendered: unknown,
+    sandboxCtx: CodeSandboxContext,
+  ): Promise<boolean> {
+    if (typeof rendered === 'boolean') return rendered;
+    if (typeof rendered === 'number') return rendered !== 0;
+    if (typeof rendered === 'string') {
+      const trimmed = rendered.trim();
+      const lowered = trimmed.toLowerCase();
+      if (lowered === 'true') return true;
+      if (lowered === 'false' || lowered === '') return false;
+      try {
+        return await evaluateCondition(trimmed, sandboxCtx);
+      } catch (err) {
+        throw new Error(
+          `if node ${nodeId}: condition expression failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    }
+    return Boolean(rendered);
   }
 
   /**
@@ -550,6 +722,36 @@ export class WorkflowRunner {
   }
 
   // -- graph helpers ---------------------------------------------------------
+
+  /**
+   * True when at least one incoming edge of `nodeId` is currently carrying:
+   * the source node succeeded, and — for a labeled edge out of an 'if' node —
+   * the label matches the branch the 'if' took. Nodes with no incoming edges
+   * (the trigger) always carry.
+   */
+  private hasActiveIncomingEdge(def: WorkflowDefinition, run: WorkflowRun, nodeId: string): boolean {
+    const incoming = def.edges.filter((edge) => edge[1] === nodeId);
+    if (incoming.length === 0) return true;
+    return incoming.some((edge) => {
+      const [from, , branch] = edge;
+      const srcState = run.nodeStates[from];
+      if (!srcState || srcState.status !== 'succeeded') return false;
+      if (branch === undefined) return true;
+      const srcNode = def.nodes.find((n) => n.id === from);
+      if (srcNode?.type !== 'if') return true; // validated; defensive
+      return this.branchTaken(srcState) === (branch === 'true');
+    });
+  }
+
+  /** Which branch an executed 'if' node took. Defaults to false when unknown. */
+  private branchTaken(ifState: NodeState): boolean {
+    const output = ifState.output;
+    return (
+      typeof output === 'object' &&
+      output !== null &&
+      (output as { condition?: unknown }).condition === true
+    );
+  }
 
   private reachableFromTrigger(def: WorkflowDefinition): Set<string> {
     const adjacency = new Map<string, string[]>();
@@ -614,6 +816,20 @@ export class WorkflowRunner {
     const run = this.store.getRun(id);
     if (!run) throw new Error(`unknown run: ${id}`);
     return run;
+  }
+
+  /**
+   * Context for the code sandbox: `input` is the run input and
+   * `nodes.<id>.output` is that node's output — mirroring the template
+   * reference syntax (`{{nodes.<id>.output…}}`) so the same paths work in
+   * both places.
+   */
+  private buildCodeSandboxContext(run: WorkflowRun): CodeSandboxContext {
+    const nodes: Record<string, unknown> = {};
+    for (const [id, state] of Object.entries(run.nodeStates)) {
+      nodes[id] = { output: state.output };
+    }
+    return { input: run.input, nodes };
   }
 
   private buildTemplateContext(run: WorkflowRun): TemplateContext {

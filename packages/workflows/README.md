@@ -29,6 +29,35 @@ and inspect every run from SQLite.
 | `http`     | `{ method?, url, headers?, body? }` | url/body templated; `fetch`; output `{ status, body }` (JSON parsed, else text truncated to 20 KB) |
 | `delay`    | `{ seconds }` | sleeps |
 | `approval` | `{ message }` | creates a governance approval (`toolName: 'workflow-approval'`); node+run go `paused`; approved → `{ approved: true }`; denied → run failed |
+| `if`       | `{ condition }` | condition is templated, then: boolean/number used directly, `"true"`/`"false"` parsed, else evaluated as a JS expression in the code sandbox (e.g. `"{{nodes.a.output.n}} > 5"`); output `{ condition }`. Outgoing edges may carry a branch label — `[from, to, 'true'|'false']` — so downstream nodes run only on the taken branch; untaken subtrees are marked `skipped` |
+| `set`      | `{ assignments, includeInput? }` | builds an object from template assignments (`field → "{{input.x}}"`); `includeInput: true` merges the run input underneath |
+| `code`     | `{ code, timeoutMs? }` | runs a JS function body in a fresh `node:vm` sandbox (`input` and `nodes.<id>.output` in scope, no host globals); `return` value is the output; default 5 s cap (max 30 s) |
+
+Branch edges: `edges` entries may be `[from, to]` or `[from, to, 'true'|'false']`.
+Labels are only valid on edges leaving an `if` node (validated at register).
+
+## Definition versioning
+
+`saveWorkflow` archives the previous definition whenever the JSON changes
+(`workflow_versions` table). `runner.listWorkflowVersions(id)` /
+`runner.getWorkflowVersion(id, version)` read the history.
+
+## n8n interchange (`src/n8n.ts`)
+
+- `importN8nWorkflow(n8nJson)` — parses a standard n8n export (`nodes[]`,
+  `connections{}`). Maps webhook/scheduleTrigger/manualTrigger → `trigger`,
+  httpRequest → `http`, set → `set`, if → `if` (conditions compiled to an
+  expression), code/function → `code`, wait → `delay`, noOp → pass-through
+  `set`, langchain agent/tools → `agent`/`tool` passthrough. IF outputs become
+  `'true'`/`'false'` branch edges. Unknown nodes become loud `code`
+  placeholders and are listed in the returned `unmapped: [{ n8nType, name,
+  reason }]` — the import never fails on them. A missing trigger is
+  synthesized; extra triggers are reported (one trigger per workflow).
+  n8n expressions (`={{$json.x}}`) have no Sarviq equivalent and need manual
+  conversion after import.
+- `exportN8nWorkflow(def)` — best-effort reverse mapping; `agent`/`tool`/
+  `approval` (no n8n equivalent) become Code nodes carrying the original config
+  as comments.
 
 Template interpolation (`renderTemplate` in `src/template.ts`) recursively
 replaces `{{input}}`, `{{input.a.b}}`, `{{nodes.<id>.output}}` and

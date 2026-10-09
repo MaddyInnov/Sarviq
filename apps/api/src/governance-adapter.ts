@@ -22,7 +22,7 @@ import type {
   ToolContext,
 } from '@mvp/agent-runtime';
 import { DEFAULT_POLICY, GovernanceGateway as RealGovernanceGateway } from '@mvp/governance';
-import type { Policy } from '@mvp/governance';
+import type { Policy, SimulationResult } from '@mvp/governance';
 import { checkHardFloor } from '@mvp/governance';
 // bot-policy.ts is a new module not re-exported from the governance index
 // (index untouched); import the built subpath directly.
@@ -75,6 +75,44 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
   /** Translate a runtime-issued approval id to the real gateway id. */
   resolveApprovalId(runtimeOrRealId: string): string {
     return this.idMap.get(runtimeOrRealId) ?? runtimeOrRealId;
+  }
+
+  /**
+   * Mint a standalone approval for a team peer-delegation (bot→bot) through
+   * the real gateway, so it shows up in the approvals inbox/cards like any
+   * other approval. Returns the runtime-facing approval id; await it with
+   * awaitDecision() and let the user decide via the normal
+   * POST /api/approvals/:id endpoint. Used by the AgentTeams delegation
+   * gate (teams-routes.ts, workstream C).
+   */
+  async requestPeerDelegationApproval(args: {
+    sessionId: string;
+    botId: string;
+    fromBotId: string;
+    toBotId: string;
+    task: string;
+    policy: string;
+  }): Promise<string> {
+    const realId = this.real.requestApproval(
+      'delegate',
+      {
+        bot: args.toBotId,
+        task: args.task.slice(0, 500),
+        teamDelegation: true,
+        fromBot: args.fromBotId,
+        policy: args.policy,
+      },
+      { sessionId: args.sessionId, botId: args.botId, actor: args.fromBotId },
+      { provenance: 'team-peer-delegation' },
+    );
+    const runtimeId = randomUUID();
+    this.idMap.set(runtimeId, realId);
+    // Bound the map: approvals are single-use.
+    if (this.idMap.size > 1000) {
+      const first = this.idMap.keys().next();
+      if (!first.done) this.idMap.delete(first.value);
+    }
+    return runtimeId;
   }
 
   classify(call: ToolCall, _ctx: ToolContext): GovernanceDecision {
@@ -153,6 +191,26 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
 
   decide(approvalId: string, decision: 'approved' | 'denied'): void {
     this.real.decide(this.resolveApprovalId(approvalId), decision);
+  }
+
+  /**
+   * Side-effect-free policy simulation for a proposed tool call: the
+   * decision the gateway WOULD make (effect, matched rule, hard-floor /
+   * denylist hits, whether a live call would mint an approval) WITHOUT
+   * creating approvals or writing audit entries. Merges the bot's policy
+   * rules ahead of the global policy exactly like evaluate() does.
+   */
+  async simulatePolicy(
+    botId: string,
+    toolName: string,
+    args: Record<string, unknown>,
+  ): Promise<SimulationResult> {
+    const botPolicy = this.getBotConfig?.(botId)?.policy;
+    const policy =
+      botPolicy && botPolicy.rules.length > 0
+        ? mergeBotPolicy(this.globalPolicy, botPolicy)
+        : this.globalPolicy;
+    return this.real.simulate(toolName, args, policy);
   }
 
   audit(entry: RuntimeAuditEntry): void {

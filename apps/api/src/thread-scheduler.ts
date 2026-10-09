@@ -1,14 +1,17 @@
 // SPDX-License-Identifier: Apache-2.0
 // Thread automations — Codex-style "wake this conversation on a schedule".
 //
-// Cron triggers start *workflows*. Thread schedules wake *chat threads*: at
-// the scheduled time, the scheduler runs an agent turn on the session with
-// the wake prompt, and the session's history provides the conversation
-// context. The user sees the agent's scheduled check-in when they open the
-// thread.
+// Two schedule kinds:
+//   - 'bot-turn' (default): at the scheduled time, run an agent turn on
+//     the session with the wake prompt; the session's history provides the
+//     conversation context. The user sees the agent's scheduled check-in
+//     when they open the thread.
+//   - 'workflow': at the scheduled time, start a workflow run with the
+//     configured input (cron → workflow, the routines→workflows link).
 //
 // Storage: <dataDir>/thread-schedules.db (own file, same node:sqlite
-// pattern as the workflow TriggerStore).
+// pattern as the workflow TriggerStore). The kind/workflow_id/workflow_input
+// columns are added idempotently for databases created before they existed.
 
 import { randomUUID } from 'node:crypto';
 import type { DatabaseSync } from 'node:sqlite';
@@ -16,14 +19,22 @@ import type { AgentRuntime, BotConfig } from '@mvp/agent-runtime';
 
 const { DatabaseSync: DatabaseSyncImpl } = process.getBuiltinModule('node:sqlite');
 
+export type ThreadScheduleKind = 'bot-turn' | 'workflow';
+
 export interface ThreadSchedule {
   id: string;
   botId: string;
   sessionId: string;
   /** 5-field cron expression. */
   cron: string;
-  /** The wake prompt sent as the scheduled message. */
+  /** The wake prompt sent as the scheduled message (bot-turn schedules). */
   prompt: string;
+  /** 'bot-turn' wakes a chat thread; 'workflow' starts a workflow run. */
+  kind: ThreadScheduleKind;
+  /** Required when kind === 'workflow'. */
+  workflowId?: string;
+  /** JSON input for the workflow run (kind === 'workflow'). */
+  workflowInput?: unknown;
   enabled: boolean;
   createdAt: number;
   lastFiredMinute?: string;
@@ -35,22 +46,35 @@ interface ThreadScheduleRow {
   session_id: string;
   cron: string;
   prompt: string;
+  kind: string | null;
+  workflow_id: string | null;
+  workflow_input: string | null;
   enabled: number;
   created_at: number;
   last_fired_minute: string | null;
 }
 
 function rowToSchedule(r: ThreadScheduleRow): ThreadSchedule {
-  return {
+  const s: ThreadSchedule = {
     id: r.id,
     botId: r.bot_id,
     sessionId: r.session_id,
     cron: r.cron,
     prompt: r.prompt,
+    kind: r.kind === 'workflow' ? 'workflow' : 'bot-turn',
     enabled: r.enabled === 1,
     createdAt: r.created_at,
     lastFiredMinute: r.last_fired_minute ?? undefined,
   };
+  if (r.workflow_id) s.workflowId = r.workflow_id;
+  if (r.workflow_input !== null && r.workflow_input !== undefined) {
+    try {
+      s.workflowInput = JSON.parse(r.workflow_input) as unknown;
+    } catch {
+      s.workflowInput = r.workflow_input;
+    }
+  }
+  return s;
 }
 
 const CRON_RE = /^(\S+)\s+(\S+)\s+(\S+)\s+(\S+)\s+(\S+)$/;
@@ -111,12 +135,39 @@ export class ThreadScheduleStore {
       );
       CREATE INDEX IF NOT EXISTS idx_thread_schedules_enabled ON thread_schedules(enabled);
     `);
+    // Idempotent migration for the routines→workflows link (kind +
+    // workflow target columns on pre-existing databases).
+    this.ensureColumn('kind', "TEXT NOT NULL DEFAULT 'bot-turn'");
+    this.ensureColumn('workflow_id', 'TEXT');
+    this.ensureColumn('workflow_input', 'TEXT');
   }
 
-  create(input: { botId: string; sessionId: string; cron: string; prompt: string }): ThreadSchedule {
+  private ensureColumn(name: string, ddl: string): void {
+    const cols = this.db.prepare(`PRAGMA table_info(thread_schedules)`).all() as Array<{ name: string }>;
+    if (!cols.some((c) => c.name === name)) {
+      this.db.exec(`ALTER TABLE thread_schedules ADD COLUMN ${name} ${ddl}`);
+    }
+  }
+
+  create(input: {
+    botId: string;
+    sessionId: string;
+    cron: string;
+    prompt: string;
+    kind?: ThreadScheduleKind;
+    workflowId?: string;
+    /** JSON input for the workflow run (object or JSON string). */
+    workflowInput?: unknown;
+  }): ThreadSchedule {
     validateCron(input.cron);
-    if (!input.prompt.trim() || input.prompt.length > 4000) {
-      throw new Error('prompt is required (max 4000 chars).');
+    const kind: ThreadScheduleKind = input.kind === 'workflow' ? 'workflow' : 'bot-turn';
+    if (kind === 'workflow') {
+      const workflowId = typeof input.workflowId === 'string' ? input.workflowId.trim() : '';
+      if (!workflowId) throw new Error('workflowId is required for workflow schedules.');
+    } else {
+      if (!input.prompt.trim() || input.prompt.length > 4000) {
+        throw new Error('prompt is required (max 4000 chars).');
+      }
     }
     const s: ThreadSchedule = {
       id: randomUUID(),
@@ -124,14 +175,29 @@ export class ThreadScheduleStore {
       sessionId: input.sessionId,
       cron: input.cron.trim(),
       prompt: input.prompt.trim(),
+      kind,
       enabled: true,
       createdAt: Date.now(),
     };
+    if (kind === 'workflow') {
+      s.workflowId = (input.workflowId as string).trim();
+      if (input.workflowInput !== undefined) s.workflowInput = input.workflowInput;
+    }
     this.db
       .prepare(
-        'INSERT INTO thread_schedules (id, bot_id, session_id, cron, prompt, enabled, created_at) VALUES (?, ?, ?, ?, ?, 1, ?)',
+        'INSERT INTO thread_schedules (id, bot_id, session_id, cron, prompt, kind, workflow_id, workflow_input, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)',
       )
-      .run(s.id, s.botId, s.sessionId, s.cron, s.prompt, s.createdAt);
+      .run(
+        s.id,
+        s.botId,
+        s.sessionId,
+        s.cron,
+        s.prompt,
+        s.kind,
+        s.workflowId ?? null,
+        s.workflowInput === undefined ? null : JSON.stringify(s.workflowInput),
+        s.createdAt,
+      );
     return s;
   }
 
@@ -182,12 +248,20 @@ export interface ThreadSchedulerDeps {
    * run `run_command` inside that sandbox.
    */
   getPersistentSandboxId?: (sessionId: string) => string | undefined;
+  /**
+   * Start a workflow run (routines→workflows link). When set, schedules
+   * with kind 'workflow' start `schedule.workflowId` with
+   * `schedule.workflowInput` instead of waking a chat thread. Unset →
+   * workflow schedules fail with a clear error via onWake.
+   */
+  startWorkflow?: (workflowId: string, input: unknown) => Promise<{ id: string }>;
 }
 
 /**
- * Ticks every minute; for each due schedule, runs an agent turn on the
- * session with the wake prompt. The session's stored history gives the
- * agent its conversation context.
+ * Ticks every minute; for each due schedule, either runs an agent turn on
+ * the session with the wake prompt ('bot-turn') or starts a workflow run
+ * ('workflow'). The session's stored history gives the agent its
+ * conversation context on wake turns.
  */
 export class ThreadScheduler {
   private timer: NodeJS.Timeout | null = null;
@@ -202,6 +276,36 @@ export class ThreadScheduler {
     setTimeout(() => void this.tick(), 5_000);
   }
 
+  /**
+   * Fire a 'workflow'-kind schedule: start the configured workflow run.
+   * Reports through onWake like wake turns do.
+   */
+  private async fireWorkflowSchedule(s: ThreadSchedule): Promise<void> {
+    if (!this.deps.startWorkflow) {
+      this.deps.onWake?.({
+        schedule: s,
+        ok: false,
+        error: 'Workflow schedules need a startWorkflow hook (not wired).',
+      });
+      return;
+    }
+    if (!s.workflowId) {
+      this.deps.onWake?.({ schedule: s, ok: false, error: 'Workflow schedule has no workflowId.' });
+      return;
+    }
+    try {
+      const run = await this.deps.startWorkflow(s.workflowId, s.workflowInput ?? {});
+      this.deps.onWake?.({ schedule: s, ok: true, error: undefined });
+      void run;
+    } catch (err) {
+      this.deps.onWake?.({
+        schedule: s,
+        ok: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
   stop(): void {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
@@ -214,6 +318,10 @@ export class ThreadScheduler {
       const key = minuteKey(now);
       for (const s of this.deps.store.due(now)) {
         this.deps.store.markFired(s.id, key);
+        if (s.kind === 'workflow') {
+          await this.fireWorkflowSchedule(s);
+          continue;
+        }
         const bot = this.deps.getBots().find((b) => b.id === s.botId);
         if (!bot) {
           this.deps.onWake?.({ schedule: s, ok: false, error: `Unknown bot "${s.botId}"` });

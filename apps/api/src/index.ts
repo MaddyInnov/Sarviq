@@ -35,6 +35,22 @@ import { createRouter } from './routes.js';
 import { renderSarviqMeter } from './sarviq-meter.js';
 import { createWebhookRouter } from './webhooks.js';
 import { mountWebAssets } from './web-assets.js';
+// Parity workstreams (OpenMausBot/n8n/Notion/Dots/Groq/OpenCode/Laya/Boosthis/Muse):
+// each module exports a factory; mounted below without touching other wiring.
+import { createComputerView } from './computer-view.js';
+import { createChatThreadsRouter } from './chat-threads-routes.js';
+import { applyImportedBots, createBotRosterRouter } from './bot-roster-routes.js';
+import { registerRoutineRoutes } from './bot-routines.js';
+import { createRoutineWebhookRouter } from './webhooks.js';
+import { createWorkflowN8nRouter } from './workflow-n8n.js';
+import {
+  interconnectionPolicyRules,
+  registerInterconnectionTools,
+} from './interconnect-tools.js';
+import { registerWorktreeRoutes } from './worktrees-routes.js';
+import { createWorktreeTools } from '@mvp/agent-runtime/dist/worktrees.js';
+import { HookBus, loadPlugins } from '@mvp/agent-runtime/dist/hooks.js';
+import { selectComputerSandbox } from '@mvp/agent-runtime/dist/tools/computer-sandbox.js';
 import { runChatCli, runScanCli } from './cli.js';
 // Phase 3: scheduled workflows create tasks; the platform also serves its
 // own tools as an MCP server (two-way MCP).
@@ -51,7 +67,7 @@ import type { McpConnectionClass } from './mcp-annotations.js';
 import { computerUsePolicyRules, registerComputerUseTool } from '@mvp/agent-runtime/dist/tools/computer.js';
 // Real foreground OS layer (opt-in via COMPUTER_USE_REAL=1; mock by default).
 // Same direct-dist-subpath import pattern as computer.js above.
-import { selectOSLayer } from '@mvp/agent-runtime/dist/tools/computer-real.js';
+// (Kept for reference; the live path now goes through selectComputerSandbox.)
 import {
   ModuleDb,
   ReminderStore,
@@ -188,6 +204,8 @@ async function boot(): Promise<void> {
   // <dataDir>/bot-workspaces.json. Unset → global workspaceDir.
   const { applyBotWorkspaces } = await import('./bot-workspaces.js');
   applyBotWorkspaces(seed.bots, config.dataDir);
+  // Chat branching / roster import: overlay previously imported bots.
+  applyImportedBots(seed.bots, config.dataDir);
   const botsById = new Map<string, BotConfig>(seed.bots.map((b) => [b.id, b]));
 
   // 2. Governance + tools.
@@ -197,7 +215,7 @@ async function boot(): Promise<void> {
   // so deny-by-default is preserved and extended.
   const globalPolicy: Policy = {
     ...DEFAULT_POLICY,
-    rules: [...computerUsePolicyRules(), ...museModuleToolPolicies(), ...DEFAULT_POLICY.rules],
+    rules: [...interconnectionPolicyRules(), ...computerUsePolicyRules(), ...museModuleToolPolicies(), ...DEFAULT_POLICY.rules],
   };
   const governance = new GovernanceGateway({
     dbPath: `${config.dataDir}/governance.db`,
@@ -221,6 +239,14 @@ async function boot(): Promise<void> {
   const phoneStore = new PhoneStore(config.dataDir);
   const phoneHub = new PhoneSessionHub(phoneStore, (action, fields) => governance.audit(action, fields));
   const phoneAdb = new AdbPhoneProvider();
+
+  // Per-bot computer view (OpenMausBot parity): live screen stream + user
+  // input per bot. The hub is created here so the WS upgrade handler below
+  // shares the instance with the REST routes.
+  const computerView = createComputerView({
+    audit: (action, fields) => governance.audit(action, fields),
+    listAudit: (limit) => governance.listAudit(limit),
+  });
 
   const governanceAdapter = new GovernanceAdapter(governance, {
     getBotConfig: (id) => botsById.get(id),
@@ -246,25 +272,45 @@ async function boot(): Promise<void> {
   // are approval-gated via computerUsePolicyRules above; the default OS
   // layer is the mock — no real input) and Muse-module tools (research_deep,
   // browser_action — browser_action approval-gated via museModuleToolPolicies).
-  // selectOSLayer() returns the REAL foreground layer only when
-  // COMPUTER_USE_REAL=1; otherwise the safe mock. The approval gate applies
-  // identically either way — governance evaluates before the handler runs.
-  registerComputerUseTool(toolRegistry, {
-    os: selectOSLayer({
-      onRealAction: (action, detail) => {
-        console.log(`[computer-real] ${action}`, JSON.stringify(detail));
-        try {
-          governance.audit('tool.computer_real_action', {
-            actor: 'agent',
-            toolName: `computer_${action}`,
-            detail,
-          });
-        } catch {
-          // Audit must never break input.
-        }
-      },
-    }),
+  // selectOSLayer() returns the Playwright browser layer when
+  // COMPUTER_USE_PLAYWRIGHT=1 (see docs/computer-use-playwright.md), the
+  // REAL foreground layer when COMPUTER_USE_REAL=1; otherwise the safe mock.
+  // The approval gate applies identically either way — governance evaluates
+  // before the handler runs.
+  // Pluggable computer sandbox (Dots parity): selectComputerSandbox() returns
+  // the Docker container backend when COMPUTER_USE_DOCKER=1, the Playwright
+  // browser layer when COMPUTER_USE_PLAYWRIGHT=1, the REAL foreground layer
+  // when COMPUTER_USE_REAL=1; otherwise the safe mock. LocalComputerSandbox
+  // delegates to the previous selectOSLayer() path, so behavior is unchanged
+  // by default. The approval gate applies identically either way.
+  const computerSandbox = selectComputerSandbox({
+    onRealAction: (action, detail) => {
+      console.log(`[computer-real] ${action}`, JSON.stringify(detail));
+      try {
+        governance.audit('tool.computer_real_action', {
+          actor: 'agent',
+          toolName: `computer_${action}`,
+          detail,
+        });
+      } catch {
+        // Audit must never break input.
+      }
+    },
   });
+  await computerSandbox.launch(); // no-op for local; starts the container for docker
+  registerComputerUseTool(toolRegistry, {
+    os: computerSandbox,
+  });
+  // OpenCode parity: git worktree tools (per-session isolated checkouts).
+  // Workspace resolves per-session: a session with an attached worktree
+  // operates inside it, otherwise in the default workspace. The closure runs
+  // at tool-call time, after boot, so agentRuntime is initialized.
+  for (const tool of createWorktreeTools({
+    workspaceDir: (ctx) =>
+      agentRuntime.sessionStore.getWorktree(ctx.sessionId) ?? config.workspaceDir,
+  })) {
+    if (!toolRegistry.has(tool.name)) toolRegistry.set(tool.name, tool);
+  }
   registerMuseModuleTools(toolRegistry, { dataDir: config.dataDir });
 
   // 3. Agent runtime + workflows.
@@ -296,11 +342,20 @@ async function boot(): Promise<void> {
   // Reset any 'started' rows left by a crashed turn back to queued for retry.
   chatQueueStore.resetStarted();
 
+  // OpenCode parity: plugin/hook bus. Hosts can drop .js/.mjs plugins with an
+  // `activate(bus)` export into <dataDir>/plugins to extend the runtime.
+  const hookBus = new HookBus();
+  try {
+    await loadPlugins(path.join(config.dataDir, 'plugins'), hookBus);
+  } catch (err) {
+    console.error('[hooks] plugin load failed:', err instanceof Error ? err.message : err);
+  }
   const agentRuntime = new AgentRuntime({
     dbPath: `${config.dataDir}/agent.db`,
     skillsDir: path.join(seedDir, 'skills'),
     governance: governanceAdapter,
     toolRegistry,
+    hooks: hookBus,
     // Phase 2: summarization auto-compaction replaces blind truncation once
     // sessions grow past the threshold; the last-100-messages floor stays.
     sessionStoreOptions: { summarizer: createSummarizer() },
@@ -340,6 +395,30 @@ async function boot(): Promise<void> {
     bots: botsById,
     // Runtime telemetry: one guarded record per workflow run + per-node steps.
     telemetry,
+  });
+
+  // Interconnection (bot↔workflow↔notes): agent tools workflow_start,
+  // notes_save/read/search + governance rules for them.
+  registerInterconnectionTools({
+    registry: toolRegistry,
+    workflowRunner,
+    dataDir: config.dataDir,
+  });
+
+  // Bot routines (OpenMausBot parity): scheduled bot tasks + signed inbound
+  // webhook triggers that fire a bot turn. One store instance serves both
+  // the management API and the webhook ingress (shared SQLite). The routers
+  // are mounted on `app` in the HTTP section below.
+  const routinesRouter = express.Router();
+  const { routineStore, triggerStore: routineTriggerStore } = registerRoutineRoutes(
+    routinesRouter,
+    { dataDir: config.dataDir, getBots: () => seed.bots },
+  );
+  const routineWebhookRouter = createRoutineWebhookRouter({
+    routineStore,
+    triggerStore: routineTriggerStore,
+    agentRuntime,
+    getBots: () => seed.bots,
   });
 
   // Companion app (phone → PC remote control). The hub is created here (not
@@ -510,6 +589,9 @@ async function boot(): Promise<void> {
     agentRuntime,
     getBots: () => seed.bots,
     getPersistentSandboxId: (sessionId) => dotStore.getBySessionId(sessionId)?.environmentId,
+    // Interconnection: routines can also fire workflow runs.
+    startWorkflow: (workflowId, input) =>
+      workflowRunner.startRun(workflowId, input).then((run) => ({ id: run.id })),
     onWake: ({ schedule, ok, error }) => {
       try {
         createTask({
@@ -560,6 +642,8 @@ async function boot(): Promise<void> {
     dataDir: config.dataDir,
     governance,
     runHealth,
+    // Interconnection: briefing pulls recent workflow runs + note changes.
+    workflowSource: workflowRunner,
   });
   briefingScheduler.start();
 
@@ -619,6 +703,44 @@ async function boot(): Promise<void> {
       omniCollector,
     }),
   );
+  // Parity workstreams: routers. All factories; none of these existed before.
+  // Per-bot computer view (WS at /api/computer/ws is handled in the upgrade
+  // switch below; REST here).
+  app.use('/api/computer', computerView.router);
+  // Chat branching + bot roster import/export.
+  app.use(
+    '/api/chat/threads',
+    createChatThreadsRouter({
+      dataDir: config.dataDir,
+      branchSession: (id, msgId, opts) => agentRuntime.branchSession(id, msgId, opts),
+      listThreadMessages: (id) => agentRuntime.listThreadMessages(id),
+      audit: (action, fields) => governance.audit(action, fields),
+    }),
+  );
+  app.use(
+    '/api/bots',
+    createBotRosterRouter({
+      dataDir: config.dataDir,
+      getBots: () => seed.bots,
+      audit: (action, fields) => governance.audit(action, fields),
+    }),
+  );
+  // Bot routines: management API + signed inbound webhook triggers.
+  // (Stores are created once above and shared by both routers.)
+  app.use('/api/routines', routinesRouter);
+  app.use('/webhooks/routines', routineWebhookRouter);
+  // n8n workflow import/export.
+  app.use('/api', createWorkflowN8nRouter({ workflowRunner }));
+  // Git worktrees (OpenCode parity).
+  {
+    const worktreesRouter = express.Router();
+    registerWorktreeRoutes(worktreesRouter, {
+      workspaceDir: config.workspaceDir,
+      worktreeRoot: path.join(config.workspaceDir, '.worktrees'),
+      sessionStore: agentRuntime.sessionStore,
+    });
+    app.use('/worktrees', worktreesRouter);
+  }
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'Unknown API route' });
@@ -672,6 +794,8 @@ async function boot(): Promise<void> {
       phoneHub.handleUpgrade(req, socket, head);
     } else if (path === '/api/companion/ws') {
       companionHub.handleUpgrade(req, socket, head);
+    } else if (path === '/api/computer/ws') {
+      computerView.handleUpgrade(req, socket, head);
     } else {
       socket.destroy();
     }
@@ -682,6 +806,11 @@ async function boot(): Promise<void> {
     server.close();
     scheduler.stop();
     await closeMcp();
+    try {
+      await computerSandbox.kill();
+    } catch {
+      // ignore
+    }
     try {
       agentRuntime.close();
     } catch {

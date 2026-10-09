@@ -5,6 +5,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { getApiBase } from '../../lib/api';
 import { GraphView, type GraphNode, type GraphEdge } from '../../components/knowledge/graph-view';
 import { QuickSwitcher } from '../../components/knowledge/quick-switcher';
+import { EntityTrace } from '../../components/knowledge/entity-trace';
 
 interface Note {
   id: string;
@@ -514,6 +515,9 @@ export default function KnowledgePage() {
           selectNote(created.id);
         }}
       />
+
+      {/* Entity tracing (lite): cross-source entity search over the knowledge base + memory */}
+      <EntityTrace />
     </div>
   );
 }

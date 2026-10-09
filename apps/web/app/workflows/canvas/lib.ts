@@ -12,7 +12,16 @@
 import type { WorkflowDefinition } from '../../../lib/api';
 
 /** Node types supported by the MVP workflow runner. */
-export type CanvasNodeType = 'trigger' | 'agent' | 'tool' | 'http' | 'delay' | 'approval';
+export type CanvasNodeType =
+  | 'trigger'
+  | 'agent'
+  | 'tool'
+  | 'http'
+  | 'delay'
+  | 'approval'
+  | 'if'
+  | 'set'
+  | 'code';
 
 export const NODE_TYPES: readonly CanvasNodeType[] = [
   'trigger',
@@ -21,7 +30,13 @@ export const NODE_TYPES: readonly CanvasNodeType[] = [
   'http',
   'delay',
   'approval',
+  'if',
+  'set',
+  'code',
 ];
+
+/** Branch label on edges leaving an 'if' node. */
+export type CanvasEdgeBranch = 'true' | 'false';
 
 /** Placeholder config per node type, matching what the runner reads. */
 export const DEFAULT_NODE_CONFIGS: Readonly<Record<CanvasNodeType, Record<string, unknown>>> = {
@@ -31,6 +46,9 @@ export const DEFAULT_NODE_CONFIGS: Readonly<Record<CanvasNodeType, Record<string
   http: { url: '', method: 'GET' },
   delay: { seconds: 60 },
   approval: { message: '' },
+  if: { condition: '{{input}}' },
+  set: { assignments: {} },
+  code: { code: 'return input;' },
 };
 
 export interface CanvasNode {
@@ -48,8 +66,8 @@ export interface CanvasGraph {
   name: string;
   description?: string;
   nodes: CanvasNode[];
-  /** Edges as [fromId, toId] pairs. */
-  edges: [string, string][];
+  /** Edges as [fromId, toId] pairs, with optional 'if'-branch labels. */
+  edges: [string, string, CanvasEdgeBranch?][];
 }
 
 const COL_GAP = 260;
@@ -65,13 +83,13 @@ function isNodeType(t: string): t is CanvasNodeType {
 export function graphToWorkflow(graph: CanvasGraph): WorkflowDefinition {
   const ids = new Set(graph.nodes.map((n) => n.id));
   const seen = new Set<string>();
-  const edges: [string, string][] = [];
-  for (const [from, to] of graph.edges) {
+  const edges: [string, string, CanvasEdgeBranch?][] = [];
+  for (const [from, to, branch] of graph.edges) {
     if (!ids.has(from) || !ids.has(to) || from === to) continue; // drop dangling/self edges
-    const key = `${from}→${to}`;
+    const key = `${from}→${to}:${branch ?? ''}`;
     if (seen.has(key)) continue; // drop duplicates
     seen.add(key);
-    edges.push([from, to]);
+    edges.push(branch === undefined ? [from, to] : [from, to, branch]);
   }
   const def: WorkflowDefinition = {
     id: graph.id,
@@ -127,7 +145,9 @@ export function workflowToGraph(wf: WorkflowDefinition): CanvasGraph {
     nodes,
     edges: wf.edges
       .filter(([from, to]) => ids.has(from) && ids.has(to))
-      .map(([from, to]) => [from, to] as [string, string]),
+      .map(([from, to, branch]) =>
+        branch === undefined ? [from, to] : [from, to, branch],
+      ) as [string, string, CanvasEdgeBranch?][],
   };
   if (wf.description) graph.description = wf.description;
   return graph;
@@ -167,14 +187,35 @@ export function validateGraph(graph: CanvasGraph): string[] {
       const s = Number(c['seconds']);
       if (!Number.isFinite(s) || s < 0) problems.push(`Delay node "${n.id}" needs config.seconds ≥ 0.`);
     }
+    if (n.type === 'if' && (typeof c['condition'] !== 'string' || !c['condition'].trim())) {
+      problems.push(`If node "${n.id}" needs config.condition (non-empty string).`);
+    }
+    if (
+      n.type === 'set' &&
+      c['assignments'] !== undefined &&
+      (typeof c['assignments'] !== 'object' || c['assignments'] === null || Array.isArray(c['assignments']))
+    ) {
+      problems.push(`Set node "${n.id}" needs config.assignments to be an object.`);
+    }
+    if (n.type === 'code' && (typeof c['code'] !== 'string' || !c['code'].trim())) {
+      problems.push(`Code node "${n.id}" needs config.code (non-empty string).`);
+    }
   }
   const seenEdges = new Set<string>();
-  for (const [from, to] of graph.edges) {
+  const nodeTypeById = new Map(graph.nodes.map((n) => [n.id, n.type]));
+  for (const [from, to, branch] of graph.edges) {
     if (!ids.has(from)) problems.push(`Edge starts at unknown node "${from}".`);
     if (!ids.has(to)) problems.push(`Edge ends at unknown node "${to}".`);
     if (from === to && ids.has(from)) problems.push(`Node "${from}" has a self-edge.`);
-    const key = `${from}→${to}`;
-    if (seenEdges.has(key)) problems.push(`Duplicate edge ${from} → ${to}.`);
+    if (branch !== undefined) {
+      if (branch !== 'true' && branch !== 'false') {
+        problems.push(`Edge ${from} → ${to} has invalid branch label "${branch}".`);
+      } else if (nodeTypeById.get(from) !== 'if') {
+        problems.push(`Edge ${from} → ${to} carries a branch label but "${from}" is not an if node.`);
+      }
+    }
+    const key = `${from}→${to}:${branch ?? ''}`;
+    if (seenEdges.has(key)) problems.push(`Duplicate edge ${from} → ${to}${branch ? ` (${branch})` : ''}.`);
     seenEdges.add(key);
   }
   return problems;

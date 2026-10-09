@@ -164,3 +164,140 @@ export class GoalStore {
     return rows.map(rowToEntry);
   }
 }
+
+// ---------------------------------------------------------------------------
+// Milestones (P3-E): ordered checklist items inside a goal. Completing the
+// last open milestone auto-completes the goal (progress → 100 with a history
+// entry), so a goal can be driven entirely by its milestones.
+// ---------------------------------------------------------------------------
+
+export interface GoalMilestone {
+  id: string;
+  goalId: string;
+  title: string;
+  position: number;
+  done: boolean;
+  createdAt: number;
+  completedAt: number | null;
+}
+
+export interface GoalWithMilestones extends Goal {
+  milestones: GoalMilestone[];
+  milestonesDone: number;
+  milestonesTotal: number;
+}
+
+interface MilestoneRow {
+  id: string;
+  goal_id: string;
+  title: string;
+  position: number;
+  done: number;
+  created_at: number;
+  completed_at: number | null;
+}
+
+function rowToMilestone(row: MilestoneRow): GoalMilestone {
+  return {
+    id: row.id,
+    goalId: row.goal_id,
+    title: row.title,
+    position: row.position,
+    done: row.done === 1,
+    createdAt: row.created_at,
+    completedAt: row.completed_at,
+  };
+}
+
+function checkMilestoneTitle(title: unknown): string {
+  const t = (title ?? '').toString().trim();
+  if (!t) throw new ValidationError('milestone "title" must be a non-empty string');
+  if (t.length > 200) throw new ValidationError('milestone "title" must be at most 200 characters');
+  return t;
+}
+
+export class GoalMilestoneStore {
+  constructor(private readonly mdb: ModuleDb) {}
+
+  /** Add a milestone to an active goal. Positions are assigned in order. */
+  add(goalId: string, input: { title: string }): GoalMilestone {
+    const title = checkMilestoneTitle(input.title);
+    const goals = new GoalStore(this.mdb);
+    const goal = goals.get(goalId); // throws NotFoundError for unknown goals
+    if (goal.status !== 'active') {
+      throw new ValidationError('cannot add milestones to a completed goal');
+    }
+    const maxPos = this.mdb.db
+      .prepare('SELECT COALESCE(MAX(position), -1) AS m FROM mm_goal_milestones WHERE goal_id = ?')
+      .get(goalId) as unknown as { m: number };
+    const id = randomUUID();
+    const now = Date.now();
+    this.mdb.db
+      .prepare(
+        `INSERT INTO mm_goal_milestones (id, goal_id, title, position, done, created_at, completed_at)
+         VALUES (?, ?, ?, ?, 0, ?, NULL)`,
+      )
+      .run(id, goalId, title, maxPos.m + 1, now);
+    return this.getMilestone(id);
+  }
+
+  getMilestone(id: string): GoalMilestone {
+    const row = this.mdb.db
+      .prepare(
+        'SELECT id, goal_id, title, position, done, created_at, completed_at FROM mm_goal_milestones WHERE id = ?',
+      )
+      .get(id) as unknown as MilestoneRow | undefined;
+    if (!row) throw new NotFoundError(`unknown milestone: ${id}`);
+    return rowToMilestone(row);
+  }
+
+  /** Milestones for a goal, in order. */
+  list(goalId: string): GoalMilestone[] {
+    new GoalStore(this.mdb).get(goalId); // throws NotFoundError for unknown goals
+    const rows = this.mdb.db
+      .prepare(
+        `SELECT id, goal_id, title, position, done, created_at, completed_at
+         FROM mm_goal_milestones WHERE goal_id = ? ORDER BY position ASC`,
+      )
+      .all(goalId) as unknown as unknown as MilestoneRow[];
+    return rows.map(rowToMilestone);
+  }
+
+  /**
+   * Mark a milestone done. When every milestone of the goal is done, the
+   * goal itself is completed (progress → 100) with a history entry.
+   */
+  complete(goalId: string, milestoneId: string): { milestone: GoalMilestone; goal: Goal } {
+    const goals = new GoalStore(this.mdb);
+    goals.get(goalId);
+    const m = this.getMilestone(milestoneId);
+    if (m.goalId !== goalId) throw new ValidationError('milestone does not belong to this goal');
+    if (m.done) return { milestone: m, goal: goals.get(goalId) };
+    const now = Date.now();
+    this.mdb.db
+      .prepare('UPDATE mm_goal_milestones SET done = 1, completed_at = ? WHERE id = ?')
+      .run(now, milestoneId);
+    const open = this.mdb.db
+      .prepare('SELECT COUNT(*) AS c FROM mm_goal_milestones WHERE goal_id = ? AND done = 0')
+      .get(goalId) as unknown as { c: number };
+    let goal = goals.get(goalId);
+    if (open.c === 0 && goal.status === 'active') {
+      // All milestones done → the goal is done. Drive it through
+      // updateProgress so the history entry is recorded.
+      goal = goals.updateProgress(goalId, 100, 'all milestones complete');
+    }
+    return { milestone: this.getMilestone(milestoneId), goal };
+  }
+
+  /** Goal plus its milestones and done/total counts. */
+  detail(goalId: string): GoalWithMilestones {
+    const goal = new GoalStore(this.mdb).get(goalId);
+    const milestones = this.list(goalId);
+    return {
+      ...goal,
+      milestones,
+      milestonesDone: milestones.filter((m) => m.done).length,
+      milestonesTotal: milestones.length,
+    };
+  }
+}

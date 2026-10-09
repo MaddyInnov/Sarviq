@@ -31,6 +31,12 @@ export const MODEL_PRICES: Record<string, ModelPrice> = {
   // --- Groq (list prices, Oct 2026) ---
   'groq/gpt-oss-20b': { inputPer1M: 0.1, outputPer1M: 0.5, estimate: true },
   'groq/gpt-oss-120b': { inputPer1M: 0.15, outputPer1M: 0.75, estimate: true },
+  // Groq Compound: agentic system around gpt-oss-120b / gpt-oss-20b class
+  // base models. Token rates below are base-model estimates; Compound bills
+  // its built-in tools separately (e.g. search calls, code-execution time),
+  // so treat these as lower bounds.
+  'groq/groq/compound': { inputPer1M: 0.15, outputPer1M: 0.6, estimate: true },
+  'groq/groq/compound-mini': { inputPer1M: 0.1, outputPer1M: 0.5, estimate: true },
   // --- OpenAI (list prices, Oct 2026) ---
   'openai/gpt-4o': { inputPer1M: 2.5, outputPer1M: 10.0, estimate: true },
   'openai/gpt-4o-mini': { inputPer1M: 0.15, outputPer1M: 0.6, estimate: true },

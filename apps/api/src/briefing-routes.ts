@@ -19,7 +19,9 @@ import express from 'express';
 import type { GovernanceGateway } from '@mvp/governance';
 import type { RunHealthStore } from '@mvp/run-health';
 import { BriefingStore, generateBriefing } from './briefing.js';
+import type { GenerateBriefingDeps } from './briefing.js';
 import { CalendarEventStore } from './tasks.js';
+import { NoteStore } from './notes.js';
 
 function errorBody(error: string, detail?: string): { error: string; detail?: string } {
   return detail ? { error, detail } : { error };
@@ -29,12 +31,19 @@ export interface BriefingRouteDeps {
   dataDir: string;
   governance: GovernanceGateway;
   runHealth: RunHealthStore;
+  /**
+   * Workflow source for the digest (feature interconnection). The real
+   * WorkflowRunner satisfies this structurally; unset → no workflow
+   * section. routes.ts passes the live runner.
+   */
+  workflowSource?: GenerateBriefingDeps['workflowSource'];
 }
 
 /** Mount the /api/briefing/* routes. */
 export function registerBriefingRoutes(router: express.Router, deps: BriefingRouteDeps): void {
   const store = new BriefingStore(deps.dataDir);
   const calendarStore = new CalendarEventStore(deps.dataDir);
+  const noteStore = new NoteStore(deps.dataDir);
 
   router.get('/briefing', (_req, res) => {
     try {
@@ -69,6 +78,8 @@ export function registerBriefingRoutes(router: express.Router, deps: BriefingRou
         governance: deps.governance,
         runHealth: deps.runHealth,
         calendarStore,
+        noteStore,
+        workflowSource: deps.workflowSource,
       });
       const saved = store.saveBriefing('manual', briefing);
       res.status(201).json(saved.payload);

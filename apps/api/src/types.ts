@@ -87,6 +87,14 @@ export interface DryRunBody {
   message: string;
 }
 
+/** Body for POST /policy/simulate. */
+export interface PolicySimulateBody {
+  /** Optional: simulate against this bot's merged policy (bot rules + global). */
+  botId?: string;
+  toolName: string;
+  args?: Record<string, unknown>;
+}
+
 export interface ApiError {
   error: string;
   detail?: string;

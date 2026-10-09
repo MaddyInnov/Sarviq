@@ -1,10 +1,12 @@
 // SPDX-License-Identifier: Apache-2.0
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
-import { getBots, getPersonas, getRedteamReports, runRedteamSuite, setBotPersona, setBotWorkspace, updateBotPolicy } from '../../lib/api';
-import type { BotConfig, BotPolicyEffect, BotPolicyRule, PersonaInfo, RedteamReport } from '../../lib/api';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { exportBotRoster, getBots, getPersonas, getRedteamReports, importBotRoster, runRedteamSuite, setBotPersona, setBotWorkspace, simulatePolicy, updateBotPolicy } from '../../lib/api';
+import type { BotConfig, BotPolicyEffect, BotPolicyRule, PersonaInfo, PolicySimulationResult, RedteamReport, RosterImportReport } from '../../lib/api';
 import { useUxMode } from '../../lib/ux-mode';
+import { I18nProvider, LanguageSwitcher, useI18n } from '../../lib/i18n';
+import ComputerPanel from '../../components/panels/computer-panel';
 
 const EFFECTS: BotPolicyEffect[] = ['allow', 'deny', 'require-approval'];
 
@@ -164,6 +166,119 @@ function RulesEditor({
         {savedAt && <span className="small muted">Saved at {savedAt}.</span>}
       </div>
       {error && <div className="error-box" style={{ marginTop: 8 }}>{error}</div>}
+    </div>
+  );
+}
+
+/**
+ * Policy simulator (P3-B, open-dots parity): side-effect-free dry-run of
+ * the governance engine. Pick a tool + args, see the decision the bot's
+ * merged policy WOULD make — no approvals minted, nothing audited.
+ */
+function PolicySimulator({ bot }: { bot: BotConfig }) {
+  const [toolName, setToolName] = useState('write_file');
+  const [argsJson, setArgsJson] = useState('{\n  "path": "notes/todo.txt"\n}');
+  const [result, setResult] = useState<PolicySimulationResult | null>(null);
+  const [error, setError] = useState('');
+  const [running, setRunning] = useState(false);
+
+  // Reset when switching bots.
+  useEffect(() => {
+    setResult(null);
+    setError('');
+  }, [bot.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const run = async () => {
+    setError('');
+    setResult(null);
+    let args: Record<string, unknown>;
+    try {
+      const parsed: unknown = JSON.parse(argsJson);
+      if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+        throw new Error('args must be a JSON object');
+      }
+      args = parsed as Record<string, unknown>;
+    } catch (e) {
+      setError(`Invalid args JSON: ${e instanceof Error ? e.message : String(e)}`);
+      return;
+    }
+    if (!toolName.trim()) {
+      setError('Tool name is required.');
+      return;
+    }
+    setRunning(true);
+    try {
+      const res = await simulatePolicy(toolName.trim(), args, bot.id);
+      setResult(res);
+    } catch (e) {
+      setError(`Simulation failed: ${e instanceof Error ? e.message : String(e)}`);
+    } finally {
+      setRunning(false);
+    }
+  };
+
+  const effectColor = result
+    ? result.effect === 'allow'
+      ? 'var(--ok, #2e7d32)'
+      : result.effect === 'deny'
+        ? 'var(--danger, #c62828)'
+        : 'var(--warn, #e65100)'
+    : undefined;
+
+  return (
+    <div className="card" style={{ marginTop: 12 }}>
+      <h3 style={{ margin: '0 0 4px' }}>Policy simulator</h3>
+      <p className="small muted" style={{ margin: '0 0 12px' }}>
+        Dry-run the governance engine against this bot&apos;s merged policy (bot rules + global). No
+        approvals are created and nothing is audited.
+      </p>
+      <div style={{ display: 'grid', gap: 8, maxWidth: 560 }}>
+        <label className="small">
+          Tool name
+          <input
+            className="input"
+            value={toolName}
+            onChange={(e) => setToolName(e.target.value)}
+            placeholder="write_file"
+            style={{ width: '100%', marginTop: 4 }}
+          />
+        </label>
+        <label className="small">
+          Args (JSON object)
+          <textarea
+            className="input"
+            value={argsJson}
+            onChange={(e) => setArgsJson(e.target.value)}
+            rows={4}
+            spellCheck={false}
+            style={{ width: '100%', marginTop: 4, fontFamily: 'monospace' }}
+          />
+        </label>
+        <div>
+          <button className="btn btn-primary btn-sm" disabled={running} onClick={() => void run()}>
+            {running ? 'Simulating…' : 'Simulate'}
+          </button>
+        </div>
+      </div>
+      {error && <div className="error-box" style={{ marginTop: 8 }}>{error}</div>}
+      {result && (
+        <div className="small" style={{ marginTop: 12, display: 'grid', gap: 4 }}>
+          <div>
+            Decision:{' '}
+            <strong style={{ color: effectColor }}>{result.effect}</strong>
+            {result.wouldCreateApproval && <span className="muted"> (would mint a pending approval)</span>}
+          </div>
+          <div className="muted">Matched rule: {result.matchedRuleId ?? <em>none — default policy</em>}</div>
+          <div className="muted">Reason: {result.reason}</div>
+          <div className="muted">Action class: {result.actionClass}</div>
+          {result.hardFloor && (
+            <div className="muted">
+              Hard floor: {result.hardFloor.tier} — {result.hardFloor.reason} ({result.hardFloor.patternId})
+            </div>
+          )}
+          {result.denylist && <div className="muted">Hard denylist on run_command args fired.</div>}
+        </div>
+      )}
     </div>
   );
 }
@@ -456,15 +571,22 @@ function RobustnessPanel({ bot }: { bot: BotConfig }) {
   );
 }
 
-export default function BotsPage() {  const [bots, setBots] = useState<BotConfig[]>([]);
+function BotsPageInner() {
+  const { t } = useI18n();
+  const [bots, setBots] = useState<BotConfig[]>([]);
   const [selectedBotId, setSelectedBotId] = useState('');
   const [error, setError] = useState('');
-  const [tab, setTab] = useState<'policy' | 'robustness'>('policy');
+  const [tab, setTab] = useState<'policy' | 'robustness' | 'computer'>('policy');
   const [mode] = useUxMode();
+  const [rosterBusy, setRosterBusy] = useState(false);
+  const [rosterError, setRosterError] = useState('');
+  const [rosterReport, setRosterReport] = useState<RosterImportReport | null>(null);
+  const importFileRef = useRef<HTMLInputElement>(null);
   const tabs = [
-    { id: 'policy' as const, label: 'Policy' },
+    { id: 'policy' as const, label: t('bots.tabPolicy') },
+    { id: 'computer' as const, label: t('bots.tabComputer') },
     // Pro surface: hidden in Simple mode.
-    ...(mode === 'pro' ? [{ id: 'robustness' as const, label: 'Robustness' }] : []),
+    ...(mode === 'pro' ? [{ id: 'robustness' as const, label: t('bots.tabRobustness') }] : []),
   ];
   const activeTab = tabs.some((t) => t.id === tab) ? tab : 'policy';
 
@@ -483,6 +605,45 @@ export default function BotsPage() {  const [bots, setBots] = useState<BotConfig
     void refresh();
   }, [refresh]);
 
+  /** Download the full bot+team roster as a JSON manifest file. */
+  const onExportRoster = async () => {
+    if (rosterBusy) return;
+    setRosterBusy(true);
+    setRosterError('');
+    try {
+      await exportBotRoster();
+    } catch (err) {
+      setRosterError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRosterBusy(false);
+    }
+  };
+
+  /** Import a roster manifest file; shows the per-id import report. */
+  const onImportRosterFile = async (file: File) => {
+    if (rosterBusy) return;
+    setRosterBusy(true);
+    setRosterError('');
+    setRosterReport(null);
+    try {
+      const text = await file.text();
+      let manifest: unknown;
+      try {
+        manifest = JSON.parse(text);
+      } catch {
+        throw new Error('Not a valid JSON file.');
+      }
+      const report = await importBotRoster(manifest);
+      setRosterReport(report);
+      await refresh();
+    } catch (err) {
+      setRosterError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setRosterBusy(false);
+      if (importFileRef.current) importFileRef.current.value = '';
+    }
+  };
+
   const onSaved = (botId: string, rules: BotPolicyRule[]) => {
     setBots((prev) => prev.map((b) => (b.id === botId ? { ...b, policy: { rules } } : b)));
   };
@@ -499,15 +660,17 @@ export default function BotsPage() {  const [bots, setBots] = useState<BotConfig
 
   return (
     <div>
-      <h1 className="page-title">Bots</h1>
+      <div className="row-between" style={{ alignItems: 'center' }}>
+        <h1 className="page-title" style={{ marginBottom: 0 }}>{t('bots.title')}</h1>
+        <LanguageSwitcher />
+      </div>
       <p className="page-sub">
-        Per-bot governance policies. Tool calls are evaluated against the bot&apos;s rules first,
-        then the global policy.
+        {t('bots.subtitle')}
       </p>
       {error && <div className="error-box">{error}</div>}
       <div className="chat-layout">
         <aside className="bot-roster">
-          <h3>Bots</h3>
+          <h3>{t('bots.roster')}</h3>
           {bots.map((b) => (
             <button
               key={b.id}
@@ -522,7 +685,70 @@ export default function BotsPage() {  const [bots, setBots] = useState<BotConfig
               </div>
             </button>
           ))}
-          {bots.length === 0 && !error && <div className="small muted">Loading bots…</div>}
+          {bots.length === 0 && !error && <div className="small muted">{t('bots.loadingBots')}</div>}
+          <div style={{ marginTop: 12, display: 'flex', gap: 8, flexWrap: 'wrap' }}>
+            <button type="button" className="btn btn-sm" onClick={onExportRoster} disabled={rosterBusy}>
+              ⬇ Export roster
+            </button>
+            <button
+              type="button"
+              className="btn btn-sm"
+              onClick={() => importFileRef.current?.click()}
+              disabled={rosterBusy}
+            >
+              ⬆ Import roster
+            </button>
+            <input
+              ref={importFileRef}
+              type="file"
+              accept="application/json,.json"
+              hidden
+              aria-label="Import roster manifest"
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) void onImportRosterFile(f);
+              }}
+            />
+          </div>
+          {rosterError && (
+            <div className="error-box" style={{ marginTop: 8 }}>
+              {rosterError}
+            </div>
+          )}
+          {rosterReport && (
+            <div className="small" style={{ marginTop: 8 }} role="status" aria-label="Roster import report">
+              <div>
+                <strong>Imported {rosterReport.imported.length}</strong>
+                {rosterReport.imported.length > 0 && (
+                  <span className="mono">: {rosterReport.imported.join(', ')}</span>
+                )}
+              </div>
+              {rosterReport.skipped.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <strong>Skipped {rosterReport.skipped.length}</strong> (already exist):
+                  <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+                    {rosterReport.skipped.map((s) => (
+                      <li key={s.id}>
+                        <span className="mono">{s.id}</span> — {s.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+              {rosterReport.errors.length > 0 && (
+                <div style={{ marginTop: 4 }}>
+                  <strong>Errors {rosterReport.errors.length}</strong>:
+                  <ul style={{ margin: '4px 0', paddingLeft: 18 }}>
+                    {rosterReport.errors.map((s) => (
+                      <li key={s.id}>
+                        <span className="mono">{s.id}</span> — {s.reason}
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+              )}
+            </div>
+          )}
         </aside>
         <div className="chat-main">
           {selectedBot ? (
@@ -545,16 +771,32 @@ export default function BotsPage() {  const [bots, setBots] = useState<BotConfig
                   <PersonaPicker key={`persona-${selectedBot.id}`} bot={selectedBot} onSaved={onPersonaSaved} />
                   <WorkspacePicker key={`workspace-${selectedBot.id}`} bot={selectedBot} onSaved={onWorkspaceSaved} />
                   <RulesEditor key={selectedBot.id} bot={selectedBot} onSaved={onSaved} />
+                  <PolicySimulator key={`sim-${selectedBot.id}`} bot={selectedBot} />
                 </>
+              ) : activeTab === 'computer' ? (
+                <ComputerPanel key={`computer-${selectedBot.id}`} botId={selectedBot.id} />
               ) : (
                 <RobustnessPanel key={`robustness-${selectedBot.id}`} bot={selectedBot} />
               )}
             </>
           ) : (
-            <p className="muted">Select a bot to edit its policy.</p>
+            <p className="muted">{t('bots.selectPrompt')}</p>
           )}
         </div>
       </div>
     </div>
+  );
+}
+
+/**
+ * Default export: the Bots destination wrapped in the i18n provider.
+ * (Global mount point would be app/layout.tsx around {children} — reported
+ * in docs/I18N.md since layout/nav are owned by the navigation workstream.)
+ */
+export default function BotsPage() {
+  return (
+    <I18nProvider>
+      <BotsPageInner />
+    </I18nProvider>
   );
 }

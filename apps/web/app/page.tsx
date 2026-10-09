@@ -4,10 +4,12 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   allowTool,
+  branchChatThread,
   decideApproval,
   deleteSlashCommand,
   getApiBase,
   getBots,
+  getChatThreadMessages,
   getModels,
   getProviders,
   getSlashCommands,
@@ -30,6 +32,11 @@ import { CodeBlock, LineDiffView, UnifiedDiffView } from '../components/code/Cod
 import LazyClayScene from '../components/three';
 import { Pet } from '../components/pet/Pet';
 import { usePet, type PetMood } from '../lib/pet';
+import { I18nProvider, LanguageSwitcher, useI18n } from '../lib/i18n';
+import { getWebSTTProvider, getWebTTSProvider } from '../lib/voice-http';
+import { VOICE_NOTE_PERSIST_LIMIT, type VoiceNote } from '../lib/voice-notes';
+import { CallPanel, VoiceNoteBubble, VoiceNoteRecorder } from '../components/voice';
+import { NoteAttachButton } from '../components/chat/note-attach-button';
 
 type ChatBlock =
   | { kind: 'user'; id: string; text: string; ts: number }
@@ -45,7 +52,17 @@ type ChatBlock =
     }
   | { kind: 'widget'; id: string; widget: Widget }
   | { kind: 'error'; id: string; text: string }
-  | { kind: 'interrupted'; id: string; text: string };
+  | { kind: 'interrupted'; id: string; text: string }
+  | {
+      kind: 'voice-note';
+      id: string;
+      /** data: URL of the recorded audio ('' when dropped for quota on reload). */
+      audioDataUrl: string;
+      mimeType: string;
+      durationMs: number;
+      transcript: string;
+      ts: number;
+    };
 
 /** A saved conversation (one chat session) belonging to a bot. */
 interface Conversation {
@@ -96,7 +113,13 @@ function loadBlocks(convoId: string): ChatBlock[] {
 
 function saveBlocks(convoId: string, blocks: ChatBlock[]): void {
   try {
-    const trimmed = blocks.slice(-MAX_STORED_BLOCKS);
+    const trimmed = blocks.slice(-MAX_STORED_BLOCKS).map((b) =>
+      // Voice-note audio is local-first: keep it only when it fits the
+      // quota comfortably. The transcript is always persisted.
+      b.kind === 'voice-note' && b.audioDataUrl.length > VOICE_NOTE_PERSIST_LIMIT
+        ? { ...b, audioDataUrl: '' }
+        : b,
+    );
     localStorage.setItem(`mvp:blocks:${convoId}`, JSON.stringify(trimmed));
   } catch {
     // ignore (quota)
@@ -298,6 +321,25 @@ function CopyBtn({ text, title }: { text: string; title?: string }) {
   );
 }
 
+/** "Branch from here" action: fork the thread at this message into a new conversation. */
+function BranchBtn({ onBranch, disabled }: { onBranch: () => void; disabled?: boolean }) {
+  return (
+    <button
+      type="button"
+      className="copy-btn"
+      title="Branch from here — start a new conversation with history up to this message"
+      aria-label="Branch from here"
+      disabled={disabled}
+      onClick={(e) => {
+        e.stopPropagation();
+        onBranch();
+      }}
+    >
+      ⑂ Branch
+    </button>
+  );
+}
+
 /** Suggestion chips for the empty state. */
 const SUGGESTIONS = [
   'Explain a concept simply',
@@ -306,7 +348,8 @@ const SUGGESTIONS = [
   'Review this code for bugs',
 ];
 
-export default function ChatPage() {
+function ChatPageInner() {
+  const { t } = useI18n();
   const [bots, setBots] = useState<BotConfig[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
   const [selectedBotId, setSelectedBotId] = useState<string>('');
@@ -341,9 +384,14 @@ export default function ChatPage() {
   const [activeConvo, setActiveConvo] = useState<Record<string, string>>({});
   const [renamingId, setRenamingId] = useState<string | null>(null);
   const [renameDraft, setRenameDraft] = useState('');
+  // Branching a thread at a message (server round-trip in progress).
+  const [branching, setBranching] = useState(false);
   // Sidebar (mobile drawer) + settings popover.
   const [sideOpen, setSideOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Chat vs live voice-call mode (the call panel lives inside the Chat
+  // destination — the top-level nav stays exactly six destinations).
+  const [chatMode, setChatMode] = useState<'chat' | 'call'>('chat');
   const messagesRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const turnSeq = useRef(0);
@@ -528,6 +576,56 @@ export default function ChatPage() {
     setSideOpen(false);
   };
 
+  /**
+   * Branch the active thread at a message: the server forks the chat
+   * session (history up to & including that message) into a new thread,
+   * and the UI mirrors it as a new local conversation with the same
+   * blocks, then navigates to it.
+   */
+  const branchFromBlock = async (blockId: string) => {
+    if (branching || sending) return;
+    const botId = botIdRef.current;
+    const cid = activeConvoRef.current[botId];
+    const current = blocksRef.current;
+    const idx = current.findIndex((b) => b.id === blockId);
+    if (idx < 0 || !cid) return;
+    const block = current[idx];
+    if (block.kind !== 'user' && block.kind !== 'assistant' && block.kind !== 'voice-note') return;
+
+    setBranching(true);
+    try {
+      // Map the UI block to a server message id: the n-th user/assistant
+      // block (voice notes count as user turns) pairs with the n-th
+      // user/assistant message in the thread's verbatim log.
+      const ordinal = current.slice(0, idx + 1).filter((b) => b.kind === 'user' || b.kind === 'assistant' || b.kind === 'voice-note').length - 1;
+      const log = await getChatThreadMessages(cid);
+      const candidates = log.messages.filter((m) => m.role === 'user' || m.role === 'assistant');
+      if (candidates.length === 0) throw new Error('Thread has no messages to branch from.');
+      const target = candidates[Math.min(ordinal, candidates.length - 1)];
+
+      const convo = (convosRef.current[botId] ?? []).find((c) => c.id === cid);
+      const title = `Branch of ${convo?.title ?? 'chat'}`.slice(0, 120);
+      const res = await branchChatThread(cid, target.id, { title, botId });
+      const thread = res.thread;
+
+      const branchedBlocks = current.slice(0, idx + 1);
+      const newConvo: Conversation = { id: thread.id, title: thread.title, createdAt: Date.now() };
+      const list = convosRef.current[botId] ?? [];
+      persistConvos({ ...convosRef.current, [botId]: [newConvo, ...list] });
+      persistActiveConvo({ ...activeConvoRef.current, [botId]: newConvo.id });
+      saveBlocks(newConvo.id, branchedBlocks);
+      setBlocks(branchedBlocks);
+      setSideOpen(false);
+    } catch (err) {
+      setBlocks((prev) => [
+        ...prev,
+        { kind: 'error', id: newId(), text: `Branch failed: ${err instanceof Error ? err.message : String(err)}` },
+      ]);
+    } finally {
+      setBranching(false);
+    }
+  };
+
   const applyEvent = useCallback((event: StreamEvent) => {
     if (event.type === 'done') {
       const bid = botIdRef.current;
@@ -641,8 +739,13 @@ export default function ChatPage() {
     }
   }, []);
 
-  const send = async () => {
-    const text = input.trim();
+  /**
+   * Run one chat turn. `leadBlock` replaces the plain user-text block —
+   * used by voice notes, which render as an audio bubble while the
+   * transcript drives the turn.
+   */
+  const sendImpl = async (rawText: string, leadBlock?: ChatBlock) => {
+    const text = rawText.trim();
     if (!text || !selectedBot) return;
     // A new message supersedes any in-flight turn on this session
     // (backend aborts the previous turn; we drop our old reader).
@@ -650,7 +753,6 @@ export default function ChatPage() {
     const seq = ++turnSeq.current;
     const controller = new AbortController();
     abortRef.current = controller;
-    setInput('');
     setSending(true);
     // Ensure an active conversation — its id doubles as the backend session id.
     let cid = activeConvoRef.current[selectedBot.id];
@@ -667,7 +769,7 @@ export default function ChatPage() {
         [selectedBot.id]: convoList.map((c) => (c.id === cid ? { ...c, title: convoTitle(text) } : c)),
       });
     }
-    const userBlock: ChatBlock = { kind: 'user', id: nextId(), text, ts: Date.now() };
+    const userBlock: ChatBlock = leadBlock ?? { kind: 'user', id: nextId(), text, ts: Date.now() };
     const assistantBlock: ChatBlock = { kind: 'assistant', id: nextId(), text: '', streaming: true, ts: Date.now(), botName: selectedBot.name };
     setBlocks((prev) => [...prev, userBlock, assistantBlock]);
     const budget = parseFloat(maxBudgetRef.current);
@@ -720,6 +822,35 @@ export default function ChatPage() {
       }
     }
   };
+
+  /** Text composer send. */
+  const send = () => {
+    const text = input.trim();
+    if (!text) return;
+    setInput('');
+    void sendImpl(text);
+  };
+
+  /** Voice-note send: the audio bubble leads, its transcript drives the turn. */
+  const sendVoiceNote = (note: VoiceNote) => {
+    const voiceBlock: ChatBlock = {
+      kind: 'voice-note',
+      id: nextId(),
+      audioDataUrl: note.audioDataUrl,
+      mimeType: note.mimeType,
+      durationMs: note.durationMs,
+      transcript: note.transcript,
+      ts: Date.now(),
+    };
+    void sendImpl(note.transcript.trim() || '(voice note)', voiceBlock);
+  };
+
+  /** Mock brain for the live-call panel (MVP): acknowledges the transcript.
+   *  Wire to streamChat() for a real bot turn — see docs/I18N.md "voice roadmap". */
+  const callRespond = useCallback(async (transcript: string): Promise<string> => {
+    const name = selectedBotRef.current?.name ?? 'the bot';
+    return `You said: "${transcript}". This is ${name} on a mock voice line — STT and TTS are both mocked in the MVP, so I can't really hear you yet.`;
+  }, []);
 
   const decide = async (blockId: string, approvalId: string, decision: 'approved' | 'denied') => {
     setBlocks((prev) =>
@@ -941,7 +1072,7 @@ export default function ChatPage() {
     <div className="chat-layout">
       <aside className={`bot-roster${sideOpen ? ' open' : ''}`} aria-label="Conversations and bots">
         <button className="btn btn-primary new-chat-btn" onClick={newConversation} disabled={!selectedBotId}>
-          ＋ New chat
+          {t('chat.newChat')}
         </button>
         {selectedBotId && (
           <>
@@ -1099,6 +1230,30 @@ export default function ChatPage() {
               ⏳ {queuedCount} queued
             </span>
           )}
+          <div
+            className="mode-toggle"
+            role="group"
+            aria-label={t('chat.modeChatLabel')}
+            title="Chat vs live voice call"
+          >
+            <button
+              type="button"
+              className={`mode-opt${chatMode === 'chat' ? ' active' : ''}`}
+              onClick={() => setChatMode('chat')}
+              aria-pressed={chatMode === 'chat'}
+            >
+              {t('chat.modeChat')}
+            </button>
+            <button
+              type="button"
+              className={`mode-opt${chatMode === 'call' ? ' active' : ''}`}
+              onClick={() => setChatMode('call')}
+              aria-pressed={chatMode === 'call'}
+            >
+              {t('chat.modeCall')}
+            </button>
+          </div>
+          <LanguageSwitcher />
           <div className="spacer" style={{ flex: 1 }} />
           {autoApprove && <span className="mode-badge auto">AUTO-APPROVE ON</span>}
           {planMode && <span className="mode-badge plan">PLAN MODE</span>}
@@ -1156,6 +1311,17 @@ export default function ChatPage() {
           </div>
         </div>
 
+        {chatMode === 'call' ? (
+          <div className="chat-messages">
+            <CallPanel
+              stt={getWebSTTProvider()}
+              tts={getWebTTSProvider()}
+              respond={callRespond}
+              botName={selectedBot?.name}
+            />
+          </div>
+        ) : (
+          <>
         <div className="chat-messages" ref={messagesRef}>
           {blocks.length === 0 && (
             <div className="empty-state">
@@ -1164,7 +1330,7 @@ export default function ChatPage() {
                 <Pet pet={petChoice.id} size={140} mood={petMood} />
               </div>
               <p>
-                <strong>Ask {petName} anything…</strong>
+                <strong>{t('chat.emptyAsk', { pet: petName })}</strong>
               </p>
               <p className="small muted">{selectedBot ? `Chatting as ${selectedBot.name}` : 'Select a bot'}</p>
               <p className="small">
@@ -1204,8 +1370,36 @@ export default function ChatPage() {
                       </span>
                       <span className="msg-time">{fmtTime(b.ts)}</span>
                       <CopyBtn text={b.text} />
+                      <BranchBtn onBranch={() => branchFromBlock(b.id)} disabled={branching || sending} />
                     </div>
                     <div className="msg-text">{b.text}</div>
+                  </div>
+                );
+              case 'voice-note':
+                return (
+                  <div key={b.id} className="msg user" title={new Date(b.ts).toLocaleString()}>
+                    <div className="msg-head">
+                      <span className="avatar you" aria-hidden="true">
+                        You
+                      </span>
+                      <span className="msg-time">{fmtTime(b.ts)}</span>
+                    </div>
+                    {b.audioDataUrl ? (
+                      <VoiceNoteBubble
+                        audioDataUrl={b.audioDataUrl}
+                        mimeType={b.mimeType}
+                        durationMs={b.durationMs}
+                        transcript={b.transcript}
+                        from="user"
+                      />
+                    ) : (
+                      <div className="msg-text">
+                        <span className="small muted">
+                          {t('voice.voiceNote')} · {t('voice.transcript')}:{' '}
+                        </span>
+                        {b.transcript}
+                      </div>
+                    )}
                   </div>
                 );
               case 'assistant': {
@@ -1219,6 +1413,9 @@ export default function ChatPage() {
                       <span className="msg-author">{botLabel}</span>
                       <span className="msg-time">{fmtTime(b.ts)}</span>
                       {b.text.length > 0 && <CopyBtn text={b.text} />}
+                      {!b.streaming && (
+                        <BranchBtn onBranch={() => branchFromBlock(b.id)} disabled={branching || sending} />
+                      )}
                     </div>
                     <div className="msg-text">
                       {b.streaming && b.text.length === 0 ? (
@@ -1340,15 +1537,14 @@ export default function ChatPage() {
             </div>
           )}
           <div className="chat-input">
-            <button
-              type="button"
-              className="icon-btn placeholder-btn"
-              disabled
-              title="Attachments — coming soon"
-              aria-label="Attach a file (coming soon)"
-            >
-              📎
-            </button>
+            {/* Feature interconnection (P2-E): attach a note/page so it lands
+                in the bot's context on every turn. */}
+            <NoteAttachButton
+              botId={selectedBotId}
+              botName={selectedBot?.name ?? 'bot'}
+              sessionId={selectedBotId ? (activeConvo[selectedBotId] ?? '') : ''}
+              disabled={!selectedBot}
+            />
             <textarea
               ref={inputRef}
               className="input composer"
@@ -1378,26 +1574,25 @@ export default function ChatPage() {
                   void send();
                 }
               }}
-              placeholder={selectedBot ? `Message ${selectedBot.name}…  ( / for commands )` : 'Select a bot first…'}
+              placeholder={selectedBot ? t('chat.composerPlaceholder', { bot: selectedBot.name }) : t('chat.composerPlaceholderNoBot')}
               disabled={!selectedBot}
-              aria-label="Chat message"
+              aria-label={t('chat.composerLabel')}
             />
-            <button
-              type="button"
-              className="icon-btn placeholder-btn"
-              disabled
-              title="Voice input — coming soon"
-              aria-label="Voice input (coming soon)"
-            >
-              🎙️
-            </button>
+            <VoiceNoteRecorder
+              stt={getWebSTTProvider()}
+              disabled={!selectedBot || sending}
+              onVoiceNote={sendVoiceNote}
+              onError={(msg) =>
+                setBlocks((prev) => [...prev, { kind: 'error', id: nextId(), text: msg }])
+              }
+            />
             {sending ? (
-              <button className="btn btn-stop" onClick={stopTurn} title="Stop the running turn">
-                ⏹ Stop
+              <button className="btn btn-stop" onClick={stopTurn} title={t('chat.stopTitle')}>
+                ⏹ {t('chat.stop')}
               </button>
             ) : (
               <button className="btn btn-primary" onClick={() => void send()} disabled={!input.trim()}>
-                Send
+                {t('chat.send')}
               </button>
             )}
           </div>
@@ -1428,6 +1623,8 @@ export default function ChatPage() {
             )}
           </div>
         </div>
+          </>
+        )}
       </div>
 
       {/* Slash command manager */}
@@ -1510,5 +1707,18 @@ export default function ChatPage() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * Default export: the chat destination wrapped in the i18n provider.
+ * (Global mount point would be app/layout.tsx around {children} — reported
+ * in docs/I18N.md since layout/nav are owned by the navigation workstream.)
+ */
+export default function ChatPage() {
+  return (
+    <I18nProvider>
+      <ChatPageInner />
+    </I18nProvider>
   );
 }

@@ -23,6 +23,11 @@ import { ResearchStore, MockSearchTool, runDeepResearch } from './research/index
 import { BrowserAutomation, MockBrowserDriver, type BrowserAction } from './browser/index.js';
 import { SlideDeckStore, SLIDE_LAYOUTS, exportDeckMarkdown } from './slides/index.js';
 import { KnowledgeBaseStore, LocalEmbedder, formatCitedSources } from './knowledge-base/index.js';
+import { GoalStore, GoalMilestoneStore } from './goals/index.js';
+import { CommitmentStore } from './commitments/index.js';
+import { WatcherStore, evaluateWatcher } from './watchers/index.js';
+import { ArtifactStore } from './artifacts/index.js';
+import { exportArtifact, type ArtifactExportFormat } from './artifacts/exports.js';
 
 /** Tag external content as untrusted, mirroring runtime.ts's convention. */
 export function tagUntrusted(toolName: string, text: string): string {
@@ -214,12 +219,228 @@ export function registerMuseModuleTools(
   registry: Map<string, ToolDefinition>,
   opts: MuseModuleToolOptions,
 ): void {
-  for (const tool of [researchDeepTool(opts.dataDir), browserActionTool(opts.dataDir), createSlidesTool(opts.dataDir), kbSearchTool(opts.dataDir)]) {
+  for (const tool of [
+    researchDeepTool(opts.dataDir),
+    browserActionTool(opts.dataDir),
+    createSlidesTool(opts.dataDir),
+    kbSearchTool(opts.dataDir),
+    goalMilestonesTool(opts.dataDir),
+    trackCommitmentTool(opts.dataDir),
+    manageWatchersTool(opts.dataDir),
+    exportArtifactTool(opts.dataDir),
+  ]) {
     if (registry.has(tool.name)) {
       throw new Error(`tool name collision: "${tool.name}" is already registered`);
     }
     registry.set(tool.name, tool);
   }
+}
+
+/**
+ * goal_milestones: manage ordered milestones inside a goal (add | complete |
+ * list | detail). Completing the last open milestone auto-completes the goal.
+ */
+function goalMilestonesTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'goal_milestones',
+    description:
+      'Manage ordered milestones inside a goal. Actions: add (title), complete ' +
+      '(milestoneId), list, detail (goal + milestone counts). Completing the last ' +
+      'open milestone auto-completes the goal.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['add', 'complete', 'list', 'detail'] },
+        goalId: { type: 'string', description: 'Goal id' },
+        title: { type: 'string', description: 'Milestone title (for add)' },
+        milestoneId: { type: 'string', description: 'Milestone id (for complete)' },
+      },
+      required: ['action', 'goalId'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const milestones = new GoalMilestoneStore(db);
+        const action = args.action as string;
+        if (action === 'add') {
+          return milestones.add(args.goalId as string, { title: String(args.title ?? '') });
+        }
+        if (action === 'complete') {
+          return milestones.complete(args.goalId as string, String(args.milestoneId ?? ''));
+        }
+        if (action === 'list') {
+          return { milestones: milestones.list(args.goalId as string) };
+        }
+        return milestones.detail(args.goalId as string);
+      } finally {
+        db.close();
+      }
+    },
+  };
+}
+
+/**
+ * track_commitment: explicit promise tracking (create | resolve | cancel |
+ * list | overdue). resolve takes status kept|missed plus a free-text outcome.
+ */
+function trackCommitmentTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'track_commitment',
+    description:
+      'Track explicit commitments ("I will do X by Y"). Actions: create ' +
+      '(title, dueAt ms-epoch optional, detail/goalId optional), resolve ' +
+      '(status kept|missed + outcome text), cancel, list, overdue.',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: { type: 'string', enum: ['create', 'resolve', 'cancel', 'list', 'overdue'] },
+        title: { type: 'string', description: 'Commitment title (for create)' },
+        detail: { type: 'string', description: 'Extra detail (for create)' },
+        dueAt: { type: 'number', description: 'Due time, ms epoch (for create)' },
+        goalId: { type: 'string', description: 'Linked goal id (for create)' },
+        commitmentId: { type: 'string', description: 'Commitment id (for resolve/cancel)' },
+        status: { type: 'string', enum: ['kept', 'missed'], description: 'Outcome (for resolve)' },
+        outcome: { type: 'string', description: 'What actually happened (for resolve)' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const commitments = new CommitmentStore(db);
+        const action = args.action as string;
+        if (action === 'create') {
+          return commitments.create({
+            title: String(args.title ?? ''),
+            detail: args.detail as string | undefined,
+            dueAt: args.dueAt as number | undefined,
+            goalId: args.goalId as string | undefined,
+          });
+        }
+        if (action === 'resolve') {
+          return commitments.resolve(
+            String(args.commitmentId ?? ''),
+            args.status as 'kept' | 'missed',
+            (args.outcome as string | undefined) ?? '',
+          );
+        }
+        if (action === 'cancel') {
+          return commitments.cancel(String(args.commitmentId ?? ''));
+        }
+        if (action === 'overdue') {
+          return { commitments: commitments.listOverdue() };
+        }
+        return { commitments: commitments.list() };
+      } finally {
+        db.close();
+      }
+    },
+  };
+}
+
+/**
+ * manage_watchers: condition watchers (create | list | enable | disable |
+ * delete | check | events). check evaluates with an agent-supplied boolean
+ * observation and returns whether it fired (edge-triggered).
+ */
+function manageWatchersTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'manage_watchers',
+    description:
+      'Manage condition watchers ("tell me when X becomes true"). Actions: create ' +
+      '(name, cron optional), list, enable, disable, delete, events, check ' +
+      '(condition boolean + detail; fires only on false→true transitions).',
+    parameters: {
+      type: 'object',
+      properties: {
+        action: {
+          type: 'string',
+          enum: ['create', 'list', 'enable', 'disable', 'delete', 'events', 'check'],
+        },
+        name: { type: 'string', description: 'Watcher name (for create)' },
+        description: { type: 'string', description: 'What is being watched (for create)' },
+        cron: { type: 'string', description: '5-field cron for scheduled checks (for create)' },
+        watcherId: { type: 'string', description: 'Watcher id' },
+        condition: { type: 'boolean', description: 'Current condition value (for check)' },
+        detail: { type: 'string', description: 'Detail recorded if it fires (for check)' },
+      },
+      required: ['action'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const watchers = new WatcherStore(db);
+        const action = args.action as string;
+        if (action === 'create') {
+          return watchers.create({
+            name: String(args.name ?? ''),
+            description: args.description as string | undefined,
+            cron: args.cron as string | undefined,
+          });
+        }
+        const watcherId = String(args.watcherId ?? '');
+        if (action === 'list') return { watchers: watchers.list() };
+        if (action === 'enable') return watchers.setEnabled(watcherId, true);
+        if (action === 'disable') return watchers.setEnabled(watcherId, false);
+        if (action === 'delete') {
+          watchers.delete(watcherId);
+          return { ok: true, watcherId };
+        }
+        if (action === 'events') return { events: watchers.events(watcherId) };
+        return evaluateWatcher(watchers, db, watcherId, {
+          condition: args.condition === true,
+          detail: args.detail as string | undefined,
+        });
+      } finally {
+        db.close();
+      }
+    },
+  };
+}
+
+/**
+ * export_artifact: render a versioned markdown artifact as a shippable file:
+ * html (self-contained web page), csv (first markdown table), or pdf.
+ * Returns metadata plus base64 bytes the agent can hand to the user.
+ */
+function exportArtifactTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'export_artifact',
+    description:
+      'Export a markdown artifact as html (self-contained web page), csv ' +
+      '(first markdown table), or pdf. Returns filename, contentType, and base64 bytes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        artifactId: { type: 'string', description: 'Artifact id' },
+        format: { type: 'string', enum: ['html', 'csv', 'pdf'] },
+      },
+      required: ['artifactId', 'format'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const artifacts = new ArtifactStore(db);
+        const artifact = artifacts.get(String(args.artifactId ?? ''));
+        const { bytes, contentType, filename } = exportArtifact(
+          artifact,
+          args.format as ArtifactExportFormat,
+        );
+        return {
+          filename,
+          contentType,
+          byteLength: bytes.length,
+          base64: Buffer.from(bytes).toString('base64'),
+        };
+      } finally {
+        db.close();
+      }
+    },
+  };
 }
 
 function createSlidesTool(dataDir: string): ToolDefinition {

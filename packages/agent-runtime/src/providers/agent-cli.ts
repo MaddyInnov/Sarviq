@@ -3,12 +3,13 @@
  * Agent-CLI-as-inference-backend (Laya-inspired, adapted — not copied).
  *
  * Lets pipeline stages route inference through a locally installed agent
- * CLI (Claude Code, Codex, Gemini, Pi) so users with existing subscriptions
+ * CLI (Claude Code, Codex, Gemini, Pi, Grok) so users with existing subscriptions
  * pay nothing extra — the platform never needs the user's API key for
  * these calls.
  *
  * Provider id format: `agent/<cli-id>/<model>`, e.g.
- * `agent/claude-code/sonnet`, `agent/codex/gpt-5`, `agent/gemini/gemini-2.5-pro`.
+ * `agent/claude-code/sonnet`, `agent/codex/gpt-5`, `agent/gemini/gemini-2.5-pro`,
+ * `agent/grok/grok-4`.
  * `createProvider()` (factory.ts) routes `agent/…` ids here.
  *
  * Security contract (hard rules):
@@ -38,7 +39,7 @@ import { delimiter, join } from 'node:path';
 import type { ChatMessage, LLMProvider, ModelInfo, TokenUsage, ToolDefinition } from '../types.js';
 
 /** Well-known agent CLI ids. Custom ids can be registered at runtime. */
-export type AgentCliId = 'claude-code' | 'codex' | 'gemini' | 'pi';
+export type AgentCliId = 'claude-code' | 'codex' | 'gemini' | 'pi' | 'grok';
 
 export interface AgentCliSpec {
   /** Registry key, e.g. 'claude-code'. */
@@ -90,6 +91,21 @@ define({
   notes:
     'Pi agent CLI (best-effort args — Pi distributions vary; override via registerAgentCliSpec). ' +
     'Auth is the CLI\'s own login.',
+});
+define({
+  id: 'grok',
+  command: 'grok',
+  // BEST-EFFORT / UNVERIFIED flags: `-p/--prompt` + `--model` per community
+  // grok-cli docs (superagent-ai/grok-cli headless mode). The Grok CLI
+  // surface varies between the community grok-cli and xAI's official Grok
+  // Build — if your install uses different flags, pin the spec with
+  // registerAgentCliSpec() (see module header).
+  buildArgs: (model, prompt) => ['--prompt', prompt, '--model', model],
+  notes:
+    'Grok CLI headless mode (BEST-EFFORT / UNVERIFIED flags — verified only ' +
+    'against community grok-cli docs, not against an installed binary; ' +
+    'override via registerAgentCliSpec if your install differs). ' +
+    'Auth is the CLI\'s own login (community CLI reads XAI_API_KEY).',
 });
 
 export function getAgentCliSpec(id: string): AgentCliSpec | undefined {

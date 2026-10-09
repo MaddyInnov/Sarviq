@@ -8,6 +8,7 @@ import './pet.css';
 import Nav from './nav';
 import PwaInstallBanner from '../components/pwa-install';
 import { BrandPet } from '../components/pet/BrandPet';
+import { I18nProvider } from '../lib/i18n';
 
 export const metadata: Metadata = {
   title: 'Sarviq',
@@ -56,6 +57,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
         <script dangerouslySetInnerHTML={{ __html: SW_REGISTER_SCRIPT }} />
       </head>
       <body>
+        <I18nProvider>
         <div className="shell">
           <header className="topbar">
             <Link href="/" className="brand">
@@ -67,6 +69,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <main className="main">{children}</main>
         </div>
         <PwaInstallBanner />
+        </I18nProvider>
       </body>
     </html>
   );

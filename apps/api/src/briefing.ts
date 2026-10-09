@@ -34,6 +34,7 @@ import type { LLMProvider } from '@mvp/agent-runtime';
 import { detectRegressions } from '@mvp/run-health';
 import type { MetricSample, RegressionAlert, RunHealthStore } from '@mvp/run-health';
 import { CalendarEventStore } from './tasks.js';
+import { NoteStore } from './notes.js';
 
 const { DatabaseSync: DatabaseSyncImpl } = process.getBuiltinModule('node:sqlite');
 
@@ -52,6 +53,10 @@ export interface Briefing {
   overnight: BriefingItem[];
   calendar: BriefingItem[];
   approvals: BriefingItem[];
+  /** Notes created/updated since the previous briefing (feature interconnection). */
+  notes?: BriefingItem[];
+  /** Recent workflow runs (feature interconnection). */
+  workflows?: BriefingItem[];
   summary?: string;
   regressions?: RegressionAlert[];
 }
@@ -66,6 +71,10 @@ export const BRIEFING_RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
 export const OVERNIGHT_FALLBACK_MS = 12 * 60 * 60 * 1000;
 /** Max overnight items carried into one briefing. */
 export const OVERNIGHT_ITEM_LIMIT = 50;
+/** Max notes carried into one briefing. */
+export const NOTES_ITEM_LIMIT = 10;
+/** Max workflow runs carried into one briefing. */
+export const WORKFLOWS_ITEM_LIMIT = 10;
 /** Max audit rows scanned per generation. */
 const AUDIT_SCAN_LIMIT = 500;
 /** Local-Ollama chat timeout (generation must never hang the request). */
@@ -246,6 +255,21 @@ export interface GenerateBriefingDeps {
   runHealth: RunHealthStore;
   dataDir?: string;
   calendarStore?: CalendarEventStore;
+  /** Notes source (feature interconnection). Defaults to a NoteStore on dataDir. */
+  noteStore?: NoteStore;
+  /**
+   * Workflow source (feature interconnection). Structural — the real
+   * WorkflowRunner satisfies it; tests inject a fake.
+   */
+  workflowSource?: {
+    listRuns: (workflowId?: string) => Array<{
+      id: string;
+      workflowId: string;
+      status: string;
+      createdAt: number;
+      updatedAt: number;
+    }>;
+  };
   /**
    * Summary override (tests). Defaults to the Ollama attempt with a
    * deterministic template fallback.
@@ -260,6 +284,10 @@ export interface BriefingSummaryContext {
   approvalTitles: string[];
   eventCount: number;
   regressionCount: number;
+  /** Notes changed in the briefing window (optional; 0/undefined → omitted). */
+  noteCount?: number;
+  /** Workflow runs in the briefing window (optional; 0/undefined → omitted). */
+  workflowCount?: number;
 }
 
 export type SummarizeFn = (ctx: BriefingSummaryContext) => Promise<string | null>;
@@ -287,6 +315,52 @@ function approvalToItem(a: ApprovalRecord): BriefingItem {
     ts: a.ts,
     kind: 'approval',
   };
+}
+
+/** Notes created/updated inside the briefing window, newest first. */
+function collectNotes(noteStore: NoteStore | undefined, since: number, now: number): BriefingItem[] {
+  if (!noteStore) return [];
+  try {
+    return noteStore
+      .list()
+      .filter((n) => n.updatedAt >= since && n.updatedAt <= now)
+      .slice(0, NOTES_ITEM_LIMIT)
+      .map((n) => ({
+        id: `note-${n.id}`,
+        title: n.title,
+        detail: n.content ? n.content.slice(0, 160) : undefined,
+        ts: n.updatedAt,
+        kind: 'note',
+      }));
+  } catch (err) {
+    console.error('[briefing] notes collection failed:', err instanceof Error ? err.message : err);
+    return [];
+  }
+}
+
+/** Recent workflow runs (finished or still running), newest first. */
+function collectWorkflowRuns(
+  source: GenerateBriefingDeps['workflowSource'],
+  since: number,
+  now: number,
+): BriefingItem[] {
+  if (!source) return [];
+  try {
+    return source
+      .listRuns()
+      .filter((r) => r.updatedAt >= since && r.updatedAt <= now)
+      .slice(0, WORKFLOWS_ITEM_LIMIT)
+      .map((r) => ({
+        id: `workflow-${r.id}`,
+        title: `Workflow ${r.workflowId}: ${r.status}`,
+        detail: `run ${r.id.slice(0, 8)}`,
+        ts: r.updatedAt,
+        kind: 'workflow',
+      }));
+  } catch (err) {
+    console.error('[briefing] workflow-run collection failed:', err instanceof Error ? err.message : err);
+    return [];
+  }
 }
 
 function pad2(n: number): string {
@@ -354,6 +428,8 @@ function buildSummaryPrompt(ctx: BriefingSummaryContext): string {
       ? `Health regressions in the last 7 days: ${ctx.regressionCount}.`
       : 'Health regressions in the last 7 days: none.',
   ];
+  if ((ctx.noteCount ?? 0) > 0) lines.push(`Notes changed since the last briefing: ${ctx.noteCount}.`);
+  if ((ctx.workflowCount ?? 0) > 0) lines.push(`Workflow runs since the last briefing: ${ctx.workflowCount}.`);
   return (
     'Write a 3-6 sentence morning briefing for the operator of a personal AI agent platform, ' +
     'based only on these facts. Plain language, no jargon, no bullet points, no markdown.\n\n' +
@@ -422,6 +498,14 @@ export function templateSummary(ctx: BriefingSummaryContext): string {
       ? `${ctx.regressionCount} health regression${plural(ctx.regressionCount)} detected in the last 7 days — see /api/health/regressions for details.`
       : 'No health regressions in the last 7 days.',
   );
+  // Extra sentences only when there is something to report, so the
+  // baseline 4-sentence shape is unchanged when notes/workflows are empty.
+  if ((ctx.noteCount ?? 0) > 0) {
+    parts.push(`${ctx.noteCount} note${plural(ctx.noteCount ?? 0)} changed since the last briefing.`);
+  }
+  if ((ctx.workflowCount ?? 0) > 0) {
+    parts.push(`${ctx.workflowCount} workflow run${plural(ctx.workflowCount ?? 0)} since the last briefing.`);
+  }
   return parts.join(' ');
 }
 
@@ -446,6 +530,11 @@ export async function generateBriefing(deps: GenerateBriefingDeps): Promise<Brie
 
   const regressions = collectRegressions(deps.runHealth, now);
 
+  // Feature interconnection: notes + workflow runs join the digest.
+  const noteStore = deps.noteStore ?? (deps.dataDir ? new NoteStore(deps.dataDir) : undefined);
+  const notes = collectNotes(noteStore, since, now);
+  const workflows = collectWorkflowRuns(deps.workflowSource, since, now);
+
   const ctx: BriefingSummaryContext = {
     overnightCount: overnight.length,
     botCount,
@@ -453,6 +542,8 @@ export async function generateBriefing(deps: GenerateBriefingDeps): Promise<Brie
     approvalTitles: approvals.map((a) => a.title),
     eventCount: calendar.length,
     regressionCount: regressions.length,
+    noteCount: notes.length,
+    workflowCount: workflows.length,
   };
 
   const summarize = deps.summarize ?? summarizeWithOllama;
@@ -469,6 +560,8 @@ export async function generateBriefing(deps: GenerateBriefingDeps): Promise<Brie
     overnight,
     calendar,
     approvals,
+    notes,
+    workflows,
     summary,
     regressions,
   };
@@ -485,6 +578,17 @@ export interface BriefingSchedulerDeps {
   governance: GovernanceGateway;
   runHealth: RunHealthStore;
   calendarStore?: CalendarEventStore;
+  /**
+   * Summary override (tests). When omitted, generation uses the Ollama
+   * attempt with the deterministic template fallback.
+   */
+  summarize?: SummarizeFn;
+  /**
+   * Workflow source for the digest (feature interconnection). The real
+   * WorkflowRunner satisfies this structurally; unset → no workflow
+   * section in scheduled briefings.
+   */
+  workflowSource?: GenerateBriefingDeps['workflowSource'];
 }
 
 export class BriefingScheduler {
@@ -525,6 +629,8 @@ export class BriefingScheduler {
         runHealth: this.deps.runHealth,
         dataDir: this.deps.dataDir,
         calendarStore: this.deps.calendarStore,
+        summarize: this.deps.summarize,
+        workflowSource: this.deps.workflowSource,
       });
       this.store.saveBriefing('scheduled', briefing);
       this.store.setSetting('last_fired_day', key);

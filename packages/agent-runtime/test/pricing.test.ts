@@ -43,6 +43,19 @@ describe('priceOfModel', () => {
     expect(priceOfModel('groq', 'no-such-model')).toBeUndefined();
   });
 
+  it('prices the Groq Compound models (base-model rates; tool costs billed separately)', () => {
+    expect(priceOfModel('groq', 'groq/compound')).toEqual({
+      inputPer1M: 0.15,
+      outputPer1M: 0.6,
+      estimate: true,
+    });
+    expect(priceOfModel('groq', 'groq/compound-mini')).toEqual({
+      inputPer1M: 0.1,
+      outputPer1M: 0.5,
+      estimate: true,
+    });
+  });
+
   it('every table entry is marked estimate:true (public-data caveat)', () => {
     for (const [key, price] of Object.entries(MODEL_PRICES)) {
       expect(price.estimate, key).toBe(true);

@@ -26,6 +26,22 @@ function newId(): string {
   return `sess_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
 }
 
+/** A single chat message with its stable storage id (SQLite rowid). */
+export interface IdentifiedMessage {
+  id: number;
+  role: ChatMessage['role'];
+  content: string;
+  ts: string;
+  toolName?: string;
+  toolCallId?: string;
+  toolCalls?: ToolCall[];
+}
+
+/** Result of {@link SessionStore.branchSession}. */
+export type BranchSessionResult =
+  | { ok: true; session: SessionRecord; copiedMessages: number }
+  | { ok: false; reason: 'thread-not-found' | 'message-not-found' };
+
 /** Default cap on messages returned by getMessages() without compaction. */
 export const DEFAULT_HISTORY_LIMIT = 100;
 /** Env var consulted when no explicit historyLimit is passed to the constructor. */
@@ -147,6 +163,11 @@ export class SessionStore {
         up_to_id INTEGER NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS session_worktrees (
+        session_id TEXT PRIMARY KEY,
+        worktree_path TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
     `);
   }
 
@@ -266,7 +287,112 @@ export class SessionStore {
     return [{ role: 'system', content: header }, ...kept.map(mapRow)];
   }
 
+  /**
+   * Raw message rows for a session in insertion order, with stable ids.
+   * Unlike getMessages(), this never compacts or truncates — it is the
+   * verbatim log used by chat-thread branching.
+   */
+  listThreadMessages(sessionId: string): IdentifiedMessage[] {
+    const rows = this.db
+      .prepare(
+        'SELECT id, role, content, tool_name, tool_call_id, tool_calls, ts FROM messages WHERE session_id = ? ORDER BY id ASC',
+      )
+      .all(sessionId) as unknown as Array<MessageRow & { ts: string }>;
+    return rows.map((row) => {
+      const msg: IdentifiedMessage = {
+        id: row.id,
+        role: row.role as ChatMessage['role'],
+        content: row.content,
+        ts: row.ts,
+      };
+      if (row.tool_name) msg.toolName = row.tool_name;
+      if (row.tool_call_id) msg.toolCallId = row.tool_call_id;
+      if (row.tool_calls) {
+        try {
+          msg.toolCalls = JSON.parse(row.tool_calls) as ToolCall[];
+        } catch {
+          // corrupted column: drop it rather than failing the whole history
+        }
+      }
+      return msg;
+    });
+  }
+
+  /**
+   * Branch a chat thread: create a new session for the same bot and copy
+   * the source session's history up to and including `fromMessageId`
+   * (a message id from {@link listThreadMessages}).
+   *
+   * Thread existence: a session row counts, but so does a bare message log —
+   * client-generated session ids (e.g. web chat conversation ids) have
+   * messages without a session row. In that case a session row is backfilled
+   * (using `botId` when given) so the thread is addressable afterwards.
+   * Returns `{ ok: false, reason }` instead of throwing for 404 mapping.
+   */
+  branchSession(sessionId: string, fromMessageId: number, botId?: string): BranchSessionResult {
+    let session = this.getSession(sessionId);
+    if (!session) {
+      const hasMessages =
+        (this.db.prepare('SELECT 1 FROM messages WHERE session_id = ? LIMIT 1').get(sessionId) as unknown) !==
+        undefined;
+      if (!hasMessages) return { ok: false, reason: 'thread-not-found' };
+      this.db
+        .prepare('INSERT INTO sessions (id, bot_id, created_at) VALUES (?, ?, ?)')
+        .run(sessionId, botId ?? '', new Date().toISOString());
+      session = this.getSession(sessionId);
+      if (!session) return { ok: false, reason: 'thread-not-found' };
+    }
+    const messageExists =
+      (this.db
+        .prepare('SELECT 1 FROM messages WHERE session_id = ? AND id = ? LIMIT 1')
+        .get(sessionId, fromMessageId) as unknown) !== undefined;
+    if (!messageExists) return { ok: false, reason: 'message-not-found' };
+
+    const newSessionId = this.createSession(session.botId);
+    const copied = this.db
+      .prepare(
+        `INSERT INTO messages (session_id, role, content, tool_name, tool_call_id, tool_calls, ts)
+         SELECT ?, role, content, tool_name, tool_call_id, tool_calls, ts
+         FROM messages WHERE session_id = ? AND id <= ? ORDER BY id ASC`,
+      )
+      .run(newSessionId, sessionId, fromMessageId);
+    const newSession = this.getSession(newSessionId);
+    if (!newSession) return { ok: false, reason: 'thread-not-found' };
+    return { ok: true, session: newSession, copiedMessages: Number(copied.changes) };
+  }
+
   close(): void {
     this.db.close();
+  }
+
+  /**
+   * Bind a coding session to a git worktree (see worktrees.ts). The host
+   * switches the session's workspace by passing a WorkspaceSource resolver
+   * to the coding tools:
+   *   (ctx) => store.getWorktree(ctx.sessionId) ?? defaultWorkspaceDir
+   * Attaching to an unknown session is allowed (row is written by session
+   * id); binding is a label, not a foreign key.
+   */
+  attachWorktree(sessionId: string, worktreePath: string): void {
+    this.db
+      .prepare(
+        `INSERT INTO session_worktrees (session_id, worktree_path, created_at)
+         VALUES (?, ?, ?)
+         ON CONFLICT(session_id) DO UPDATE SET worktree_path = excluded.worktree_path, created_at = excluded.created_at`,
+      )
+      .run(sessionId, worktreePath, new Date().toISOString());
+  }
+
+  /** Worktree path bound to a session, or undefined. */
+  getWorktree(sessionId: string): string | undefined {
+    const row = this.db
+      .prepare('SELECT worktree_path AS worktreePath FROM session_worktrees WHERE session_id = ?')
+      .get(sessionId) as { worktreePath: string } | undefined;
+    return row?.worktreePath;
+  }
+
+  /** Unbind a session's worktree (does not delete the worktree itself). */
+  detachWorktree(sessionId: string): void {
+    this.db.prepare('DELETE FROM session_worktrees WHERE session_id = ?').run(sessionId);
   }
 }

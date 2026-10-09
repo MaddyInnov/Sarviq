@@ -11,7 +11,7 @@ const { DatabaseSync } = process.getBuiltinModule(
 ) as typeof import('node:sqlite');
 type Database = InstanceType<typeof DatabaseSync>;
 import { DENYLIST_COMMAND_RE } from './default-policy.js';
-import { checkHardFloor, type HardFloorConfig } from './hard-floors.js';
+import { checkHardFloor, type HardFloorConfig, type HardFloorHit } from './hard-floors.js';
 import type {
   ActionClass,
   ApprovalRecord,
@@ -22,10 +22,20 @@ import type {
   EvaluateResult,
   Policy,
   PolicyRule,
+  SimulationResult,
 } from './types.js';
 
 /** Default approval timeout when neither the constructor nor awaitDecision sets one. */
 export const DEFAULT_APPROVAL_TIMEOUT_MS = 5 * 60 * 1000;
+
+/** Pure policy decision: no approvals minted, no audit written. */
+interface PolicyDecision {
+  effect: Effect;
+  actionClass: ActionClass;
+  floorHit: HardFloorHit | null;
+  denylistHit: boolean;
+  matchedRule?: PolicyRule;
+}
 
 export interface GatewayOptions {
   /** SQLite file path, or ':memory:' for an ephemeral database. */
@@ -214,12 +224,13 @@ export class GovernanceGateway {
     return this.evaluateInner(toolName, args, ctx, policy);
   }
 
-  private async evaluateInner(
-    toolName: string,
-    args: Record<string, unknown>,
-    ctx: EvalContext,
-    policy: Policy,
-  ): Promise<EvaluateResult> {
+  /**
+   * Pure policy decision: hard floors → denylist → first matching rule →
+   * default effect. No side effects (no approvals minted, no audit written)
+   * — shared by evaluateInner() and simulate() so the simulator can never
+   * drift from the live decision logic.
+   */
+  private decidePolicy(toolName: string, args: Record<string, unknown>, policy: Policy): PolicyDecision {
     const actionClass = this.classify(toolName);
 
     // Hard floors FIRST — before denylist, policy rules, always-allow,
@@ -232,6 +243,72 @@ export class GovernanceGateway {
     //   sufficient safeguard for instant-destruction commands.
     // - 'destructive' → human approval required (approval minted below).
     const floorHit = checkHardFloor(toolName, args, this.hardFloorConfig);
+    if (floorHit && floorHit.tier === 'catastrophic') {
+      return { effect: 'deny', actionClass, floorHit, denylistHit: false };
+    }
+    if (floorHit) {
+      return { effect: 'require-approval', actionClass, floorHit, denylistHit: false };
+    }
+
+    // Hard denylist on run_command args — unconditional deny, no rule needed.
+    const command = args['command'];
+    if (typeof command === 'string' && DENYLIST_COMMAND_RE.test(command)) {
+      return { effect: 'deny', actionClass, floorHit: null, denylistHit: true };
+    }
+
+    const matchedRule = policy.rules.find((r) => this.ruleMatches(r, toolName, actionClass));
+    return {
+      effect: matchedRule?.effect ?? policy.defaultEffect,
+      actionClass,
+      floorHit: null,
+      denylistHit: false,
+      matchedRule,
+    };
+  }
+
+  /**
+   * Side-effect-free policy simulation (dry-run): returns the decision the
+   * gateway WOULD make for a proposed tool call — including hard floors,
+   * the denylist, the matched rule, and whether a live evaluation would
+   * mint a pending approval — WITHOUT creating approvals or writing audit
+   * entries. Powers the policy simulator (POST /api/policy/simulate) so
+   * policy authors can test rules safely before they govern real runs.
+   *
+   * Evaluates against an explicit policy when given (per-bot merged policy
+   * from the API layer), otherwise the gateway's own policy.
+   */
+  async simulate(
+    toolName: string,
+    args: Record<string, unknown>,
+    policy?: Policy,
+  ): Promise<SimulationResult> {
+    const d = this.decidePolicy(toolName, args, policy ?? this.policy);
+    const reason =
+      d.floorHit?.reason ??
+      (d.denylistHit ? 'denylist: destructive command pattern' : (d.matchedRule?.reason ?? 'default policy'));
+    return {
+      effect: d.effect,
+      actionClass: d.actionClass,
+      matchedRuleId: d.matchedRule?.id,
+      reason,
+      wouldCreateApproval: d.effect === 'require-approval',
+      hardFloor: d.floorHit
+        ? { tier: d.floorHit.tier, reason: d.floorHit.reason, patternId: d.floorHit.patternId }
+        : undefined,
+      denylist: d.denylistHit || undefined,
+      simulated: true,
+    };
+  }
+
+  private async evaluateInner(
+    toolName: string,
+    args: Record<string, unknown>,
+    ctx: EvalContext,
+    policy: Policy,
+  ): Promise<EvaluateResult> {
+    const d = this.decidePolicy(toolName, args, policy);
+    const { actionClass, floorHit, matchedRule: rule } = d;
+
     if (floorHit && floorHit.tier === 'catastrophic') {
       this.audit('tool.evaluate', {
         actor: ctx.actor,
@@ -266,9 +343,7 @@ export class GovernanceGateway {
       return { effect: 'require-approval', approvalId };
     }
 
-    // Hard denylist on run_command args — unconditional deny, no rule needed.
-    const command = args['command'];
-    if (typeof command === 'string' && DENYLIST_COMMAND_RE.test(command)) {
+    if (d.denylistHit) {
       this.audit('tool.evaluate', {
         actor: ctx.actor,
         sessionId: ctx.sessionId,
@@ -283,8 +358,7 @@ export class GovernanceGateway {
       return { effect: 'deny' };
     }
 
-    const rule = policy.rules.find((r) => this.ruleMatches(r, toolName, actionClass));
-    const effect: Effect = rule?.effect ?? policy.defaultEffect;
+    const effect = d.effect;
 
     if (effect === 'allow') {
       this.audit('tool.evaluate', {

@@ -4,8 +4,21 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { getRunHealth, getRuns, getWorkflows, runWorkflow } from '../../lib/api';
-import type { HealthScore, RunHealth, WorkflowDefinition, WorkflowRun } from '../../lib/api';
+import {
+  exportN8nWorkflow,
+  getRunHealth,
+  getRuns,
+  getWorkflows,
+  importN8nWorkflow,
+  runWorkflow,
+} from '../../lib/api';
+import type {
+  HealthScore,
+  RunHealth,
+  UnmappedN8nNode,
+  WorkflowDefinition,
+  WorkflowRun,
+} from '../../lib/api';
 
 function fmtTs(ts: number): string {
   return new Date(ts).toLocaleString();
@@ -40,6 +53,11 @@ export default function WorkflowsPage() {
   const [expanded, setExpanded] = useState<string | null>(null);
   const [diagnoses, setDiagnoses] = useState<Record<string, RunHealth>>({});
   const [diagLoading, setDiagLoading] = useState<string | null>(null);
+  // n8n interchange.
+  const [importing, setImporting] = useState(false);
+  const [importReport, setImportReport] = useState<UnmappedN8nNode[] | null>(null);
+  const [importedName, setImportedName] = useState('');
+  const [exportingId, setExportingId] = useState('');
 
   const refresh = useCallback(async () => {
     try {
@@ -95,11 +113,104 @@ export default function WorkflowsPage() {
     }
   };
 
+  const importFile = async (file: File) => {
+    setImporting(true);
+    setImportReport(null);
+    setImportedName('');
+    try {
+      const text = await file.text();
+      const n8nJson = JSON.parse(text) as unknown;
+      const { workflow, unmapped } = await importN8nWorkflow(n8nJson);
+      setImportedName(workflow.name);
+      setImportReport(unmapped);
+      setError('');
+      await refresh();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImporting(false);
+    }
+  };
+
+  const exportFile = async (def: WorkflowDefinition) => {
+    setExportingId(def.id);
+    try {
+      const n8nJson = await exportN8nWorkflow(def.id);
+      const blob = new Blob([JSON.stringify(n8nJson, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${def.id}-n8n.json`;
+      a.click();
+      URL.revokeObjectURL(url);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setExportingId('');
+    }
+  };
+
   return (
     <div>
       <h1 className="page-title">Workflows</h1>
       <p className="page-sub">Registered workflow definitions and their runs.</p>
       {error && <div className="error-box">{error}</div>}
+
+      <div className="card mt">
+        <div className="row-between" style={{ flexWrap: 'wrap', gap: 8 }}>
+          <div>
+            <strong>n8n interchange</strong>
+            <p className="small muted mt0">
+              Import a standard n8n workflow export — common nodes map best-effort; unmapped
+              nodes are reported below (never silently dropped).
+            </p>
+          </div>
+          <label className="btn btn-sm" style={{ cursor: 'pointer' }}>
+            {importing ? 'Importing…' : 'Import n8n JSON'}
+            <input
+              type="file"
+              accept="application/json,.json"
+              style={{ display: 'none' }}
+              disabled={importing}
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                e.target.value = '';
+                if (f) void importFile(f);
+              }}
+            />
+          </label>
+        </div>
+        {importedName && (
+          <p className="small mt">
+            Imported <strong>{importedName}</strong>
+            {importReport && importReport.length === 0 && ' — every node mapped cleanly.'}
+          </p>
+        )}
+        {importReport && importReport.length > 0 && (
+          <div className="mt">
+            <strong className="small">Unmapped nodes ({importReport.length})</strong>
+            <table className="tbl mt">
+              <thead>
+                <tr>
+                  <th>Node</th>
+                  <th>n8n type</th>
+                  <th>Reason</th>
+                </tr>
+              </thead>
+              <tbody>
+                {importReport.map((u, i) => (
+                  <tr key={i}>
+                    <td>{u.name}</td>
+                    <td className="mono small">{u.n8nType}</td>
+                    <td className="small muted">{u.reason}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
 
       <div className="grid-2">
         {defs.map((d) => (
@@ -143,6 +254,14 @@ export default function WorkflowsPage() {
               onClick={() => void start(d)}
             >
               {starting === d.id ? 'Starting…' : 'Run'}
+            </button>{' '}
+            <button
+              className="btn btn-sm"
+              disabled={exportingId === d.id}
+              onClick={() => void exportFile(d)}
+              title="Download this workflow in n8n format (best-effort)"
+            >
+              {exportingId === d.id ? 'Exporting…' : 'Export n8n'}
             </button>
           </div>
         ))}

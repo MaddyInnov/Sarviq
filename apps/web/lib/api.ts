@@ -215,12 +215,15 @@ export interface WorkflowNodeDef {
   config: Record<string, unknown>;
 }
 
+/** Branch label on edges leaving an 'if' node ('true'/'false' outcome). */
+export type WorkflowEdgeBranch = 'true' | 'false';
+
 export interface WorkflowDefinition {
   id: string;
   name: string;
   description?: string;
   nodes: WorkflowNodeDef[];
-  edges: [string, string][];
+  edges: [string, string, WorkflowEdgeBranch?][];
 }
 
 export interface NodeState {
@@ -346,6 +349,86 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const getBots = (): Promise<BotConfig[]> => apiJson('/api/bots');
+
+// ---- Chat thread branching -------------------------------------------------
+
+export interface ChatThreadMessage {
+  id: number;
+  role: string;
+  content: string;
+  ts: string;
+}
+
+export interface ChatThreadBranch {
+  id: string;
+  title: string;
+  botId: string;
+  branchedFrom: string;
+  fromMessageId: number;
+  copiedMessages: number;
+  createdAt: string;
+}
+
+/** Verbatim message log for a chat thread, with the stable ids branching needs. */
+export const getChatThreadMessages = (
+  threadId: string,
+): Promise<{ ok: boolean; threadId: string; messages: ChatThreadMessage[] }> =>
+  apiJson(`/api/chat/threads/${encodeURIComponent(threadId)}/messages`);
+
+/** Branch a thread at a message; returns the new thread. */
+export const branchChatThread = (
+  threadId: string,
+  fromMessageId: number,
+  opts?: { title?: string; botId?: string },
+): Promise<{ ok: boolean; thread: ChatThreadBranch }> =>
+  apiJson(`/api/chat/threads/${encodeURIComponent(threadId)}/branch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ fromMessageId, ...(opts?.title ? { title: opts.title } : {}), ...(opts?.botId ? { botId: opts.botId } : {}) }),
+  });
+
+// ---- Bot roster import/export ----------------------------------------------
+
+export interface RosterReportItem {
+  id: string;
+  reason: string;
+}
+
+export interface RosterImportReport {
+  ok: boolean;
+  imported: string[];
+  skipped: RosterReportItem[];
+  errors: RosterReportItem[];
+}
+
+/** Download the full bot+team roster as a JSON file. */
+export const exportBotRoster = async (): Promise<void> => {
+  const res = await apiFetch('/api/bots/export');
+  if (!res.ok) throw new Error(`API ${res.status}: export failed`);
+  const blob = await res.blob();
+  const cd = res.headers.get('content-disposition') ?? '';
+  const match = /filename="([^"]+)"/.exec(cd);
+  const filename = match?.[1] ?? 'sarviq-bot-roster.json';
+  const url = URL.createObjectURL(blob);
+  try {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+};
+
+/** Import a roster manifest; returns the per-id import report. */
+export const importBotRoster = (manifest: unknown): Promise<RosterImportReport> =>
+  apiJson('/api/bots/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ manifest }),
+  });
 export const setBotWorkspace = (botId: string, workspace: string | null): Promise<{ ok: boolean; botId: string; workspace: string | null; root: string | null }> =>
   apiJson(`/api/bots/${encodeURIComponent(botId)}/workspace`, {
     method: 'PUT',
@@ -601,12 +684,75 @@ export const getRuns = (): Promise<WorkflowRun[]> => apiJson('/api/workflows/run
 export const getRun = (runId: string): Promise<WorkflowRun> =>
   apiJson(`/api/workflows/runs/${encodeURIComponent(runId)}`);
 
+/** n8n node that had no Sarviq mapping during import (imported as a placeholder). */
+export interface UnmappedN8nNode {
+  n8nType: string;
+  name: string;
+  reason: string;
+}
+
+export interface N8nImportResult {
+  workflow: WorkflowDefinition;
+  unmapped: UnmappedN8nNode[];
+}
+
+/** Import a standard n8n workflow export JSON; registers it server-side. */
+export function importN8nWorkflow(n8nJson: unknown): Promise<N8nImportResult> {
+  return apiJson('/api/workflows/import', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ n8nJson }),
+  });
+}
+
+/** Export a workflow definition in n8n format (best-effort reverse mapping). */
+export function exportN8nWorkflow(id: string): Promise<unknown> {
+  return apiJson(`/api/workflows/${encodeURIComponent(id)}/export-n8n`);
+}
+
 export function dryRun(botId: string, message: string): Promise<PreviewResult> {
   return apiJson('/api/dry-run', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ botId, message }),
   });
+}
+
+export interface PolicySimulationResult {
+  toolName: string;
+  botId: string;
+  effect: 'allow' | 'require-approval' | 'deny';
+  actionClass: string;
+  matchedRuleId?: string;
+  reason: string;
+  wouldCreateApproval: boolean;
+  hardFloor?: { tier: 'catastrophic' | 'destructive'; reason: string; patternId: string };
+  denylist?: boolean;
+  simulated: true;
+}
+
+/** Side-effect-free policy dry-run: what WOULD the policy do for this tool call? */
+export function simulatePolicy(
+  toolName: string,
+  args: Record<string, unknown>,
+  botId?: string,
+): Promise<PolicySimulationResult> {
+  return apiJson('/api/policy/simulate', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ toolName, args, botId }),
+  });
+}
+
+export interface ActionRegistryEntry {
+  name: string;
+  description: string;
+  parameters: unknown;
+}
+
+/** Read-only action registry: every tool the agent can call. */
+export function getActionRegistry(): Promise<{ tools: ActionRegistryEntry[] }> {
+  return apiJson('/api/tools');
 }
 
 // ---- SSE --------------------------------------------------------------------

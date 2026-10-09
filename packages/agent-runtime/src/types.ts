@@ -115,6 +115,12 @@ export interface BotConfig {
    * `{ command: 'opencode', args: ['acp'] }`.
    */
   acp?: { command: string; args?: string[] };
+  /**
+   * Fast message-router keywords (message-router.ts): optional per-bot
+   * persona/topic keywords that bias routeMessage() toward this bot.
+   * Example: `['billing', 'invoice', 'refund']` for a billing bot.
+   */
+  routeKeywords?: string[];
 }
 
 export interface LLMProvider {

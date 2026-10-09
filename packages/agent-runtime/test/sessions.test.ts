@@ -281,3 +281,19 @@ describe('summarization auto-compaction', () => {
     store.close();
   });
 });
+
+describe('session worktree links', () => {
+  it('attach/get/detach round-trips', () => {
+    const store = new SessionStore(':memory:');
+    const sid = store.createSession('bot-1');
+    expect(store.getWorktree(sid)).toBeUndefined();
+    store.attachWorktree(sid, '/tmp/worktrees/feat-a');
+    expect(store.getWorktree(sid)).toBe('/tmp/worktrees/feat-a');
+    // re-attach overwrites
+    store.attachWorktree(sid, '/tmp/worktrees/feat-b');
+    expect(store.getWorktree(sid)).toBe('/tmp/worktrees/feat-b');
+    store.detachWorktree(sid);
+    expect(store.getWorktree(sid)).toBeUndefined();
+    store.close();
+  });
+});

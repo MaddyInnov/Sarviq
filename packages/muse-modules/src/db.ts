@@ -214,6 +214,56 @@ CREATE VIRTUAL TABLE IF NOT EXISTS mm_kb_chunks_fts USING fts5(
   title,
   text
 );
+
+-- Goal milestones (P3-E): ordered checklist items inside a goal. Completing
+-- every milestone auto-completes the goal.
+CREATE TABLE IF NOT EXISTS mm_goal_milestones (
+  id TEXT PRIMARY KEY,
+  goal_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  position INTEGER NOT NULL,
+  done INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL,
+  completed_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mm_goal_milestones_goal ON mm_goal_milestones (goal_id, position);
+
+-- Commitments (P3-E): explicit "I will do X by Y" tracking with outcomes.
+CREATE TABLE IF NOT EXISTS mm_commitments (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  due_at INTEGER,
+  goal_id TEXT,
+  reminder_id TEXT,
+  status TEXT NOT NULL,
+  outcome TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  resolved_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_mm_commitments_status_due ON mm_commitments (status, due_at);
+
+-- Watchers (P3-E): edge-triggered condition watchers. The host evaluates a
+-- watcher (cron trigger muse-watcher:<id>, like reminders) and calls
+-- evaluateWatcher(); an event is recorded only on a false→true transition.
+CREATE TABLE IF NOT EXISTS mm_watchers (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  cron TEXT NOT NULL DEFAULT '',
+  enabled INTEGER NOT NULL DEFAULT 1,
+  last_condition INTEGER,
+  last_checked_at INTEGER,
+  last_fired_at INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mm_watcher_events (
+  id TEXT PRIMARY KEY,
+  watcher_id TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_watcher_events_watcher ON mm_watcher_events (watcher_id, created_at DESC);
 `;
 
 /**

@@ -12,7 +12,11 @@
     "systemPrompt": "You are Scout, a fast and thorough research assistant. Use web_search to find current information and web_fetch to read key pages. Always cite sources with URLs. Be concise but complete. If a task requires saving or changing files, explain what you would do and ask before acting.",
     "tools": [
       "web_search",
-      "web_fetch"
+      "web_fetch",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ]
   },
   {
@@ -30,7 +34,11 @@
       "read_file",
       "write_file",
       "run_command",
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ]
   },
   {
@@ -46,14 +54,18 @@
     "systemPrompt": "You are Helper, a friendly general-purpose assistant. Answer questions clearly, draft text when asked, and use web_search when current information is needed. Keep responses focused and skimmable.",
     "tools": [
       "web_search",
-      "web_fetch"
+      "web_fetch",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ]
   },
   {
     "id": "data-analyst",
     "name": "Data Analyst",
     "description": "Explores CSVs and datasets, computes statistics, and builds charts with Python.",
-    "systemPrompt": "You are a pragmatic data analyst. Use read_file to inspect datasets, write_file to create analysis scripts, and run_command to execute them (pandas/matplotlib). Lead with the key numbers, then the method. Never fabricate data \u2014 report what the data actually shows, and say when a sample is too small to conclude.",
+    "systemPrompt": "You are a pragmatic data analyst. Use read_file to inspect datasets, write_file to create analysis scripts, and run_command to execute them (pandas/matplotlib). Lead with the key numbers, then the method. Never fabricate data — report what the data actually shows, and say when a sample is too small to conclude.",
     "provider": "groq",
     "model": "gpt-oss-120b",
     "skills": [
@@ -65,7 +77,11 @@
       "read_file",
       "write_file",
       "run_command",
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ],
     "mcpServers": []
   },
@@ -81,7 +97,9 @@
       "blog-posts"
     ],
     "tools": [
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   },
@@ -98,7 +116,9 @@
     ],
     "tools": [
       "read_file",
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   },
@@ -106,7 +126,7 @@
     "id": "planner",
     "name": "Planner",
     "description": "Breaks goals into plans with milestones, tasks, and time estimates.",
-    "systemPrompt": "You are a planning assistant. Turn a goal into a concrete plan: milestones, ordered tasks with rough time estimates, dependencies, and risks. Ask about deadlines and constraints before planning. Keep plans realistic \u2014 prefer fewer, well-defined tasks over exhaustive lists.",
+    "systemPrompt": "You are a planning assistant. Turn a goal into a concrete plan: milestones, ordered tasks with rough time estimates, dependencies, and risks. Ask about deadlines and constraints before planning. Keep plans realistic — prefer fewer, well-defined tasks over exhaustive lists.",
     "provider": "groq",
     "model": "gpt-oss-20b",
     "skills": [
@@ -114,7 +134,11 @@
     ],
     "tools": [
       "web_search",
-      "web_fetch"
+      "web_fetch",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ],
     "mcpServers": []
   },
@@ -129,7 +153,9 @@
       "general-helper"
     ],
     "tools": [
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   },
@@ -144,7 +170,9 @@
       "sql-helper"
     ],
     "tools": [
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   },
@@ -160,7 +188,9 @@
     ],
     "tools": [
       "run_command",
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   },
@@ -168,14 +198,18 @@
     "id": "meeting-notes",
     "name": "Meeting Notes",
     "description": "Turns raw transcripts into structured notes with owners and dates.",
-    "systemPrompt": "You are a meeting-notes specialist. Given a raw transcript, produce: TL;DR, decisions made, action items (owner + due date \u2014 mark as 'unassigned' if not stated), and open questions. Do not invent owners, dates, or decisions. If the transcript is ambiguous, say so.",
+    "systemPrompt": "You are a meeting-notes specialist. Given a raw transcript, produce: TL;DR, decisions made, action items (owner + due date — mark as 'unassigned' if not stated), and open questions. Do not invent owners, dates, or decisions. If the transcript is ambiguous, say so.",
     "provider": "groq",
     "model": "gpt-oss-20b",
     "skills": [
       "meeting-notes"
     ],
     "tools": [
-      "web_search"
+      "web_search",
+      "notes_read",
+      "notes_search",
+      "notes_save",
+      "workflow_start"
     ],
     "mcpServers": []
   },
@@ -183,7 +217,7 @@
     "id": "learning-tutor",
     "name": "Learning Tutor",
     "description": "Teaches topics step by step with examples and checks for understanding.",
-    "systemPrompt": "You are a patient tutor. Explain one concept at a time, use concrete examples, and check understanding with a short question before moving on. Adapt to the learner's level \u2014 ask what they already know. Correct mistakes kindly and explain the reasoning, not just the answer.",
+    "systemPrompt": "You are a patient tutor. Explain one concept at a time, use concrete examples, and check understanding with a short question before moving on. Adapt to the learner's level — ask what they already know. Correct mistakes kindly and explain the reasoning, not just the answer.",
     "provider": "groq",
     "model": "gpt-oss-20b",
     "skills": [
@@ -191,7 +225,9 @@
     ],
     "tools": [
       "web_search",
-      "web_fetch"
+      "web_fetch",
+      "notes_read",
+      "notes_search"
     ],
     "mcpServers": []
   }

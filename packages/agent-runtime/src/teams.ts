@@ -20,6 +20,52 @@ export interface Team {
   coordinatorBotId: string;
   memberBotIds: string[];
   createdAt: number;
+  /**
+   * Peer-delegation approval policy (workstream C): how bot→bot delegation
+   * inside coordinator runs is gated on user approval. Absent (pre-policy
+   * records) → DEFAULT_DELEGATION_POLICY.
+   */
+  delegationPolicy?: DelegationPolicy;
+  /**
+   * Per-member-bot policy override: member bot id → policy. Takes
+   * precedence over the team policy for delegations targeting that bot.
+   */
+  delegationPolicyOverrides?: Record<string, DelegationPolicy>;
+}
+
+/**
+ * Peer-delegation approval policy for a team (bot→bot delegation in the
+ * coordinator flow):
+ * - 'approve-once-per-team' (default): the first delegation asks the user
+ *   via the approval broker; one approval covers subsequent delegations
+ *   within the team.
+ * - 'always-ask': every delegation asks the user.
+ * - 'always-allow': no peer-approval gate (normal governance still applies).
+ */
+export type DelegationPolicy = 'approve-once-per-team' | 'always-ask' | 'always-allow';
+
+export const DELEGATION_POLICIES: readonly DelegationPolicy[] = [
+  'approve-once-per-team',
+  'always-ask',
+  'always-allow',
+] as const;
+
+/** Policy assumed for team records created before the policy column existed. */
+export const DEFAULT_DELEGATION_POLICY: DelegationPolicy = 'approve-once-per-team';
+
+export function isDelegationPolicy(v: unknown): v is DelegationPolicy {
+  return v === 'approve-once-per-team' || v === 'always-ask' || v === 'always-allow';
+}
+
+/**
+ * Effective delegation policy for a delegation targeting `memberBotId`:
+ * per-bot override wins, then the team policy, then the default.
+ */
+export function resolveDelegationPolicy(team: Team, memberBotId: string): DelegationPolicy {
+  const override = team.delegationPolicyOverrides?.[memberBotId];
+  if (override && isDelegationPolicy(override)) return override;
+  if (team.delegationPolicy && isDelegationPolicy(team.delegationPolicy)) return team.delegationPolicy;
+  return DEFAULT_DELEGATION_POLICY;
 }
 
 export type TeamRunStatus = 'running' | 'done' | 'failed';
@@ -57,6 +103,8 @@ interface TeamRow {
   coordinator_bot_id: string;
   member_bot_ids_json: string;
   created_at: number;
+  delegation_policy: string | null;
+  delegation_policy_overrides_json: string | null;
 }
 
 interface TeamRunRow {
@@ -71,6 +119,20 @@ interface TeamRunRow {
   finished_at: number | null;
 }
 
+function parseDelegationOverrides(json: string | null): Record<string, DelegationPolicy> | undefined {
+  if (!json) return undefined;
+  try {
+    const parsed = JSON.parse(json) as Record<string, unknown>;
+    const clean: Record<string, DelegationPolicy> = {};
+    for (const [k, v] of Object.entries(parsed)) {
+      if (isDelegationPolicy(v)) clean[k] = v;
+    }
+    return Object.keys(clean).length > 0 ? clean : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function rowToTeam(r: TeamRow): Team {
   return {
     id: r.id,
@@ -78,6 +140,8 @@ function rowToTeam(r: TeamRow): Team {
     coordinatorBotId: r.coordinator_bot_id,
     memberBotIds: JSON.parse(r.member_bot_ids_json) as string[],
     createdAt: r.created_at,
+    delegationPolicy: isDelegationPolicy(r.delegation_policy) ? r.delegation_policy : undefined,
+    delegationPolicyOverrides: parseDelegationOverrides(r.delegation_policy_overrides_json),
   };
 }
 
@@ -158,6 +222,26 @@ export class TeamStore {
       );
       CREATE INDEX IF NOT EXISTS idx_team_runs_team ON team_runs (team_id, created_at DESC);
     `);
+    // Workstream C migration: delegation-policy columns on pre-existing
+    // databases. ALTER TABLE is guarded — a duplicate-column error means
+    // the migration already ran.
+    for (const ddl of [
+      'ALTER TABLE teams ADD COLUMN delegation_policy TEXT',
+      'ALTER TABLE teams ADD COLUMN delegation_policy_overrides_json TEXT',
+    ]) {
+      try {
+        this.db.exec(ddl);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(msg)) throw err;
+      }
+    }
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS team_delegation_grants (
+        team_id TEXT PRIMARY KEY,
+        granted_at INTEGER NOT NULL
+      );
+    `);
   }
 
   createTeam(name: string, coordinatorBotId: string, memberBotIds: string[]): Team {
@@ -177,6 +261,78 @@ export class TeamStore {
   getTeam(id: string): Team | undefined {
     const row = this.db.prepare('SELECT * FROM teams WHERE id = ?').get(id) as unknown as TeamRow | undefined;
     return row ? rowToTeam(row) : undefined;
+  }
+
+  /**
+   * Set the team's peer-delegation policy (and optional per-bot overrides).
+   * Returns the updated team, or undefined when the team does not exist.
+   */
+  setDelegationPolicy(
+    teamId: string,
+    policy: DelegationPolicy,
+    overrides?: Record<string, DelegationPolicy>,
+  ): Team | undefined {
+    const clean: Record<string, DelegationPolicy> = {};
+    if (overrides) {
+      for (const [k, v] of Object.entries(overrides)) {
+        if (isDelegationPolicy(v)) clean[k] = v;
+      }
+    }
+    const r = this.db
+      .prepare('UPDATE teams SET delegation_policy = ?, delegation_policy_overrides_json = ? WHERE id = ?')
+      .run(policy, JSON.stringify(clean), teamId);
+    return r.changes > 0 ? this.getTeam(teamId) : undefined;
+  }
+
+  /**
+   * Record a user-approved delegation grant for the team
+   * ('approve-once-per-team': one approval covers subsequent delegations).
+   */
+  recordDelegationGrant(teamId: string): void {
+    this.db
+      .prepare(
+        'INSERT INTO team_delegation_grants (team_id, granted_at) VALUES (?, ?) ' +
+          'ON CONFLICT(team_id) DO UPDATE SET granted_at = excluded.granted_at',
+      )
+      .run(teamId, Date.now());
+  }
+
+  /** Whether the team currently holds an approve-once delegation grant. */
+  hasDelegationGrant(teamId: string): boolean {
+    const row = this.db
+      .prepare('SELECT 1 AS one FROM team_delegation_grants WHERE team_id = ?')
+      .get(teamId) as unknown as { one: number } | undefined;
+    return Boolean(row);
+  }
+
+  /** Revoke the team's delegation grant (e.g. when its policy changes). */
+  revokeDelegationGrant(teamId: string): void {
+    this.db.prepare('DELETE FROM team_delegation_grants WHERE team_id = ?').run(teamId);
+  }
+
+  /**
+   * Insert a team with a caller-chosen id (used by bot-roster import so
+   * exported rosters round-trip with stable ids). Throws when the id
+   * already exists — callers dedupe before calling.
+   */
+  importTeam(input: {
+    id: string;
+    name: string;
+    coordinatorBotId: string;
+    memberBotIds: string[];
+    createdAt?: number;
+  }): Team {
+    const team: Team = {
+      id: input.id,
+      name: input.name.trim().slice(0, 120) || 'Untitled team',
+      coordinatorBotId: input.coordinatorBotId,
+      memberBotIds: [...new Set(input.memberBotIds)],
+      createdAt: input.createdAt ?? Date.now(),
+    };
+    this.db
+      .prepare('INSERT INTO teams (id, name, coordinator_bot_id, member_bot_ids_json, created_at) VALUES (?, ?, ?, ?, ?)')
+      .run(team.id, team.name, team.coordinatorBotId, JSON.stringify(team.memberBotIds), team.createdAt);
+    return team;
   }
 
   listTeams(): Team[] {

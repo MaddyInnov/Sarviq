@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from 'react';
 import { getApiBase } from '../lib/api';
 import { useUxMode, type UxMode } from '../lib/ux-mode';
 import { THEMES, useTheme, type ThemeChoice } from '../lib/theme';
+import { LanguageSwitcher, useI18n } from '../lib/i18n';
 
 interface Dest {
   href: string;
@@ -33,16 +34,17 @@ function icon(path: React.ReactNode) {
   );
 }
 
-const DESTS: Dest[] = [
+function getDests(t: (key: string) => string): Dest[] {
+  return [
   {
     href: '/',
-    label: 'Chat',
+    label: t('nav.chat'),
     match: (p) => p === '/',
     icon: icon(<path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z" />),
   },
   {
     href: '/bots',
-    label: 'Bots',
+    label: t('nav.bots'),
     match: (p) => p.startsWith('/bots'),
     icon: icon(
       <>
@@ -53,7 +55,7 @@ const DESTS: Dest[] = [
   },
   {
     href: '/workflows',
-    label: 'Workflows',
+    label: t('nav.workflows'),
     match: (p) => p.startsWith('/workflows'),
     icon: icon(
       <>
@@ -66,7 +68,7 @@ const DESTS: Dest[] = [
   },
   {
     href: '/marketplace',
-    label: 'Marketplace',
+    label: t('nav.marketplace'),
     match: (p) => p.startsWith('/marketplace'),
     icon: icon(
       <>
@@ -79,7 +81,7 @@ const DESTS: Dest[] = [
   },
   {
     href: '/workspace',
-    label: 'Workspace',
+    label: t('nav.workspace'),
     match: (p) =>
       p.startsWith('/workspace') ||
       p.startsWith('/notes') ||
@@ -94,11 +96,12 @@ const DESTS: Dest[] = [
   },
   {
     href: '/activity',
-    label: 'Activity',
+    label: t('nav.activity'),
     match: (p) => p.startsWith('/activity') || p.startsWith('/approvals') || p.startsWith('/audit'),
     icon: icon(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />),
   },
-];
+  ];
+}
 
 /**
  * Secondary destinations: deliberately NOT top-level. The primary nav is
@@ -325,6 +328,8 @@ function ThemeSwitcher() {  const [choice, setChoice] = useTheme();
 
 export default function Nav() {
   const pathname = usePathname();
+  const { t } = useI18n();
+  const DESTS = getDests(t);
   const [apiBase, setApiBase] = useState('');
   const [mode, setMode] = useUxMode();
   const [drawerOpen, setDrawerOpen] = useState(false);
@@ -405,6 +410,7 @@ export default function Nav() {
       <span className="api-base" title="API base URL">
         api: {apiBase}
       </span>
+      <LanguageSwitcher />
       <ThemeSwitcher />
       <ThreeDToggle />
       <LayoutToggle />
@@ -506,7 +512,8 @@ export default function Nav() {
         ))}
         <div className="drawer-section">Theme</div>
         <div className="drawer-theme">
-          <ThemeSwitcher />
+          <LanguageSwitcher />
+      <ThemeSwitcher />
         </div>
         <div className="drawer-section">Mode</div>
         <div className="drawer-mode">
