@@ -26,6 +26,7 @@ import type {
 import { COST_ESTIMATE_TOOLTIP, contextMeter, costOfUsage, formatTokens, formatUsd } from '../lib/usage';
 import { WidgetRenderer, validateWidget } from '../components/widgets';
 import type { Widget, WidgetAction } from '../components/widgets';
+import { CodeBlock, LineDiffView, UnifiedDiffView } from '../components/code/CodeBlock';
 
 type ChatBlock =
   | { kind: 'user'; id: string; text: string }
@@ -86,6 +87,35 @@ function prettyJson(value: unknown): string {
 
 function emptyUsage(): TokenUsage {
   return { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
+}
+
+/**
+ * Renders a tool call's arguments as code: write_file shows the new file
+ * with syntax highlighting, edit shows a line diff, patch shows the
+ * unified diff. Other tools fall back to raw JSON.
+ */
+function ToolCallBody({ call }: { call: ToolCall }) {
+  const args = (call.args ?? {}) as Record<string, unknown>;
+  if (call.name === 'write_file' && typeof args.path === 'string' && typeof args.content === 'string') {
+    return <CodeBlock code={args.content} path={args.path} maxHeight={420} />;
+  }
+  if (
+    (call.name === 'edit' || call.name === 'edit_file') &&
+    typeof args.path === 'string' &&
+    typeof args.oldText === 'string' &&
+    typeof args.newText === 'string'
+  ) {
+    return <LineDiffView oldText={args.oldText} newText={args.newText} path={args.path} />;
+  }
+  if (call.name === 'patch' && typeof args.diff === 'string') {
+    return <UnifiedDiffView diff={args.diff} />;
+  }
+  return (
+    <>
+      <div className="label">Arguments</div>
+      <pre className="mono small">{prettyJson(call.args)}</pre>
+    </>
+  );
 }
 
 /** Subtle per-turn footer under an assistant message: tokens + $ cost + context meter. */
@@ -795,8 +825,7 @@ export default function ChatPage() {
                       <span className="mono">{b.call.name}</span>
                     </summary>
                     <div className="tool-body">
-                      <div className="label">Arguments</div>
-                      <pre className="mono small">{prettyJson(b.call.args)}</pre>
+                      <ToolCallBody call={b.call} />
                       {b.result !== undefined && (
                         <>
                           <div className="label mt">Result</div>

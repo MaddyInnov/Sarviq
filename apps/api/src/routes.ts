@@ -29,11 +29,21 @@ import {
 import { ThreadScheduler, ThreadScheduleStore } from './thread-scheduler.js';
 import { CheckpointStore } from './checkpoints.js';
 import { DotStore, dotWakePrompt } from './dots.js';
+import { confineFile, listWorkspaceFiles, readWorkspaceFile } from './files.js';
+import { PreferenceStore } from './preferences.js';
+import { RecordingStore, recordingToWorkflow } from './recordings.js';
+import {
+  createPullRequest,
+  isGitHubConfigured,
+  listPullRequests,
+  submitReview,
+} from './github.js';
 // Phase 3: connected apps (OAuth), messaging gateway, notes, tasks/calendar.
 import { registerOAuthRoutes } from './oauth.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { registerNotesRoutes } from './notes.js';
 import { registerTasksRoutes } from './tasks.js';
+import { registerPagesRoutes } from './pages.js';
 // Phase 4: marketplace + billing + tenancy/vault + protocols/voice + muse modules.
 import { registerMarketplaceRoutes } from './marketplace.js';
 import { registerBillingRoutes } from './billing.js';
@@ -88,6 +98,10 @@ export interface RouteDeps {
   checkpointStore: CheckpointStore;
   /** Dots store (always-on background agents). */
   dotStore: DotStore;
+  /** Preference store (learning loop). */
+  preferenceStore: PreferenceStore;
+  /** Recording store (teach-by-recording). */
+  recordingStore: RecordingStore;
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -127,7 +141,7 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore } = deps;
 
   // Mid-turn interruption (Claude Code-style steering): at most one live turn
   // per session. A new message on a session aborts the previous turn — the
@@ -384,6 +398,226 @@ export function createRouter(deps: RouteDeps): express.Router {
     res.json({ ok: true, deleted: req.params.id });
   });
 
+  // ---- File browser -------------------------------------------------------
+  // Read-only view into config.workspaceDir — where the agent's write_file /
+  // edit_file tools land. Powers the Workspace "Files" tab and chat diffs.
+  // Paths are workspace-relative; traversal outside the root is rejected.
+  router.get('/files', (_req, res) => {
+    try {
+      res.json({ ok: true, root: config.workspaceDir, files: listWorkspaceFiles(config.workspaceDir) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      res.status(500).json(errorBody('Failed to list files', message));
+    }
+  });
+
+  router.get('/files/content', (req, res) => {
+    const rel = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!rel || rel.length > 512) {
+      res.status(400).json(errorBody('query param "path" is required (workspace-relative)'));
+      return;
+    }
+    try {
+      // Validate confinement before reading.
+      confineFile(config.workspaceDir, rel);
+      const file = readWorkspaceFile(config.workspaceDir, rel);
+      res.json({ ok: true, path: rel, ...file });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes('escapes') ? 403 : message.includes('Not a file') ? 404 : 500;
+      res.status(status).json(errorBody('Failed to read file', message));
+    }
+  });
+
+  // ---- Learned preferences ------------------------------------------------
+  // The preference learning loop watches approval decisions. When a user
+  // consistently denies (or approves) a tool, a preference is learned and
+  // future evaluations respect it.
+  router.get('/preferences', (req, res) => {
+    const botId = typeof req.query.botId === 'string' ? req.query.botId : undefined;
+    res.json({ ok: true, preferences: preferenceStore.list(botId) });
+  });
+
+  router.delete('/preferences/:id', (req, res) => {
+    if (!preferenceStore.remove(req.params.id)) {
+      res.status(404).json(errorBody(`Unknown preference "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, deleted: req.params.id });
+  });
+
+  // ---- Teach-by-recording -------------------------------------------------
+  // Record UI interactions, convert to a workflow. The frontend captures
+  // click/input/navigate events while recording.
+  router.post('/recordings', (req, res) => {
+    const body = (req.body ?? {}) as { name?: unknown };
+    const rec = recordingStore.start(typeof body.name === 'string' ? body.name : '');
+    res.json({ ok: true, recording: rec });
+  });
+
+  router.get('/recordings', (_req, res) => {
+    res.json({ ok: true, recordings: recordingStore.list() });
+  });
+
+  router.post('/recordings/:id/events', (req, res) => {
+    const body = (req.body ?? {}) as { events?: unknown };
+    if (!Array.isArray(body.events)) {
+      res.status(400).json(errorBody('events must be an array'));
+      return;
+    }
+    const rec = recordingStore.addEvents(req.params.id, body.events as any);
+    if (!rec) {
+      res.status(404).json(errorBody(`Unknown or stopped recording "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, recording: rec });
+  });
+
+  router.post('/recordings/:id/stop', (req, res) => {
+    const rec = recordingStore.stop(req.params.id);
+    if (!rec) {
+      res.status(404).json(errorBody(`Unknown or stopped recording "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, recording: rec });
+  });
+
+  router.post('/recordings/:id/convert', (req, res) => {
+    const rec = recordingStore.get(req.params.id);
+    if (!rec) {
+      res.status(404).json(errorBody(`Unknown recording "${req.params.id}"`));
+      return;
+    }
+    if (rec.status === 'recording') {
+      res.status(400).json(errorBody('Stop the recording before converting'));
+      return;
+    }
+    const workflow = recordingToWorkflow(rec);
+    // TODO: persist via workflowRunner when it supports ad-hoc definitions.
+    // For now, return the definition for the UI to save.
+    recordingStore.markConverted(rec.id, `recording-${rec.id}`);
+    res.json({ ok: true, workflow });
+  });
+
+  // ---- GitHub / PR integration --------------------------------------------
+  // Codex-style loop: the agent writes code (write_file/edit_file), reviews
+  // (git_status/git_diff), commits (git_commit, approval-gated), pushes
+  // (git_push, approval-gated), then opens a PR here. PR creation and reviews
+  // are network-mutating, so they go through a governance approval: the
+  // endpoint mints an approval, waits for the user's decision in the inbox,
+  // and only then calls the GitHub API. Requires GITHUB_TOKEN.
+  router.get('/github/status', (_req, res) => {
+    res.json({ ok: true, configured: isGitHubConfigured() });
+  });
+
+  /** Mint an approval and wait for the user's decision. Returns true if approved. */
+  async function requireApproval(
+    toolName: string,
+    args: Record<string, unknown>,
+    timeoutMs = 120_000,
+  ): Promise<boolean> {
+    const approvalId = governance.requestApproval(toolName, args, {
+      sessionId: 'api',
+      botId: 'api',
+      actor: 'api',
+    });
+    try {
+      const verdict = await governance.awaitDecision(approvalId, timeoutMs);
+      return verdict === 'approved';
+    } catch {
+      return false; // timeout or error → fail closed
+    }
+  }
+
+  router.post('/github/pr', async (req, res) => {
+    const body = (req.body ?? {}) as {
+      owner?: unknown; repo?: unknown; title?: unknown;
+      head?: unknown; base?: unknown; body?: unknown; draft?: unknown;
+    };
+    const input = {
+      owner: typeof body.owner === 'string' ? body.owner : '',
+      repo: typeof body.repo === 'string' ? body.repo : '',
+      title: typeof body.title === 'string' ? body.title : '',
+      head: typeof body.head === 'string' ? body.head : '',
+      base: typeof body.base === 'string' ? body.base : '',
+      body: typeof body.body === 'string' ? body.body : '',
+      draft: body.draft === true,
+    };
+    if (!input.owner || !input.repo || !input.title || !input.head || !input.base) {
+      res.status(400).json(errorBody('owner, repo, title, head, and base are required'));
+      return;
+    }
+    // Approval gate: the user must approve in the inbox before the PR opens.
+    const approved = await requireApproval('github.create_pr', {
+      owner: input.owner, repo: input.repo, title: input.title,
+      head: input.head, base: input.base,
+    });
+    if (!approved) {
+      res.status(403).json(errorBody('PR creation was not approved'));
+      return;
+    }
+    try {
+      const pr = await createPullRequest(input);
+      res.json({ ok: true, pr });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes('GITHUB_TOKEN') ? 503 : 502;
+      res.status(status).json(errorBody('Failed to create PR', message));
+    }
+  });
+
+  router.get('/github/prs', async (req, res) => {
+    const owner = typeof req.query.owner === 'string' ? req.query.owner : '';
+    const repo = typeof req.query.repo === 'string' ? req.query.repo : '';
+    const state = req.query.state === 'closed' || req.query.state === 'all' ? req.query.state : 'open';
+    if (!owner || !repo) {
+      res.status(400).json(errorBody('query params "owner" and "repo" are required'));
+      return;
+    }
+    try {
+      const prs = await listPullRequests(owner, repo, state);
+      res.json({ ok: true, prs });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes('GITHUB_TOKEN') ? 503 : 502;
+      res.status(status).json(errorBody('Failed to list PRs', message));
+    }
+  });
+
+  router.post('/github/pr/:number/review', async (req, res) => {
+    const body = (req.body ?? {}) as {
+      owner?: unknown; repo?: unknown; event?: unknown; body?: unknown;
+    };
+    const number = Number(req.params.number);
+    const input = {
+      owner: typeof body.owner === 'string' ? body.owner : '',
+      repo: typeof body.repo === 'string' ? body.repo : '',
+      number,
+      event: body.event as 'APPROVE' | 'REQUEST_CHANGES' | 'COMMENT',
+      body: typeof body.body === 'string' ? body.body : '',
+    };
+    if (!input.owner || !input.repo || !input.event) {
+      res.status(400).json(errorBody('owner, repo, and event (APPROVE|REQUEST_CHANGES|COMMENT) are required'));
+      return;
+    }
+    // Approval gate: reviewing as a teammate mutates the PR.
+    const approved = await requireApproval('github.submit_review', {
+      owner: input.owner, repo: input.repo, number: input.number, event: input.event,
+    });
+    if (!approved) {
+      res.status(403).json(errorBody('PR review was not approved'));
+      return;
+    }
+    try {
+      const review = await submitReview(input);
+      res.json({ ok: true, review });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.includes('GITHUB_TOKEN') ? 503 : 502;
+      res.status(status).json(errorBody('Failed to submit review', message));
+    }
+  });
+
   // ---- Per-bot persistent memory ----------------------------------------
   // Phase 2: each bot's long-term memory lives at <dataDir>/memories/<botId>.md
   // (see BotMemoryStore). The bots also maintain it themselves via the
@@ -512,6 +746,7 @@ export function createRouter(deps: RouteDeps): express.Router {
         autoApprove: body.autoApprove === true,
         planMode: body.planMode === true,
         maxBudgetUsd: typeof body.maxBudgetUsd === 'number' && body.maxBudgetUsd >= 0 ? body.maxBudgetUsd : undefined,
+        sandboxMode: body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access' ? body.sandboxMode : undefined,
         onEvent,
       });
       // The runtime should emit done/error itself; emit a terminal event only
@@ -569,6 +804,16 @@ export function createRouter(deps: RouteDeps): express.Router {
         return;
       }
       const decided = governance.decide(realId, body.decision, { note: body.note });
+      // Preference learning: record the decision. If the user consistently
+      // denies (or approves) a tool, a preference is learned.
+      try {
+        const learned = preferenceStore.recordDecision(existing.botId, existing.toolName, body.decision);
+        if (learned) {
+          console.log(`[preferences] learned ${learned.preference} for ${existing.botId}/${existing.toolName} (${learned.observations} observations)`);
+        }
+      } catch {
+        // Preference recording must never break approval decisions.
+      }
       // Phase 3: close the loop for approvals that originated from external
       // MCP clients — the platform MCP server holds the pending call and
       // mints the single-use grant on decision.
@@ -850,7 +1095,38 @@ export function createRouter(deps: RouteDeps): express.Router {
   // Both modules register relative paths on the main router, so they land
   // under /api/oauth/... and /api/messaging/....
   registerOAuthRoutes(router, { config, governance });
-  registerMessagingRoutes(router, { config, governance });
+  // Inbound bot mentions (Discord/Slack) run an agent turn through the chat
+  // pipeline and reply in the channel. The turn uses the default bot; the
+  // session is scoped per (provider, channel) so the bot keeps context.
+  registerMessagingRoutes(router, {
+    config,
+    governance,
+    onMention: async (info) => {
+      const defaultBotId = process.env.MESSAGING_DEFAULT_BOT;
+      const bot =
+        (defaultBotId ? bots.find((b) => b.id === defaultBotId) : undefined) ?? bots[0];
+      if (!bot) return undefined;
+      let reply = '';
+      try {
+        await agentRuntime.runTurn({
+          bot,
+          message: info.text,
+          sessionId: `mention-${info.providerId}-${info.chatId}`,
+          onEvent: async (event) => {
+            if (event.type === 'token') reply += event.content;
+          },
+        });
+      } catch (err) {
+        console.error(
+          `[messaging] mention turn failed (${info.providerId}):`,
+          err instanceof Error ? err.message : err,
+        );
+        return undefined;
+      }
+      const trimmed = reply.trim();
+      return trimmed ? trimmed.slice(0, 4000) : undefined;
+    },
+  });
 
   // ---- Phase 3: user notes + tasks/calendar ------------------------------
   // Notes live on a sub-router mounted at /api/notes; tasks registers
@@ -859,6 +1135,18 @@ export function createRouter(deps: RouteDeps): express.Router {
   registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
   router.use('/notes', notesRouter);
   registerTasksRoutes(router, { dataDir: config.dataDir });
+
+  // ---- Collaborative Pages --------------------------------------------------
+  // ChatGPT "Space" Pages parity: humans + agents co-edit live markdown docs
+  // with comments, @mentions (bot mentions trigger agent turns), version
+  // history, and SSE live updates.
+  const pagesRouter = express.Router();
+  registerPagesRoutes(pagesRouter, {
+    dataDir: config.dataDir,
+    agentRuntime,
+    getBots: () => bots,
+  });
+  router.use('/pages', pagesRouter);
 
   // ---- Phase 4: marketplace + billing ---------------------------------
   // The registry JSON is bundled into the binary; seed it into the data dir

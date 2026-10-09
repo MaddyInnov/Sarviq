@@ -5,6 +5,7 @@ import type {
   ChatMessage,
   LLMProvider,
   RichMessage,
+  SandboxMode,
   StreamEvent,
   TokenUsage,
   ToolCall,
@@ -97,6 +98,11 @@ export interface RunTurnOptions {
    * cap, the turn stops fail-closed with an explanatory message.
    */
   maxBudgetUsd?: number;
+  /**
+   * Per-turn sandbox mode override (Codex-style). If set, overrides the
+   * bot's configured sandboxMode for this turn only.
+   */
+  sandboxMode?: SandboxMode;
 }
 
 export interface PreviewToolInfo {
@@ -389,6 +395,23 @@ export class AgentRuntime {
               reason = 'Plan mode: read-only exploration. Turn off plan mode to make changes.';
               this.audit({ type: 'tool.plan_mode_denied', sessionId, botId: ctx.botId, call });
             }
+          }
+
+          // Sandbox mode (Codex-style orthogonal dial): enforce the bot's
+          // sandbox mode regardless of the approval policy. Per-turn override
+          // wins over the bot's configured mode.
+          const sandboxMode = opts.sandboxMode ?? opts.bot.sandboxMode ?? 'workspace-write';
+          if (decision !== 'deny') {
+            if (sandboxMode === 'read-only') {
+              const mutating = /^(write_file|edit_file|create_file|delete_file|remove_file|run_command|exec|shell|patch|http|mcp:)/.test(call.name);
+              if (mutating) {
+                decision = 'deny';
+                reason = 'Sandbox mode is read-only: this bot cannot modify files or execute commands.';
+                this.audit({ type: 'tool.sandbox_denied', sessionId, botId: ctx.botId, call, detail: { sandboxMode } });
+              }
+            }
+            // 'workspace-write' is the default (current behavior).
+            // 'danger-full-access' allows everything (approvals still apply).
           }
 
           if (decision === 'deny') {

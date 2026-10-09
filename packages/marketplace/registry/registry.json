@@ -1,1 +1,1563 @@
-{"entries":[{"creator":"mvp-labs","description":"Turns rough meeting transcripts into structured notes: decisions, action items with owners, and open questions.","id":"meeting-scribe","kind":"bot","license":"Apache-2.0","name":"Meeting Scribe","payload":{"description":"Structured meeting notes from raw transcripts.","id":"meeting-scribe","mcpServers":[],"model":"gpt-oss-20b","name":"Meeting Scribe","provider":"groq","skills":["meeting-notes"],"systemPrompt":"You are Meeting Scribe. Given a meeting transcript, output: 1) TL;DR (2 sentences), 2) Decisions, 3) Action items with owners, 4) Open questions. Be terse. Never invent owners or dates that were not mentioned.","tools":["web_search"]},"priceCents":0,"tags":["productivity","notes"],"untrusted":false,"version":"1.0.0"},{"creator":"dataforge","description":"Reviews SQL queries for correctness and performance, suggests indexes, and explains execution plans.","id":"sql-tuner","kind":"bot","license":"MIT","name":"SQL Tuner","payload":{"description":"SQL review and performance advice.","id":"sql-tuner","mcpServers":[],"model":"gpt-oss-120b","name":"SQL Tuner","provider":"groq","skills":["sql-helper"],"systemPrompt":"You are SQL Tuner, a database performance expert. Review the user's SQL: check correctness first, then suggest index and rewrite improvements with reasoning. Ask which database engine when it matters. Never run destructive statements.","tools":["web_search"]},"priceCents":499,"tags":["data","sql","paid"],"untrusted":true,"version":"1.0.0"},{"creator":"mvp-labs","description":"Conventions for clean commits, branch naming, and PR descriptions.","id":"git-hygiene","kind":"skill","license":"Apache-2.0","name":"Git Hygiene","payload":{"content":"---\nname: git-hygiene\ndescription: Clean commits, branch names, and PR descriptions.\n---\n\n# Git Hygiene Skill\n\n1. **Atomic commits** — one logical change per commit.\n2. **Message format** — `<area>: <imperative summary>` under 72 chars, body explains *why*.\n3. **Branches** — `feat/`, `fix/`, `chore/` prefixes, short kebab-case names.\n4. **PRs** — link the issue, list test evidence, keep diffs reviewable (<400 lines).\n5. **Never** force-push shared branches or commit secrets.\n","id":"git-hygiene"},"priceCents":0,"tags":["coding","git"],"untrusted":false,"version":"1.0.0"},{"creator":"mvp-labs","description":"Drafts a daily standup update from workspace notes, asks for approval, then saves it.","id":"standup-writer","kind":"workflow","license":"Apache-2.0","name":"Daily standup writer","payload":{"description":"Draft a standup from workspace notes, approve, save.","edges":[["trigger","draft"],["draft","review"],["review","save"]],"id":"standup-writer","name":"Daily standup writer","nodes":[{"config":{},"id":"trigger","name":"Start","type":"trigger"},{"config":{"botId":"helper","prompt":"Write today's standup (Yesterday / Today / Blockers) from notes/ in the workspace: {{input}}"},"id":"draft","name":"Draft standup","type":"agent"},{"config":{"message":"Approve this standup before saving?"},"id":"review","name":"Approve","type":"approval"},{"config":{"args":{"content":"# Standup\n\n{{nodes.draft.output}}","path":"notes/standup.md"},"tool":"write_file"},"id":"save","name":"Save standup","type":"tool"}]},"priceCents":0,"tags":["productivity","automation"],"untrusted":false,"version":"1.0.0"},{"creator":"dataforge","description":"MCP server exposing a local Postgres database. Requires POSTGRES_URL env var. Install is approval-gated.","id":"postgres-local","kind":"mcp-server","license":"MIT","name":"Local Postgres","payload":{"args":["-y","@modelcontextprotocol/server-postgres"],"command":"npx","description":"Grants the agent read/write access to the Postgres database at POSTGRES_URL. Review the connection string scope before approving.","id":"postgres-local","label":"Local Postgres MCP server","requiredEnv":["POSTGRES_URL"]},"priceCents":0,"tags":["data","mcp","database"],"untrusted":true,"version":"1.0.0"}]}
+{
+  "entries": [
+    {
+      "creator": "mvp-labs",
+      "description": "Turns rough meeting transcripts into structured notes: decisions, action items with owners, and open questions.",
+      "id": "meeting-scribe",
+      "kind": "bot",
+      "license": "Apache-2.0",
+      "name": "Meeting Scribe",
+      "payload": {
+        "description": "Structured meeting notes from raw transcripts.",
+        "id": "meeting-scribe",
+        "mcpServers": [],
+        "model": "gpt-oss-20b",
+        "name": "Meeting Scribe",
+        "provider": "groq",
+        "skills": [
+          "meeting-notes"
+        ],
+        "systemPrompt": "You are Meeting Scribe. Given a meeting transcript, output: 1) TL;DR (2 sentences), 2) Decisions, 3) Action items with owners, 4) Open questions. Be terse. Never invent owners or dates that were not mentioned.",
+        "tools": [
+          "web_search"
+        ]
+      },
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "notes"
+      ],
+      "untrusted": false,
+      "version": "1.0.0"
+    },
+    {
+      "creator": "dataforge",
+      "description": "Reviews SQL queries for correctness and performance, suggests indexes, and explains execution plans.",
+      "id": "sql-tuner",
+      "kind": "bot",
+      "license": "MIT",
+      "name": "SQL Tuner",
+      "payload": {
+        "description": "SQL review and performance advice.",
+        "id": "sql-tuner",
+        "mcpServers": [],
+        "model": "gpt-oss-120b",
+        "name": "SQL Tuner",
+        "provider": "groq",
+        "skills": [
+          "sql-helper"
+        ],
+        "systemPrompt": "You are SQL Tuner, a database performance expert. Review the user's SQL: check correctness first, then suggest index and rewrite improvements with reasoning. Ask which database engine when it matters. Never run destructive statements.",
+        "tools": [
+          "web_search"
+        ]
+      },
+      "priceCents": 499,
+      "tags": [
+        "data",
+        "sql",
+        "paid"
+      ],
+      "untrusted": true,
+      "version": "1.0.0"
+    },
+    {
+      "creator": "mvp-labs",
+      "description": "Conventions for clean commits, branch naming, and PR descriptions.",
+      "id": "git-hygiene",
+      "kind": "skill",
+      "license": "Apache-2.0",
+      "name": "Git Hygiene",
+      "payload": {
+        "content": "---\nname: git-hygiene\ndescription: Clean commits, branch names, and PR descriptions.\n---\n\n# Git Hygiene Skill\n\n1. **Atomic commits** — one logical change per commit.\n2. **Message format** — `<area>: <imperative summary>` under 72 chars, body explains *why*.\n3. **Branches** — `feat/`, `fix/`, `chore/` prefixes, short kebab-case names.\n4. **PRs** — link the issue, list test evidence, keep diffs reviewable (<400 lines).\n5. **Never** force-push shared branches or commit secrets.\n",
+        "id": "git-hygiene"
+      },
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "git"
+      ],
+      "untrusted": false,
+      "version": "1.0.0"
+    },
+    {
+      "creator": "mvp-labs",
+      "description": "Drafts a daily standup update from workspace notes, asks for approval, then saves it.",
+      "id": "standup-writer",
+      "kind": "workflow",
+      "license": "Apache-2.0",
+      "name": "Daily standup writer",
+      "payload": {
+        "description": "Draft a standup from workspace notes, approve, save.",
+        "edges": [
+          [
+            "trigger",
+            "draft"
+          ],
+          [
+            "draft",
+            "review"
+          ],
+          [
+            "review",
+            "save"
+          ]
+        ],
+        "id": "standup-writer",
+        "name": "Daily standup writer",
+        "nodes": [
+          {
+            "config": {},
+            "id": "trigger",
+            "name": "Start",
+            "type": "trigger"
+          },
+          {
+            "config": {
+              "botId": "helper",
+              "prompt": "Write today's standup (Yesterday / Today / Blockers) from notes/ in the workspace: {{input}}"
+            },
+            "id": "draft",
+            "name": "Draft standup",
+            "type": "agent"
+          },
+          {
+            "config": {
+              "message": "Approve this standup before saving?"
+            },
+            "id": "review",
+            "name": "Approve",
+            "type": "approval"
+          },
+          {
+            "config": {
+              "args": {
+                "content": "# Standup\n\n{{nodes.draft.output}}",
+                "path": "notes/standup.md"
+              },
+              "tool": "write_file"
+            },
+            "id": "save",
+            "name": "Save standup",
+            "type": "tool"
+          }
+        ]
+      },
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "automation"
+      ],
+      "untrusted": false,
+      "version": "1.0.0"
+    },
+    {
+      "creator": "dataforge",
+      "description": "MCP server exposing a local Postgres database. Requires POSTGRES_URL env var. Install is approval-gated.",
+      "id": "postgres-local",
+      "kind": "mcp-server",
+      "license": "MIT",
+      "name": "Local Postgres",
+      "payload": {
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-postgres"
+        ],
+        "command": "npx",
+        "description": "Grants the agent read/write access to the Postgres database at POSTGRES_URL. Review the connection string scope before approving.",
+        "id": "postgres-local",
+        "label": "Local Postgres MCP server",
+        "requiredEnv": [
+          "POSTGRES_URL"
+        ]
+      },
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "mcp",
+        "database"
+      ],
+      "untrusted": true,
+      "version": "1.0.0"
+    },
+    {
+      "id": "code-reviewer",
+      "kind": "bot",
+      "name": "Code Reviewer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Thorough code reviews: bugs, security, style, and performance.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "review",
+        "quality"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "code-reviewer",
+        "name": "Code Reviewer",
+        "description": "Thorough code reviews: bugs, security, style, and performance.",
+        "systemPrompt": "You are Code Reviewer, a senior staff engineer. Review the user's code or diff: 1) Correctness bugs (with line refs), 2) Security issues (injection, secrets, auth), 3) Performance pitfalls, 4) Style/readability nits (keep short). Rank findings by severity. Praise what's good. Never rewrite the whole file unprompted — suggest targeted fixes.",
+        "provider": "groq",
+        "model": "gpt-oss-120b",
+        "skills": [
+          "code-review",
+          "git-hygiene"
+        ],
+        "tools": [
+          "read_file",
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "data-analyst",
+      "kind": "bot",
+      "name": "Data Analyst",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Exploratory data analysis and plain-English insights from CSVs.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "analysis",
+        "csv"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "data-analyst",
+        "name": "Data Analyst",
+        "description": "Exploratory data analysis and plain-English insights from CSVs.",
+        "systemPrompt": "You are Data Analyst. Given data (CSV content or a file path), produce: 1) Shape & schema summary, 2) Key distributions and outliers, 3) 3-5 concrete insights in plain English, 4) Suggested next analyses. Show the exact steps (formulas/queries) so results are reproducible. Never invent numbers not in the data.",
+        "provider": "groq",
+        "model": "gpt-oss-120b",
+        "skills": [
+          "csv-cleaning",
+          "data-viz",
+          "data-analysis"
+        ],
+        "tools": [
+          "read_file",
+          "run_command"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "copywriter",
+      "kind": "bot",
+      "name": "Copywriter",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Marketing copy: headlines, landing pages, emails, and ads.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "writing",
+        "marketing",
+        "copy"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "copywriter",
+        "name": "Copywriter",
+        "description": "Marketing copy: headlines, landing pages, emails, and ads.",
+        "systemPrompt": "You are Copywriter, a direct-response copywriter. Write copy that is specific, concrete, and benefit-led. Rules: one idea per headline; numbers beat adjectives; CTA in every piece; match the brand voice the user gives (ask if unknown). Deliver 3 variants for headlines, 1 polished draft for long-form. Never use hype without substance.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "copywriting",
+          "blog-posts"
+        ],
+        "tools": [
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "translator",
+      "kind": "bot",
+      "name": "Translator",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Accurate translation across 20+ languages, preserving tone.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "writing",
+        "language",
+        "translation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "translator",
+        "name": "Translator",
+        "description": "Accurate translation across 20+ languages, preserving tone.",
+        "systemPrompt": "You are Translator. Translate faithfully between languages, preserving tone, register, and formatting. For idioms, translate meaning not words and note the choice. Ask which target language if ambiguous. Keep markdown/code blocks intact. Flag anything you cannot translate confidently.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [],
+        "tools": [
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "regex-wizard",
+      "kind": "bot",
+      "name": "Regex Wizard",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Build, explain, and debug regular expressions with test cases.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "regex",
+        "tools"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "regex-wizard",
+        "name": "Regex Wizard",
+        "description": "Build, explain, and debug regular expressions with test cases.",
+        "systemPrompt": "You are Regex Wizard. When asked for a pattern: 1) Give the regex, 2) Explain each token, 3) Show 3 passing and 2 failing test strings. Prefer readable patterns over golfed ones; use named groups where supported. Warn about catastrophic backtracking risks. Default flavor: JavaScript/PCRE unless told otherwise.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "coding-assistant"
+        ],
+        "tools": [
+          "read_file"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "research-assistant",
+      "kind": "bot",
+      "name": "Research Assistant",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Deep research with cited sources and balanced summaries.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "research",
+        "web",
+        "analysis"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "research-assistant",
+        "name": "Research Assistant",
+        "description": "Deep research with cited sources and balanced summaries.",
+        "systemPrompt": "You are Research Assistant. Research the user's topic using web search: gather multiple independent sources, note publication dates, and distinguish established facts from single-source claims. Output: 1) Executive summary, 2) Key findings with inline source links, 3) Open questions / conflicting evidence. Never present one blog post as consensus.",
+        "provider": "groq",
+        "model": "gpt-oss-120b",
+        "skills": [
+          "competitive-analysis"
+        ],
+        "tools": [
+          "web_search",
+          "web_fetch"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "doc-writer",
+      "kind": "bot",
+      "name": "Doc Writer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Clear README, API docs, and user guides from code or notes.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "writing",
+        "docs",
+        "coding"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "doc-writer",
+        "name": "Doc Writer",
+        "description": "Clear README, API docs, and user guides from code or notes.",
+        "systemPrompt": "You are Doc Writer. Turn code or rough notes into documentation a new hire can follow: overview, prerequisites, quickstart, configuration reference, troubleshooting. Match the repo's existing doc style if files are provided. Keep examples runnable and tested-looking. Ask who the reader is when it changes the depth.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "api-design"
+        ],
+        "tools": [
+          "read_file",
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "test-writer",
+      "kind": "bot",
+      "name": "Test Writer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Unit and integration tests with meaningful assertions.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "testing",
+        "quality"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "test-writer",
+        "name": "Test Writer",
+        "description": "Unit and integration tests with meaningful assertions.",
+        "systemPrompt": "You are Test Writer. Write tests for the user's code: happy path, edge cases, and failure modes. Use the repo's existing test framework and style (inspect package.json / test dirs first). Tests must be deterministic — no network, no sleeps, no time bombs. Each test name states the behavior it verifies.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "coding-assistant"
+        ],
+        "tools": [
+          "read_file",
+          "run_command"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "api-designer",
+      "kind": "bot",
+      "name": "API Designer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "REST API design: resources, versioning, errors, and OpenAPI.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "api",
+        "design"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "api-designer",
+        "name": "API Designer",
+        "description": "REST API design: resources, versioning, errors, and OpenAPI.",
+        "systemPrompt": "You are API Designer. Design REST APIs: resource model, URL conventions, versioning strategy, pagination, error envelope, idempotency, and auth. Output an OpenAPI 3.1 sketch for the core endpoints. Prefer boring conventions over clever ones. Flag breaking-change risks explicitly.",
+        "provider": "groq",
+        "model": "gpt-oss-120b",
+        "skills": [
+          "api-design"
+        ],
+        "tools": [
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "git-committer",
+      "kind": "bot",
+      "name": "Git Committer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Atomic commits with conventional messages from your diff.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "git",
+        "productivity"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "git-committer",
+        "name": "Git Committer",
+        "description": "Atomic commits with conventional messages from your diff.",
+        "systemPrompt": "You are Git Committer. Given a git diff or change summary, write commit messages in conventional-commit style (<type>(<scope>): <imperative summary>, body explains why). Split unrelated changes into separate commits. Never commit secrets, lockfile-only noise, or generated files without asking. Keep summaries under 72 chars.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "git-hygiene"
+        ],
+        "tools": [
+          "run_command"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "prompt-engineer",
+      "kind": "bot",
+      "name": "Prompt Engineer",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Optimize prompts: clearer instructions, better outputs.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "ai",
+        "prompts",
+        "productivity"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "prompt-engineer",
+        "name": "Prompt Engineer",
+        "description": "Optimize prompts: clearer instructions, better outputs.",
+        "systemPrompt": "You are Prompt Engineer. Improve the user's prompt: 1) Diagnose ambiguities and missing constraints, 2) Rewrite it with explicit role, task, format, and edge-case handling, 3) Explain what changed and why. Provide a compact version and a thorough version. Ask what model it targets when that changes the advice.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [],
+        "tools": [
+          "web_search"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "shell-helper",
+      "kind": "bot",
+      "name": "Shell Helper",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Safe shell one-liners with explanations before you run them.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "shell",
+        "tools"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "shell-helper",
+        "name": "Shell Helper",
+        "description": "Safe shell one-liners with explanations before you run them.",
+        "systemPrompt": "You are Shell Helper. Help with shell tasks: explain every non-trivial command before suggesting it, prefer non-destructive variants (e.g. print before delete), and refuse or heavily caveat rm -rf, dd, mkfs, and curl|sh patterns. Default to POSIX sh; note bash/zsh-only features. Show the dry-run first when asked.",
+        "provider": "groq",
+        "model": "gpt-oss-20b",
+        "skills": [
+          "cron-scheduling"
+        ],
+        "tools": [
+          "run_command"
+        ],
+        "mcpServers": []
+      }
+    },
+    {
+      "id": "web-scraping",
+      "kind": "skill",
+      "name": "Web Scraping",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Respectful, robust web scraping patterns.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "web",
+        "data",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "web-scraping",
+        "content": "---\nname: web-scraping\ndescription: Respectful, robust web scraping patterns.\n---\n\n# Web Scraping Skill\n\n1. **Respect the site** — check robots.txt and ToS first; identify with a\n   real User-Agent; rate-limit (1 req/s default); cache aggressively.\n2. **Prefer APIs** — look for a JSON API, RSS feed, or sitemap before\n   parsing HTML.\n3. **Robust selectors** — prefer semantic attributes (data-*, aria-label)\n   over fragile CSS paths; handle pagination and retries with backoff.\n4. **Anti-bot reality** — rotate UA/IP only where legal; never bypass\n   CAPTCHAs or login walls without permission.\n5. **Store raw** — save raw responses before parsing so re-parses are free.\n"
+      }
+    },
+    {
+      "id": "pdf-processing",
+      "kind": "skill",
+      "name": "PDF Processing",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Extract text and tables from PDFs reliably.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "documents",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "pdf-processing",
+        "content": "---\nname: pdf-processing\ndescription: Extract text and tables from PDFs reliably.\n---\n\n# PDF Processing Skill\n\n1. **Text first** — try text extraction (pdfminer/pypdf); fall back to OCR\n   (tesseract) only for scanned pages.\n2. **Tables** — use camelot/tabula for ruled tables; verify column alignment\n   on the first page before batch runs.\n3. **Structure** — preserve headings and page numbers; emit markdown with\n   `#` hierarchy matching the document.\n4. **Large docs** — process page ranges in parallel; stream output, never\n   hold the whole book in memory twice.\n5. **Quality check** — spot-check 5 random pages against the source PDF.\n"
+      }
+    },
+    {
+      "id": "csv-cleaning",
+      "kind": "skill",
+      "name": "CSV Cleaning",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Tidy messy CSVs: encodings, delimiters, types, dedupe.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "csv",
+        "etl"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "csv-cleaning",
+        "content": "---\nname: csv-cleaning\ndescription: Tidy messy CSVs: encodings, delimiters, types, dedupe.\n---\n\n# CSV Cleaning Skill\n\n1. **Detect** — sniff encoding (utf-8-sig vs latin-1) and delimiter before\n   parsing; never assume commas.\n2. **Types** — coerce dates/numbers explicitly; quarantine unparseable\n   values into an `_errors` column instead of dropping rows silently.\n3. **Dedupe** — define the natural key first; keep the newest complete row.\n4. **Normalize** — trim whitespace, unify case for keys, standardize\n   null representations (NA, n/a, -, empty).\n5. **Report** — emit a cleaning log: rows in/out, columns changed, error\n   counts. Reproducible script over manual edits, always.\n"
+      }
+    },
+    {
+      "id": "api-integration",
+      "kind": "skill",
+      "name": "API Integration",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Consume REST APIs: auth, pagination, retries, rate limits.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "api",
+        "coding",
+        "integration"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "api-integration",
+        "content": "---\nname: api-integration\ndescription: Consume REST APIs: auth, pagination, retries, rate limits.\n---\n\n# API Integration Skill\n\n1. **Read the docs** — auth scheme, pagination style, rate limits, and\n   error codes before writing a line.\n2. **Auth hygiene** — tokens from env vars, never hardcoded; refresh\n   proactively before expiry.\n3. **Pagination** — follow cursor/next links, not page arithmetic; dedupe\n   by resource id.\n4. **Resilience** — exponential backoff on 429/5xx; circuit-break after\n   repeated failures; idempotency keys on writes.\n5. **Respect** — cache GETs, batch where supported, stay under limits.\n"
+      }
+    },
+    {
+      "id": "data-viz",
+      "kind": "skill",
+      "name": "Data Visualization",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Choosing the right chart and keeping it honest.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "charts",
+        "analysis"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "data-viz",
+        "content": "---\nname: data-viz\ndescription: Choosing the right chart and keeping it honest.\n---\n\n# Data Visualization Skill\n\n1. **Chart selection** — trends → line; comparisons → bar; distribution →\n   histogram/box; part-of-whole → bar (pie only for 2–3 slices);\n   relationship → scatter.\n2. **Honest axes** — bars start at zero; label axes and units; never\n   truncate an axis to exaggerate.\n3. **One message per chart** — title states the takeaway, not the topic.\n4. **Reduce ink** — remove gridlines, 3D, and decoration that carry no data.\n5. **Color** — one highlight color for the story, gray for the rest;\n   colorblind-safe palettes.\n"
+      }
+    },
+    {
+      "id": "code-review",
+      "kind": "skill",
+      "name": "Code Review",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Checklist for reviews that catch real bugs.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "review",
+        "quality"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "code-review",
+        "content": "---\nname: code-review\ndescription: Checklist for reviews that catch real bugs.\n---\n\n# Code Review Skill\n\n1. **Correctness first** — edge cases, off-by-ones, null handling, error\n   paths. Ask: \"what breaks this?\"\n2. **Security** — injection, auth checks, secrets, unvalidated input.\n3. **Performance** — N+1 queries, accidental O(n²), unbounded growth.\n4. **Readability** — names, function size, comments where intent is\n   non-obvious. Suggest, don't dictate.\n5. **Scope** — review the diff, not the author's career. Approve fast when\n   it's right; block only on real issues.\n"
+      }
+    },
+    {
+      "id": "blog-posts",
+      "kind": "skill",
+      "name": "Blog Posts",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Structure and voice for technical blog posts.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "writing",
+        "blog",
+        "marketing"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "blog-posts",
+        "content": "---\nname: blog-posts\ndescription: Structure and voice for technical blog posts.\n---\n\n# Blog Posts Skill\n\n1. **Hook** — first paragraph states the problem and the payoff.\n2. **Structure** — problem → approach → implementation → results →\n   takeaways. Subheads every 300 words.\n3. **Code** — minimal complete examples; show output; link the repo.\n4. **Voice** — concrete over clever; \"we tried X\" beats \"one might X\".\n5. **Close** — one actionable takeaway and a question for readers.\n"
+      }
+    },
+    {
+      "id": "cron-scheduling",
+      "kind": "skill",
+      "name": "Cron Scheduling",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Cron expressions and scheduling gotchas.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "automation",
+        "devops",
+        "scheduling"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "cron-scheduling",
+        "content": "---\nname: cron-scheduling\ndescription: Cron expressions and scheduling gotchas.\n---\n\n# Cron Scheduling Skill\n\n1. **Format** — `min hour dom month dow`; `*/15 * * * *` = every 15 min.\n2. **Timezone** — cron runs in server time; document which TZ the schedule\n   assumes. Prefer UTC for servers.\n3. **Overlap** — jobs longer than the interval need locking (flock) or\n   idempotency keys.\n4. **Silent failures** — redirect output to logs; alert on non-zero exit;\n   test with a 1-minute schedule first.\n5. **DST** — twice-yearly surprises; avoid 01:00–03:00 local for critical\n   jobs.\n"
+      }
+    },
+    {
+      "id": "competitive-analysis",
+      "kind": "skill",
+      "name": "Competitive Analysis",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Structured competitor teardowns.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "research",
+        "strategy",
+        "analysis"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "competitive-analysis",
+        "content": "---\nname: competitive-analysis\ndescription: Structured competitor teardowns.\n---\n\n# Competitive Analysis Skill\n\n1. **Frame** — the job-to-be-done, not the feature list. Who is it for?\n2. **Evidence** — pricing pages, docs, reviews, changelogs. Date every\n   claim; screenshots beat memory.\n3. **Matrix** — capabilities × competitors, one row per job-to-be-done.\n4. **Moat check** — what would it cost them to copy your edge?\n5. **So what** — end with 3 implications for your roadmap, not a dump.\n"
+      }
+    },
+    {
+      "id": "copywriting",
+      "kind": "skill",
+      "name": "Copywriting",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Headlines and CTAs that convert.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "writing",
+        "marketing",
+        "copy"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "copywriting",
+        "content": "---\nname: copywriting\ndescription: Headlines and CTAs that convert.\n---\n\n# Copywriting Skill\n\n1. **Headlines** — specific > clever. Numbers, timeframes, and outcomes.\n   Write 10, keep 3.\n2. **Body** — one idea per paragraph; benefits before features; proof\n   (numbers, names) before claims.\n3. **CTA** — one per piece; verb + outcome (\"Start saving today\").\n4. **Voice** — match the reader's words, not your team's jargon.\n5. **Edit** — cut 20% on the second pass; read it aloud.\n"
+      }
+    },
+    {
+      "id": "meeting-notes",
+      "kind": "skill",
+      "name": "Meeting Notes",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Notes format the scribe bot expects.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "notes",
+        "meetings"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "meeting-notes",
+        "content": "---\nname: meeting-notes\ndescription: Notes format the scribe bot expects.\n---\n\n# Meeting Notes Skill\n\nCapture: attendees, date, decisions (with rationale), action items\n(owner + due date), open questions. Use this exact structure so the\nMeeting Scribe bot can summarize reliably:\n\n## Attendees\n## Decisions\n## Action items\n- [ ] <task> — @owner, due <date>\n## Open questions\n"
+      }
+    },
+    {
+      "id": "sql-helper",
+      "kind": "skill",
+      "name": "SQL Helper",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Portable SQL patterns and dialect notes.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "data",
+        "sql",
+        "coding"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "sql-helper",
+        "content": "---\nname: sql-helper\ndescription: Portable SQL patterns and dialect notes.\n---\n\n# SQL Helper Skill\n\n1. **Portability** — prefer standard SQL; isolate dialect quirks (LIMIT vs\n   TOP vs FETCH) in one place.\n2. **Readability** — CTEs over nested subqueries; explicit JOINs; alias\n   consistently.\n3. **Correctness** — mind NULL semantics, duplicates from JOIN fan-out, and\n   timezone handling in timestamps.\n4. **Performance** — filter early, select only needed columns, check the\n   plan (EXPLAIN) before optimizing blindly.\n5. **Safety** — parameterized queries always; never string-concatenate user\n   input into SQL.\n"
+      }
+    },
+    {
+      "id": "weekly-report",
+      "kind": "workflow",
+      "name": "Weekly report builder",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Agent drafts a weekly report from notes; you approve; it saves.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "reporting",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "weekly-report",
+        "name": "Weekly report builder",
+        "description": "Agent drafts a weekly report from notes; you approve; it saves.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "draft",
+            "type": "agent",
+            "name": "Draft report",
+            "config": {
+              "botId": "helper",
+              "prompt": "Write this week's report from notes/ : accomplishments, metrics, next week. {{input}}"
+            }
+          },
+          {
+            "id": "review",
+            "type": "approval",
+            "name": "Approve",
+            "config": {
+              "message": "Approve this weekly report before saving?"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save report",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/weekly-report.md",
+                "content": "# Weekly report\n\n{{nodes.draft.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "draft"
+          ],
+          [
+            "draft",
+            "review"
+          ],
+          [
+            "review",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "backup-notes",
+      "kind": "workflow",
+      "name": "Notes backup",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Copy notes/ to a timestamped backup folder.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "backup",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "backup-notes",
+        "name": "Notes backup",
+        "description": "Copy notes/ to a timestamped backup folder.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "backup",
+            "type": "tool",
+            "name": "Backup notes",
+            "config": {
+              "tool": "run_command",
+              "args": {
+                "command": "mkdir -p backups && cp -r notes backups/notes-$(date +%F)"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "backup"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "uptime-monitor",
+      "kind": "workflow",
+      "name": "Uptime monitor",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Ping a URL and record the status code.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "devops",
+        "monitoring",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "uptime-monitor",
+        "name": "Uptime monitor",
+        "description": "Ping a URL and record the status code.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "ping",
+            "type": "http",
+            "name": "Ping site",
+            "config": {
+              "url": "https://example.com",
+              "method": "GET"
+            }
+          },
+          {
+            "id": "log",
+            "type": "tool",
+            "name": "Log status",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/uptime.log",
+                "content": "{{nodes.ping.output.status}} at check\n"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "ping"
+          ],
+          [
+            "ping",
+            "log"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "inbox-triage",
+      "kind": "workflow",
+      "name": "Inbox triage draft",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Draft triage categories for review before acting.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "email",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "inbox-triage",
+        "name": "Inbox triage draft",
+        "description": "Draft triage categories for review before acting.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "triage",
+            "type": "agent",
+            "name": "Triage inbox",
+            "config": {
+              "botId": "helper",
+              "prompt": "Categorize these items into: urgent / this week / someday. {{input}}"
+            }
+          },
+          {
+            "id": "review",
+            "type": "approval",
+            "name": "Approve",
+            "config": {
+              "message": "Approve these triage categories?"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save triage",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/triage.md",
+                "content": "# Triage\n\n{{nodes.triage.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "triage"
+          ],
+          [
+            "triage",
+            "review"
+          ],
+          [
+            "review",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "content-calendar",
+      "kind": "workflow",
+      "name": "Content calendar drafter",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Draft a 2-week content calendar from a topic list.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "marketing",
+        "writing",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "content-calendar",
+        "name": "Content calendar drafter",
+        "description": "Draft a 2-week content calendar from a topic list.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "draft",
+            "type": "agent",
+            "name": "Draft calendar",
+            "config": {
+              "botId": "helper",
+              "prompt": "Draft a 2-week content calendar (dates, titles, 1-line hooks) from these topics: {{input}}"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save calendar",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/content-calendar.md",
+                "content": "# Content calendar\n\n{{nodes.draft.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "draft"
+          ],
+          [
+            "draft",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "changelog-builder",
+      "kind": "workflow",
+      "name": "Changelog builder",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Build a changelog from recent git history.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "git",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "changelog-builder",
+        "name": "Changelog builder",
+        "description": "Build a changelog from recent git history.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "log",
+            "type": "tool",
+            "name": "Git log",
+            "config": {
+              "tool": "run_command",
+              "args": {
+                "command": "git log --oneline -20"
+              }
+            }
+          },
+          {
+            "id": "write",
+            "type": "agent",
+            "name": "Write changelog",
+            "config": {
+              "botId": "helper",
+              "prompt": "Turn this git log into a readable changelog grouped by feature/fix/chore:\n{{nodes.log.output}}"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save changelog",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "CHANGELOG.md",
+                "content": "# Changelog\n\n{{nodes.write.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "log"
+          ],
+          [
+            "log",
+            "write"
+          ],
+          [
+            "write",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "expense-tracker",
+      "kind": "workflow",
+      "name": "Expense parser",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Parse expenses from notes into a CSV ledger.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "finance",
+        "data",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "expense-tracker",
+        "name": "Expense parser",
+        "description": "Parse expenses from notes into a CSV ledger.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "parse",
+            "type": "agent",
+            "name": "Parse expenses",
+            "config": {
+              "botId": "helper",
+              "prompt": "Extract expenses (date, description, amount, category) from these notes as CSV rows: {{input}}"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save ledger",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/expenses.csv",
+                "content": "date,description,amount,category\n{{nodes.parse.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "parse"
+          ],
+          [
+            "parse",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "link-checker",
+      "kind": "workflow",
+      "name": "Link checker",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Fetch a URL and report its status.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "web",
+        "monitoring",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "link-checker",
+        "name": "Link checker",
+        "description": "Fetch a URL and report its status.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "fetch",
+            "type": "http",
+            "name": "Fetch URL",
+            "config": {
+              "url": "{{input}}",
+              "method": "GET"
+            }
+          },
+          {
+            "id": "report",
+            "type": "agent",
+            "name": "Report status",
+            "config": {
+              "botId": "helper",
+              "prompt": "Summarize this HTTP check result in one line: {{nodes.fetch.output}}"
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "fetch"
+          ],
+          [
+            "fetch",
+            "report"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "daily-planner",
+      "kind": "workflow",
+      "name": "Daily planner",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Morning plan from yesterday's notes and today's tasks.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "productivity",
+        "planning",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "daily-planner",
+        "name": "Daily planner",
+        "description": "Morning plan from yesterday's notes and today's tasks.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "plan",
+            "type": "agent",
+            "name": "Plan day",
+            "config": {
+              "botId": "helper",
+              "prompt": "Write today's plan: top 3 priorities, time blocks, and one thing to avoid. Base it on: {{input}}"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save plan",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/plan-today.md",
+                "content": "# Today\n\n{{nodes.plan.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "plan"
+          ],
+          [
+            "plan",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "code-review-flow",
+      "kind": "workflow",
+      "name": "Code review flow",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Review staged changes, then save the review.",
+      "license": "Apache-2.0",
+      "priceCents": 0,
+      "tags": [
+        "coding",
+        "review",
+        "automation"
+      ],
+      "untrusted": false,
+      "payload": {
+        "id": "code-review-flow",
+        "name": "Code review flow",
+        "description": "Review staged changes, then save the review.",
+        "nodes": [
+          {
+            "id": "trigger",
+            "type": "trigger",
+            "name": "Start",
+            "config": {}
+          },
+          {
+            "id": "diff",
+            "type": "tool",
+            "name": "Get diff",
+            "config": {
+              "tool": "run_command",
+              "args": {
+                "command": "git diff --cached"
+              }
+            }
+          },
+          {
+            "id": "review",
+            "type": "agent",
+            "name": "Review diff",
+            "config": {
+              "botId": "helper",
+              "prompt": "Review this diff for bugs, security, and style. Be specific with file:line refs:\n{{nodes.diff.output}}"
+            }
+          },
+          {
+            "id": "gate",
+            "type": "approval",
+            "name": "Approve",
+            "config": {
+              "message": "Save this code review?"
+            }
+          },
+          {
+            "id": "save",
+            "type": "tool",
+            "name": "Save review",
+            "config": {
+              "tool": "write_file",
+              "args": {
+                "path": "notes/code-review.md",
+                "content": "# Code review\n\n{{nodes.review.output}}"
+              }
+            }
+          }
+        ],
+        "edges": [
+          [
+            "trigger",
+            "diff"
+          ],
+          [
+            "diff",
+            "review"
+          ],
+          [
+            "review",
+            "gate"
+          ],
+          [
+            "gate",
+            "save"
+          ]
+        ]
+      }
+    },
+    {
+      "id": "filesystem-local",
+      "kind": "mcp-server",
+      "name": "Local Filesystem",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Grants the agent scoped file access under /tmp/workspace. Approve only if you trust the agent with those files.",
+      "license": "MIT",
+      "priceCents": 0,
+      "tags": [
+        "mcp",
+        "files",
+        "tools"
+      ],
+      "untrusted": true,
+      "payload": {
+        "id": "filesystem-local",
+        "label": "Local filesystem MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-filesystem",
+          "/tmp/workspace"
+        ],
+        "requiredEnv": [],
+        "description": "Grants the agent scoped file access under /tmp/workspace. Approve only if you trust the agent with those files."
+      }
+    },
+    {
+      "id": "fetch-server",
+      "kind": "mcp-server",
+      "name": "Web Fetch",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Lets the agent fetch web pages and convert them to markdown. Outbound network access — approve per your comfort.",
+      "license": "MIT",
+      "priceCents": 0,
+      "tags": [
+        "mcp",
+        "web",
+        "tools"
+      ],
+      "untrusted": true,
+      "payload": {
+        "id": "fetch-server",
+        "label": "Web fetch MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-fetch"
+        ],
+        "requiredEnv": [],
+        "description": "Lets the agent fetch web pages and convert them to markdown. Outbound network access — approve per your comfort."
+      }
+    },
+    {
+      "id": "sqlite-server",
+      "kind": "mcp-server",
+      "name": "Local SQLite",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Grants the agent read/write access to a local SQLite database file. Review the db path before approving.",
+      "license": "MIT",
+      "priceCents": 0,
+      "tags": [
+        "mcp",
+        "data",
+        "database"
+      ],
+      "untrusted": true,
+      "payload": {
+        "id": "sqlite-server",
+        "label": "SQLite MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-sqlite",
+          "--db-path",
+          "/tmp/workspace/app.db"
+        ],
+        "requiredEnv": [],
+        "description": "Grants the agent read/write access to a local SQLite database file. Review the db path before approving."
+      }
+    },
+    {
+      "id": "brave-search",
+      "kind": "mcp-server",
+      "name": "Brave Search",
+      "version": "1.0.0",
+      "creator": "mvp-labs",
+      "description": "Web search via the Brave Search API. Requires a BRAVE_API_KEY env var (get one free at brave.com/search/api).",
+      "license": "MIT",
+      "priceCents": 0,
+      "tags": [
+        "mcp",
+        "web",
+        "search"
+      ],
+      "untrusted": true,
+      "payload": {
+        "id": "brave-search",
+        "label": "Brave Search MCP server",
+        "command": "npx",
+        "args": [
+          "-y",
+          "@modelcontextprotocol/server-brave-search"
+        ],
+        "requiredEnv": [
+          "BRAVE_API_KEY"
+        ],
+        "description": "Web search via the Brave Search API. Requires a BRAVE_API_KEY env var (get one free at brave.com/search/api)."
+      }
+    }
+  ]
+}

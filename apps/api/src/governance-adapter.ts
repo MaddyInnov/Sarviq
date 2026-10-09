@@ -48,12 +48,19 @@ export interface GovernanceAdapterOptions {
    * merge base for per-bot policies. Defaults to DEFAULT_POLICY.
    */
   globalPolicy?: Policy;
+  /**
+   * Learned preference lookup (preference learning loop). When a tool has
+   * a learned 'deny' preference, evaluation returns 'deny' immediately.
+   * When 'allow', it returns 'allow'. Checked before the policy.
+   */
+  getPreference?: (botId: string, toolName: string) => 'deny' | 'allow' | undefined;
 }
 
 export class GovernanceAdapter implements RuntimeGovernanceGateway {
   private readonly real: RealGovernanceGateway;
   private readonly getBotConfig?: (botId: string) => BotConfig | undefined;
   private readonly globalPolicy: Policy;
+  private readonly getPreference?: (botId: string, toolName: string) => 'deny' | 'allow' | undefined;
   /** Runtime-facing approval id → real gateway approval id. */
   private readonly idMap = new Map<string, string>();
 
@@ -61,6 +68,7 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
     this.real = real;
     this.getBotConfig = opts.getBotConfig;
     this.globalPolicy = opts.globalPolicy ?? DEFAULT_POLICY;
+    this.getPreference = opts.getPreference;
   }
 
   /** Translate a runtime-issued approval id to the real gateway id. */
@@ -76,6 +84,18 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
   }
 
   async evaluate(call: ToolCall, ctx: ToolContext): Promise<GovernanceEvaluation> {
+    // Learned preferences (preference learning loop): check before policy.
+    // If the user consistently denied this tool, deny immediately.
+    // If consistently approved, allow immediately.
+    if (this.getPreference) {
+      const pref = this.getPreference(ctx.botId, call.name);
+      if (pref === 'deny') {
+        return { decision: 'deny', reason: 'Learned preference: you have denied this tool multiple times.' };
+      }
+      if (pref === 'allow') {
+        return { decision: 'allow', reason: 'Learned preference: you have approved this tool multiple times.' };
+      }
+    }
     // Per-bot policy: merge the calling bot's rules ahead of the global
     // policy (first match wins). No bot policy → global policy only.
     const botPolicy = this.getBotConfig?.(ctx.botId)?.policy;

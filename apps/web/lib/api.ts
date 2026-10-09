@@ -286,6 +286,130 @@ export function getAudit(limit = 100): Promise<AuditEntry[]> {
   return apiJson(`/api/audit?limit=${limit}`);
 }
 
+// ---- Collaborative Pages ----------------------------------------------------
+
+export interface Page {
+  id: string;
+  title: string;
+  content: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  version: number;
+}
+
+export interface PageVersion {
+  id: string;
+  pageId: string;
+  version: number;
+  title: string;
+  content: string;
+  createdAt: number;
+  createdBy: string;
+}
+
+export interface PageComment {
+  id: string;
+  pageId: string;
+  author: string;
+  text: string;
+  createdAt: number;
+  resolved: boolean;
+}
+
+export interface PageMention {
+  id: string;
+  pageId: string;
+  mentioned: string;
+  isBot: boolean;
+  context: string;
+  author: string;
+  status: 'pending' | 'done' | 'failed';
+  createdAt: number;
+}
+
+export interface PageDetail extends Page {
+  comments: PageComment[];
+  mentions: PageMention[];
+}
+
+export const listPages = (): Promise<Page[]> => apiJson('/api/pages');
+
+export function createPage(input: { title: string; content?: string; createdBy?: string }): Promise<Page> {
+  return apiJson('/api/pages', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export const getPage = (id: string): Promise<PageDetail> =>
+  apiJson(`/api/pages/${encodeURIComponent(id)}`);
+
+export function updatePage(
+  id: string,
+  input: { title?: string; content?: string; updatedBy?: string },
+): Promise<Page> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function deletePage(id: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}`, { method: 'DELETE' });
+}
+
+export const listPageVersions = (id: string): Promise<PageVersion[]> =>
+  apiJson(`/api/pages/${encodeURIComponent(id)}/versions`);
+
+export function restorePageVersion(id: string, versionId: string): Promise<Page> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}/restore/${encodeURIComponent(versionId)}`, {
+    method: 'POST',
+  });
+}
+
+export function addPageComment(
+  id: string,
+  input: { author: string; text: string },
+): Promise<PageComment> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}/comments`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
+export function resolvePageComment(
+  id: string,
+  commentId: string,
+  resolved: boolean,
+): Promise<PageComment> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resolved }),
+  });
+}
+
+export function deletePageComment(id: string, commentId: string): Promise<{ ok: boolean }> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}/comments/${encodeURIComponent(commentId)}`, {
+    method: 'DELETE',
+  });
+}
+
+export function addPageMention(
+  id: string,
+  input: { mentioned: string; context?: string; author?: string },
+): Promise<PageMention> {
+  return apiJson(`/api/pages/${encodeURIComponent(id)}/mentions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(input),
+  });
+}
+
 export function saveProviderKey(
   providerId: string,
   apiKey: string,

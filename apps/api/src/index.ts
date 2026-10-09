@@ -162,9 +162,13 @@ async function boot(): Promise<void> {
   // tool.executed), so no extra hooks are registered here — they would
   // double-log. Phase 2: getBotConfig lets the adapter evaluate per-bot
   // policy overrides (bot rules prepended, first match wins).
+  const { PreferenceStore } = await import('./preferences.js');
+  const preferenceStore = new PreferenceStore(config.dataDir);
+
   const governanceAdapter = new GovernanceAdapter(governance, {
     getBotConfig: (id) => botsById.get(id),
     globalPolicy,
+    getPreference: (botId, toolName) => preferenceStore.getPreference(botId, toolName)?.preference,
   });
 
   const { registry: toolRegistry, connections: mcpConnections, close: closeMcp } =
@@ -191,6 +195,9 @@ async function boot(): Promise<void> {
 
   const { DotStore } = await import('./dots.js');
   const dotStore = new DotStore(config.dataDir);
+
+  const { RecordingStore } = await import('./recordings.js');
+  const recordingStore = new RecordingStore(config.dataDir);
 
   const agentRuntime = new AgentRuntime({
     dbPath: `${config.dataDir}/agent.db`,
@@ -393,6 +400,8 @@ async function boot(): Promise<void> {
       threadScheduleStore,
       checkpointStore,
       dotStore,
+      preferenceStore,
+      recordingStore,
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).

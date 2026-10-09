@@ -13,6 +13,7 @@ import {
   SkillLoader,
   createBuiltInTools,
   createCodingTools,
+  createGitTools,
   createMemoryTools,
   createSkillTools,
 } from '@mvp/agent-runtime';
@@ -50,6 +51,11 @@ export async function buildToolRegistry(opts: {
   // and read_skill (progressive skill disclosure). All are ordinary registry
   // tools, so deny-by-default governance applies to each of them.
   for (const tool of createCodingTools({ workspaceDir: opts.workspaceDir })) {
+    registry.set(tool.name, tool);
+  }
+  // PR integration: git tools (status/diff auto-allowed; commit/branch/push
+  // require approval via the default deny-by-default policy).
+  for (const tool of createGitTools({ workspaceDir: opts.workspaceDir })) {
     registry.set(tool.name, tool);
   }
   for (const tool of createMemoryTools({ store: new BotMemoryStore(opts.dataDir) })) {

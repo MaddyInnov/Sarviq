@@ -16,6 +16,7 @@ export * from './skills.js';
 export * from './mcp.js';
 export * from './tools/builtin.js';
 export * from './tools/coding.js';
+export * from './tools/git.js';
 export * from './tools/sandbox.js';
 export * from './routing.js';
 export * from './mcp-server.js';

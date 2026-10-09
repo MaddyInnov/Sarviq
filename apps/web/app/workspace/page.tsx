@@ -4,10 +4,12 @@
 import { useState } from 'react';
 import { NotesPanel } from '../../components/panels/notes-panel';
 import { TasksPanel } from '../../components/panels/tasks-panel';
+import { FilesPanel } from '../../components/panels/files-panel';
 
 const TABS = [
   { id: 'notes', label: 'Notes' },
   { id: 'tasks', label: 'Tasks' },
+  { id: 'files', label: 'Files' },
 ] as const;
 
 type TabId = (typeof TABS)[number]['id'];
@@ -17,7 +19,7 @@ export default function WorkspacePage() {
   return (
     <div>
       <h1 className="page-title">Workspace</h1>
-      <p className="page-sub">Notes and tasks in one place — your personal working surface.</p>
+      <p className="page-sub">Notes, tasks, and the agent's files in one place — your personal working surface.</p>
       <div className="tabs" role="tablist" aria-label="Workspace sections">
         {TABS.map((t) => (
           <button
@@ -32,7 +34,13 @@ export default function WorkspacePage() {
         ))}
       </div>
       <div className="tab-panel page-enter" key={tab} role="tabpanel">
-        {tab === 'notes' ? <NotesPanel hideHeader /> : <TasksPanel hideHeader />}
+        {tab === 'notes' ? (
+          <NotesPanel hideHeader />
+        ) : tab === 'tasks' ? (
+          <TasksPanel hideHeader />
+        ) : (
+          <FilesPanel />
+        )}
       </div>
     </div>
   );

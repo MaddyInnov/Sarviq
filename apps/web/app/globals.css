@@ -748,6 +748,11 @@ html[data-ux='pro'] .theme-opt:hover {
   padding: 26px 22px 52px;
 }
 
+/* Chat takes the full width — no empty margins on wide screens. */
+.main:has(.chat-layout) {
+  max-width: none;
+}
+
 /* Page entrance (Pro only) */
 html[data-ux='pro'] .page-enter {
   animation: fadeUp 0.32s var(--ease);
@@ -2048,4 +2053,135 @@ html[data-ux='simple'] .bot-item:hover {
   .drawer-scrim {
     display: none;
   }
+}
+
+/* ================= code visibility ================= */
+/* Syntax-highlighted code blocks, diffs, and the file browser.
+   Uses theme variables; clay cards + glass panels like the rest of the UI. */
+
+.code-block {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--clay-shadow-sm);
+  overflow: hidden;
+  margin-top: 8px;
+}
+
+.code-block-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 6px 12px;
+  background: var(--surface-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.code-lang {
+  font-size: 11px;
+  color: var(--text-3);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
+.code-lang.diff-badge {
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.code-pre {
+  margin: 0;
+  padding: 12px 14px;
+  overflow: auto;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12.5px;
+  line-height: 1.55;
+  color: var(--text);
+  background: transparent;
+}
+
+.code-pre code {
+  font-family: inherit;
+}
+
+/* token colors */
+.tk-kw { color: var(--accent); font-weight: 600; }
+.tk-str { color: var(--green); }
+.tk-com { color: var(--text-3); font-style: italic; }
+.tk-num { color: var(--amber); }
+.tk-punct { color: var(--text-2); }
+.tk-fn { color: #0e7490; }
+html[data-theme='dark'] .tk-fn,
+html[data-theme='midnight'] .tk-fn { color: #67e8f9; }
+
+/* diff lines */
+.diff-pre { padding: 6px 0; }
+.diff-line { display: flex; min-width: max-content; padding: 1px 12px 1px 0; }
+.diff-gutter {
+  flex: 0 0 28px;
+  text-align: center;
+  color: var(--text-3);
+  user-select: none;
+}
+.diff-text { white-space: pre; }
+.diff-del { background: var(--red-soft); }
+.diff-del .diff-gutter { color: var(--red); font-weight: 700; }
+.diff-add { background: var(--green-soft); }
+.diff-add .diff-gutter { color: var(--green); font-weight: 700; }
+.diff-same .diff-gutter { color: var(--border-strong); }
+.diff-header { color: var(--text-2); font-weight: 600; background: var(--surface-2); }
+.diff-hunk { color: var(--accent); background: var(--accent-soft); }
+
+/* file browser */
+.files-layout {
+  display: grid;
+  grid-template-columns: 300px 1fr;
+  gap: 16px;
+  align-items: start;
+}
+.files-tree {
+  border-radius: var(--radius-sm);
+  padding: 8px;
+  max-height: 640px;
+  overflow: auto;
+}
+.files-tree-head { padding: 4px 8px 8px; }
+.file-node {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  text-align: left;
+  background: none;
+  border: none;
+  border-radius: 8px;
+  padding: 5px 8px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.file-node:hover { background: var(--surface-2); }
+.file-node.selected { background: var(--accent-soft); }
+.file-icon { color: var(--text-3); flex: 0 0 14px; }
+.file-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-name.dir { font-weight: 600; }
+.file-size { margin-left: auto; color: var(--text-3); font-size: 11px; flex: 0 0 auto; }
+.files-viewer { min-width: 0; }
+.files-empty { padding: 32px; text-align: center; }
+.crumbs {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin-bottom: 8px;
+  font-size: 13px;
+}
+.crumb { color: var(--text-2); }
+.crumb.current { color: var(--text); font-weight: 600; }
+.crumb-sep { color: var(--text-3); }
+
+@media (max-width: 860px) {
+  .files-layout { grid-template-columns: 1fr; }
+  .files-tree { max-height: 280px; }
 }

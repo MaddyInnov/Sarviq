@@ -22,6 +22,10 @@ export interface ChatRequestBody {
   planMode?: boolean;
   /** Max USD spend for this turn; stops fail-closed when exceeded. */
   maxBudgetUsd?: number;
+  /**
+   * Per-turn sandbox mode override (Codex-style orthogonal dial).
+   */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
 }
 
 export interface DecideApprovalBody {

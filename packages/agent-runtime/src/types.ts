@@ -62,6 +62,15 @@ export interface BotPolicy {
   rules: BotPolicyRule[];
 }
 
+/**
+ * Sandbox mode (Codex-style orthogonal trust dial).
+ * - 'read-only': agent can only read files and search; no writes, no execution.
+ * - 'workspace-write': agent can write files in the workspace and run sandboxed commands (default).
+ * - 'danger-full-access': agent can do anything the tools allow (approvals still apply).
+ * This is orthogonal to the approval policy (allow/require-approval/deny).
+ */
+export type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+
 export interface BotConfig {
   id: string;
   name: string;
@@ -73,6 +82,8 @@ export interface BotConfig {
   tools: string[];
   mcpServers: string[];
   policy?: BotPolicy;
+  /** Sandbox mode for this bot (default: 'workspace-write'). */
+  sandboxMode?: SandboxMode;
 }
 
 export interface LLMProvider {
