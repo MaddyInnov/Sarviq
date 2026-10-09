@@ -17,6 +17,9 @@ import { priceOfModel } from '@mvp/agent-runtime/dist/pricing.js';
 import type { ApprovalStatus, GovernanceGateway } from '@mvp/governance';
 import type { WorkflowRun, WorkflowRunner } from '@mvp/workflows';
 import { createHealthScoring, registerHealthRoutes } from './health-routes.js';
+import { registerOmniRoutes } from './omni-routes.js';
+import type { OmniCollector, OmniStore } from './omni.js';
+import { registerBriefingRoutes } from './briefing-routes.js';
 import type { RunHealthStore } from '@mvp/run-health';
 import type { AppConfig } from './config.js';
 import type { GovernanceAdapter } from './governance-adapter.js';
@@ -57,6 +60,9 @@ import { registerPagesRoutes } from './pages.js';
 import { registerTerminalRoutes } from './terminal-routes.js';
 import { registerTeamRoutes } from './teams-routes.js';
 import { registerSpaceRoutes, resolveSpaceForRun, SpaceHttpError, type SpaceRunContext } from './spaces-routes.js';
+import { registerPhoneRoutes } from './phone-routes.js';
+import type { AdbPhoneProvider } from './phone-adb.js';
+import type { PhoneSessionHub, PhoneStore } from './phone.js';
 import { TieredMemoryStore } from '@mvp/agent-runtime';
 import { PERSONAS, MBTI_TYPES, QUIZ_QUESTIONS, scoreQuiz, resolvePersona } from '@mvp/agent-runtime';
 import { saveBotPersona } from './bot-personas.js';
@@ -140,6 +146,20 @@ export interface RouteDeps {
   tieredMemoryStore: TieredMemoryStore;
   /** Run health scores + metric samples (features #2/#5). */
   runHealth: RunHealthStore;
+  /** Omni rolling-summary store (Omni panel backend, <dataDir>/omni.db). */
+  omniStore: OmniStore;
+  /** Omni collector (feeds the store from audit/approvals/workflow runs). */
+  omniCollector: OmniCollector;
+  /**
+   * Remote-phone control module (Workspace → Phone tab). Created by index.ts
+   * so the WebSocket upgrade handler shares the same hub instance as the
+   * REST routes. Optional: omitted in tests that don't exercise phone.
+   */
+  phone?: {
+    store: PhoneStore;
+    hub: PhoneSessionHub;
+    adb: AdbPhoneProvider;
+  };
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -181,7 +201,7 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, runHealth, mcpServer, mcpScopeStore } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, runHealth, mcpServer, mcpScopeStore, omniStore, omniCollector } = deps;
 
   // ---- Run health scoring + regressions (features #2/#5) -------------------
   // Helpers shared by the workflow run payloads below and the /chat turn
@@ -1493,6 +1513,20 @@ export function createRouter(deps: RouteDeps): express.Router {
   // that feed the 7-day regression detector.
   registerHealthRoutes(router, { workflowRunner, runHealth });
 
+  // ---- Omni rolling summary (Omni panel backend) --------------------------
+  // Four temporal layers + pins + time-travel versions; the store is fed by
+  // the OmniCollector (wired in index.ts). Empty store → 404, which the web
+  // panel maps to its empty state via optionalJson.
+  registerOmniRoutes(router, { omni: omniStore, collector: omniCollector });
+
+  // ---- Daily briefing -------------------------------------------------------
+  // Standalone module (testable without the full router): assembles the
+  // overnight digest from the governance audit log, the platform calendar,
+  // pending approvals, and the run-health regression detector; the summary
+  // prefers a local Ollama model with a deterministic template fallback.
+  // The web UI's briefing panel is coded against GET /api/briefing.
+  registerBriefingRoutes(router, { dataDir: config.dataDir, governance, runHealth });
+
   // ---- Dry run ------------------------------------------------------------
   router.post('/dry-run', async (req, res) => {
     const body = (req.body ?? {}) as Partial<DryRunBody>;
@@ -1682,6 +1716,20 @@ export function createRouter(deps: RouteDeps): express.Router {
   const spacesRouter = express.Router();
   registerSpaceRoutes(spacesRouter, { spaceStore, dataDir: config.dataDir });
   router.use('/spaces', spacesRouter);
+
+  // Remote-phone control v1 (Workspace → Phone tab). REST only — the live
+  // WebSocket endpoint (/api/phone/ws) is wired to the HTTP server's
+  // 'upgrade' event in index.ts, sharing deps.phone.hub.
+  if (deps.phone) {
+    const phoneRouter = express.Router();
+    registerPhoneRoutes(phoneRouter, {
+      store: deps.phone.store,
+      hub: deps.phone.hub,
+      adb: deps.phone.adb,
+      audit: (action, fields) => governance.audit(action, fields),
+    });
+    router.use('/phone', phoneRouter);
+  }
 
   return router;
 }

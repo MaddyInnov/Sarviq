@@ -1,0 +1,48 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:tools="http://schemas.android.com/tools">
+
+    <!-- WebSocket to the Sarviq API -->
+    <uses-permission android:name="android.permission.INTERNET" />
+    <!-- Screen capture runs as a foreground service with a visible notification -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
+    <!-- POST_NOTIFICATIONS for the foreground-service notification on API 33+ -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
+    <application
+        android:label="Sarviq Phone Agent"
+        android:theme="@style/Theme.Material3.DayNight.NoActionBar"
+        android:allowBackup="false"
+        tools:targetApi="34">
+
+        <activity
+            android:name=".MainActivity"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+
+        <service
+            android:name=".ScreenCaptureService"
+            android:foregroundServiceType="mediaProjection"
+            android:exported="false" />
+
+        <!-- Input injection: the user must enable this manually in
+             Settings → Accessibility. The app cannot enable it itself. -->
+        <service
+            android:name=".InputService"
+            android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.accessibilityservice.AccessibilityService" />
+            </intent-filter>
+            <meta-data
+                android:name="android.accessibilityservice"
+                android:resource="@xml/accessibility_service_config" />
+        </service>
+    </application>
+</manifest>

@@ -213,6 +213,15 @@ async function boot(): Promise<void> {
   const { PreferenceStore } = await import('./preferences.js');
   const preferenceStore = new PreferenceStore(config.dataDir);
 
+  // Remote-phone control v1 (Workspace → Phone tab). The hub is created here
+  // (not in routes.ts) so the WebSocket upgrade handler below shares the
+  // same instance as the REST routes.
+  const { PhoneStore, PhoneSessionHub } = await import('./phone.js');
+  const { AdbPhoneProvider } = await import('./phone-adb.js');
+  const phoneStore = new PhoneStore(config.dataDir);
+  const phoneHub = new PhoneSessionHub(phoneStore, (action, fields) => governance.audit(action, fields));
+  const phoneAdb = new AdbPhoneProvider();
+
   const governanceAdapter = new GovernanceAdapter(governance, {
     getBotConfig: (id) => botsById.get(id),
     globalPolicy,
@@ -476,6 +485,41 @@ async function boot(): Promise<void> {
   });
   threadScheduler.start();
 
+  // Omni rolling summary (Omni panel backend): the collector feeds the
+  // store from the governance audit log, pending approvals, and workflow
+  // runs; the scheduler refreshes the live layers hourly and runs the
+  // nightly/weekly compression rollups on day/week boundaries.
+  const { OmniStore, OmniCollector, OmniScheduler } = await import('./omni.js');
+  const omniStore = new OmniStore(config.dataDir);
+  const omniCollector = new OmniCollector(omniStore, {
+    listApprovals: (status) => governance.listApprovals(status),
+    listAudit: (limit, offset) => governance.listAudit(limit, offset),
+    listRuns: () => workflowRunner.listRuns(),
+  });
+  const omniScheduler = new OmniScheduler(omniStore, {
+    collector: omniCollector,
+    ollamaEnhance: process.env.OMNI_OLLAMA_ENHANCE === '1',
+  });
+  omniScheduler.start();
+  // First pass shortly after boot so the panel has data on first load.
+  omniScheduler.tick().catch((err) => console.error('[omni] initial collect failed:', err));
+
+  // Daily briefing: background digest generation at the configured local
+  // time (default 07:00). Unlike ThreadScheduler — which wakes chat threads
+  // with an agent turn — the briefing is a pure background data-assembly
+  // job (audit log + calendar + approvals + regressions + local-Ollama
+  // summary) that needs no bot or chat session, so it runs on its own
+  // minute-tick scheduler that follows the ThreadScheduler pattern
+  // (interval tick + per-day dedup persisted in SQLite). Delivery time and
+  // the enabled flag are configurable via PUT /api/briefing/config.
+  const { BriefingScheduler } = await import('./briefing.js');
+  const briefingScheduler = new BriefingScheduler({
+    dataDir: config.dataDir,
+    governance,
+    runHealth,
+  });
+  briefingScheduler.start();
+
   // Phase 3: two-way MCP over HTTP+SSE on a separate port when configured.
   // External clients connect to http://127.0.0.1:<port>/sse.
   const mcpPort = Number(process.env.MCP_SERVER_PORT ?? 0);
@@ -513,11 +557,14 @@ async function boot(): Promise<void> {
       checkpointStore,
       dotStore,
       preferenceStore,
+      phone: { store: phoneStore, hub: phoneHub, adb: phoneAdb },
       recordingStore,
       chatQueueStore,
       mcpServers: seed.mcpServers,
       tieredMemoryStore: new (await import('@mvp/agent-runtime')).TieredMemoryStore(config.dataDir),
       runHealth,
+      omniStore,
+      omniCollector,
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).
@@ -560,6 +607,18 @@ async function boot(): Promise<void> {
           `[tools] MCP warmup done: ${mcpConnections.filter((c) => c.ok).length}/${mcpConnections.length} connected`,
         );
       });
+  });
+
+  // Remote-phone control: WebSocket endpoint for live sessions at
+  // /api/phone/ws (REST routes live under /api/phone via routes.ts).
+  // Unknown upgrade paths are destroyed so nothing else hijacks upgrades.
+  server.on('upgrade', (req, socket, head) => {
+    const path = req.url?.split('?')[0];
+    if (path === '/api/phone/ws') {
+      phoneHub.handleUpgrade(req, socket, head);
+    } else {
+      socket.destroy();
+    }
   });
 
   const shutdown = async () => {
