@@ -1803,6 +1803,7 @@ export function createRouter(deps: RouteDeps): express.Router {
       audit: (action, fields) => governance.audit(action, fields),
       lanIp: getLanIp(),
       port: config.port,
+      publicBaseUrl: config.publicBaseUrl,
       version: '0.1.0',
       localChatUrl: `http://127.0.0.1:${config.port}/api/chat`,
       governance,

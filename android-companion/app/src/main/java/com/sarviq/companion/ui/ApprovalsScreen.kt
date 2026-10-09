@@ -28,7 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.sarviq.companion.data.Approval
+import com.sarviq.companion.core.Approval
 
 /** Pending approvals with approve/deny + confirmation dialog + optional note. */
 @Composable

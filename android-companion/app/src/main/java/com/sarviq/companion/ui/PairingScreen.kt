@@ -7,6 +7,7 @@ import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -33,8 +34,8 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import com.sarviq.companion.data.PairingPayload
-import com.sarviq.companion.data.QrParser
+import com.sarviq.companion.core.PairingPayload
+import com.sarviq.companion.core.QrParser
 
 /**
  * First-run pairing: scan the QR shown in Sarviq Workspace -> Devices, confirm
@@ -149,7 +150,15 @@ private fun ConfirmPairingDialog(
         title = { Text("Pair with this server?") },
         text = {
             Column {
-                Text("Server: ${payload.host}:${payload.port}")
+                Text("Server: ${payload.serverLabel}")
+                if (payload.isHosted) {
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Hosted server — the phone will connect over the internet.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
                 Spacer(Modifier.height(12.dp))
                 OutlinedTextField(
                     value = name,
@@ -178,8 +187,10 @@ private fun ManualPairingDialog(
     onDismiss: () -> Unit,
     onConfirm: (PairingPayload?) -> Unit,
 ) {
+    var hosted by remember { mutableStateOf(false) }
     var host by remember { mutableStateOf("") }
     var port by remember { mutableStateOf("") }
+    var serverUrl by remember { mutableStateOf("") }
     var token by remember { mutableStateOf("") }
     var invalid by remember { mutableStateOf(false) }
     AlertDialog(
@@ -187,18 +198,51 @@ private fun ManualPairingDialog(
         title = { Text("Enter pairing details") },
         text = {
             Column {
-                OutlinedTextField(
-                    value = host, onValueChange = { host = it },
-                    label = { Text("Host (LAN IP)") }, singleLine = true,
+                Row(
                     modifier = Modifier.fillMaxWidth(),
-                )
-                Spacer(Modifier.height(8.dp))
-                OutlinedTextField(
-                    value = port, onValueChange = { port = it },
-                    label = { Text("Port") }, singleLine = true,
-                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                ) {
+                    Button(
+                        onClick = { hosted = false; invalid = false },
+                        modifier = Modifier.weight(1f),
+                        enabled = hosted,
+                    ) { Text("WiFi (LAN)") }
+                    Button(
+                        onClick = { hosted = true; invalid = false },
+                        modifier = Modifier.weight(1f),
+                        enabled = !hosted,
+                    ) { Text("Hosted") }
+                }
+                Spacer(Modifier.height(12.dp))
+                if (hosted) {
+                    Text(
+                        "Connect to a hosted Sarviq server over the internet. " +
+                            "Ask the server owner for its public URL and a pairing code " +
+                            "(Workspace → Devices → Generate pairing code).",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = serverUrl, onValueChange = { serverUrl = it },
+                        label = { Text("Server URL (https://…)") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                } else {
+                    OutlinedTextField(
+                        value = host, onValueChange = { host = it },
+                        label = { Text("Host (LAN IP)") }, singleLine = true,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                    Spacer(Modifier.height(8.dp))
+                    OutlinedTextField(
+                        value = port, onValueChange = { port = it },
+                        label = { Text("Port") }, singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 Spacer(Modifier.height(8.dp))
                 OutlinedTextField(
                     value = token, onValueChange = { token = it },
@@ -216,9 +260,17 @@ private fun ManualPairingDialog(
         },
         confirmButton = {
             Button(onClick = {
-                val payload = QrParser.parse(
-                    "sarviq://pair?host=${host.trim()}&port=${port.trim()}&token=${token.trim()}",
-                )
+                val payload = if (hosted) {
+                    val url = QrParser.normalizeServerUrl(serverUrl)
+                    val ott = token.trim()
+                    if (url != null && ott.isNotEmpty())
+                        PairingPayload(host = "", port = 0, ott = ott, serverUrl = url)
+                    else null
+                } else {
+                    QrParser.parse(
+                        "sarviq://pair?host=${host.trim()}&port=${port.trim()}&token=${token.trim()}",
+                    )
+                }
                 invalid = payload == null
                 if (payload != null) onConfirm(payload)
             }) { Text("Continue") }

@@ -2,7 +2,13 @@
 import React from 'react';
 import { describe, expect, it } from 'vitest';
 import { renderToStaticMarkup } from 'react-dom/server';
-import DevicesPanel, { formatCountdown, formatLastSeen, groupOtt, normalizeTs } from './devices-panel';
+import DevicesPanel, {
+  formatCountdown,
+  formatLastSeen,
+  groupOtt,
+  normalizeTs,
+  pairingModeLabel,
+} from './devices-panel';
 
 describe('devices-panel helpers', () => {
   it('normalizes second-precision timestamps to ms', () => {
@@ -30,6 +36,14 @@ describe('devices-panel helpers', () => {
   it('groups a 6-digit OTT code for readability', () => {
     expect(groupOtt('123456')).toBe('123 456');
     expect(groupOtt('abc')).toBe('abc');
+  });
+
+  it('labels which network the pairing QR encodes', () => {
+    expect(pairingModeLabel('hosted', 'https://sarviq.example.com')).toBe(
+      'QR encodes: internet (https://sarviq.example.com)',
+    );
+    expect(pairingModeLabel('lan', '192.168.1.10:4567')).toBe('QR encodes: WiFi LAN (192.168.1.10:4567)');
+    expect(pairingModeLabel(undefined, undefined)).toBe('QR encodes: WiFi LAN');
   });
 });
 

@@ -6,17 +6,17 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.ViewModelProvider
 import androidx.lifecycle.viewModelScope
-import com.sarviq.companion.data.Approval
-import com.sarviq.companion.data.Briefing
-import com.sarviq.companion.data.ChatEvent
-import com.sarviq.companion.data.ChatMessage
-import com.sarviq.companion.data.CompanionSocket
-import com.sarviq.companion.data.PairingPayload
-import com.sarviq.companion.data.PairingStore
-import com.sarviq.companion.data.RunSummary
-import com.sarviq.companion.data.ActivityItem
-import com.sarviq.companion.data.SarviqApi
-import com.sarviq.companion.data.ServerStatus
+import com.sarviq.companion.core.Approval
+import com.sarviq.companion.core.Briefing
+import com.sarviq.companion.core.ChatEvent
+import com.sarviq.companion.core.ChatMessage
+import com.sarviq.companion.core.CompanionSocket
+import com.sarviq.companion.core.PairingPayload
+import com.sarviq.companion.core.PairingStore
+import com.sarviq.companion.core.RunSummary
+import com.sarviq.companion.core.ActivityItem
+import com.sarviq.companion.core.SarviqApi
+import com.sarviq.companion.core.ServerStatus
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -103,8 +103,8 @@ class CompanionViewModel(app: Application) : AndroidViewModel(app) {
         _pairingError.value = null
         viewModelScope.launch {
             try {
-                val result = api.exchangePairing(p.host, p.port, p.ott, deviceName.ifBlank { "Android" })
-                store.save(p.host, p.port, deviceName.ifBlank { "Android" }, result)
+                val result = api.exchangePairing(p.baseUrl, p.ott, deviceName.ifBlank { "Android" })
+                store.save(p.host, p.port, deviceName.ifBlank { "Android" }, result, p.serverUrl)
                 _pendingPairing.value = null
                 _paired.value = true
                 startLive()

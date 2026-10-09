@@ -34,6 +34,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.sarviq.companion.core.ChatMessage
 
 /**
  * Chat with the Sarviq instance. Mirrors the web app's POST /chat turn API:

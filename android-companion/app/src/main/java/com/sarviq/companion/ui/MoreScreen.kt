@@ -26,6 +26,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
 import androidx.navigation.NavController
+import com.sarviq.companion.core.Briefing
+import com.sarviq.companion.core.PairingStore
 
 /** Overflow tab: links to Activity + Briefing, pairing details, unpair. */
 @Composable

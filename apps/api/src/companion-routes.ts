@@ -115,10 +115,16 @@ export interface CompanionRouteDeps {
   store: CompanionStore;
   hub: CompanionHub;
   audit: CompanionAudit;
-  /** LAN IP embedded in the QR pairing payload. */
+  /** LAN IP embedded in the QR pairing payload (LAN mode). */
   lanIp: string;
-  /** API port embedded in the QR pairing payload. */
+  /** API port embedded in the QR pairing payload (LAN mode). */
   port: number;
+  /**
+   * Public base URL for hosted deployments (e.g. "https://sarviq.example.com").
+   * When set, pairing QR payloads encode this URL so phones pair over the
+   * internet; when unset, pairing stays LAN-only. From SARVIQ_PUBLIC_URL.
+   */
+  publicBaseUrl?: string;
   version: string;
   /** Local URL of the chat SSE endpoint, for the /chat/send proxy. */
   localChatUrl: string;
@@ -153,6 +159,40 @@ export function getLanIp(): string {
 
 export function buildQrPayload(host: string, port: number, ott: string): string {
   return `sarviq://pair?host=${encodeURIComponent(host)}&port=${port}&token=${encodeURIComponent(ott)}`;
+}
+
+/**
+ * Hosted-mode QR payload: the phone connects to a public base URL over the
+ * internet instead of a LAN host:port.
+ *   sarviq://pair?url=https%3A%2F%2Fsarviq.example.com&token=<ott>
+ */
+export function buildHostedQrPayload(publicBaseUrl: string, ott: string): string {
+  return `sarviq://pair?url=${encodeURIComponent(publicBaseUrl)}&token=${encodeURIComponent(ott)}`;
+}
+
+export type PairingMode = 'lan' | 'hosted';
+
+/** Which QR flavor pairing responses should encode. Hosted wins when configured. */
+export function pairingMode(deps: Pick<CompanionRouteDeps, 'publicBaseUrl'>): PairingMode {
+  return deps.publicBaseUrl ? 'hosted' : 'lan';
+}
+
+/** Human label for the server the QR payload points at (shown in the web UI). */
+export function pairingServerLabel(deps: Pick<CompanionRouteDeps, 'publicBaseUrl' | 'lanIp' | 'port'>): string {
+  return deps.publicBaseUrl ?? `${deps.lanIp}:${deps.port}`;
+}
+
+/** QR payload + mode for a fresh OTT, honoring the hosted/LAN configuration. */
+export function buildPairingPayload(
+  deps: Pick<CompanionRouteDeps, 'publicBaseUrl' | 'lanIp' | 'port'>,
+  ott: string,
+): { qrPayload: string; mode: PairingMode; serverLabel: string } {
+  const mode = pairingMode(deps);
+  const qrPayload =
+    mode === 'hosted'
+      ? buildHostedQrPayload(deps.publicBaseUrl as string, ott)
+      : buildQrPayload(deps.lanIp, deps.port, ott);
+  return { qrPayload, mode, serverLabel: pairingServerLabel(deps) };
 }
 
 function err(res: Response, status: number, error: string, detail?: string): void {
@@ -332,13 +372,13 @@ export function registerCompanionRoutes(router: Router, deps: CompanionRouteDeps
       return;
     }
     const rec = store.requestPairingOTT();
-    const qrPayload = buildQrPayload(deps.lanIp, deps.port, rec.ott);
+    const { qrPayload, mode, serverLabel } = buildPairingPayload(deps, rec.ott);
     audit('companion.pair_requested', {
       actor: 'api',
       toolName: 'companion',
-      detail: { expiresAt: rec.expiresAt, ip },
+      detail: { expiresAt: rec.expiresAt, ip, mode },
     });
-    res.json({ ok: true, ott: rec.ott, qrPayload, expiresAt: rec.expiresAt });
+    res.json({ ok: true, ott: rec.ott, qrPayload, expiresAt: rec.expiresAt, mode, serverLabel });
   };
 
   router.post('/pairing/code', mintCode);
@@ -351,12 +391,13 @@ export function registerCompanionRoutes(router: Router, deps: CompanionRouteDeps
       return;
     }
     const rec = store.requestPairingOTT();
+    const { qrPayload, mode, serverLabel } = buildPairingPayload(deps, rec.ott);
     audit('companion.qr_requested', {
       actor: 'api',
       toolName: 'companion',
-      detail: { expiresAt: rec.expiresAt, ip },
+      detail: { expiresAt: rec.expiresAt, ip, mode },
     });
-    res.json({ ok: true, qrPayload: buildQrPayload(deps.lanIp, deps.port, rec.ott), expiresAt: rec.expiresAt });
+    res.json({ ok: true, qrPayload, expiresAt: rec.expiresAt, mode, serverLabel });
   });
 
   router.post('/pairing/exchange', (req: Request, res: Response) => {

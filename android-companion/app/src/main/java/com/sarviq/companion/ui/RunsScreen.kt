@@ -28,7 +28,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
-import com.sarviq.companion.data.RunSummary
+import com.sarviq.companion.core.RunSummary
 
 /** Runs list with pause / resume / cancel actions (cancel asks for confirmation). */
 @Composable

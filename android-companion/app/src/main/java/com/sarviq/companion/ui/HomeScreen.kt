@@ -19,6 +19,8 @@ import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.unit.dp
+import com.sarviq.companion.core.PairingStore
+import com.sarviq.companion.core.ServerStatus
 
 /** Home: server health, active runs summary, pending approvals count. */
 @Composable
@@ -38,7 +40,7 @@ fun HomeScreen(vm: CompanionViewModel) {
         val s = status
         if (s == null) {
             Text(
-                "Connecting to ${vm.store.host}:${vm.store.port}…",
+                "Connecting to ${vm.store.serverLabel}…",
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
         } else {
@@ -53,6 +55,11 @@ fun HomeScreen(vm: CompanionViewModel) {
                     Spacer(Modifier.height(4.dp))
                     val ver = if (s.version.isNotEmpty()) " v${s.version}" else ""
                     Text("${s.serverName}$ver", style = MaterialTheme.typography.bodyMedium)
+                    Text(
+                        "Connected to ${vm.store.serverLabel}",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
                     Text(
                         "Paired as ${vm.store.deviceName.ifEmpty { "this device" }}",
                         style = MaterialTheme.typography.bodySmall,

@@ -32,7 +32,7 @@ import androidx.navigation.compose.composable
 import androidx.navigation.compose.currentBackStackEntryAsState
 import androidx.navigation.compose.rememberNavController
 import com.google.zxing.integration.android.IntentIntegrator
-import com.sarviq.companion.data.QrParser
+import com.sarviq.companion.core.QrParser
 import com.sarviq.companion.ui.ActivityScreen
 import com.sarviq.companion.ui.ApprovalsScreen
 import com.sarviq.companion.ui.BriefingScreen

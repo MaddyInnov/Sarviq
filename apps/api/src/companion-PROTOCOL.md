@@ -27,8 +27,14 @@ Web UI / API                    Phone app
   |  { deviceToken, deviceId }          |
 ```
 
-- The QR payload is `sarviq://pair?host=<lan-ip>&port=<port>&token=<ott>`
-  (`host` = first non-internal IPv4, `port` = the API port).
+- The QR payload has two flavors:
+  - LAN (default): `sarviq://pair?host=<lan-ip>&port=<port>&token=<ott>`
+    (`host` = first non-internal IPv4, `port` = the API port).
+  - Hosted: `sarviq://pair?url=<public-base-url>&token=<ott>` — used when
+    the server is started with `SARVIQ_PUBLIC_URL` set (see §9). The phone
+    then pairs over the internet instead of the LAN. The pairing responses
+    also carry `mode: 'lan' | 'hosted'` and a human `serverLabel` so the
+    web UI can show which network the QR encodes.
 - The OTT is 128 bits of `crypto.randomBytes` (hex), **single-use**, expires
   in 5 minutes; at most 5 pending OTTs exist at once.
 - `exchange` is rate-limited: 10 attempts per IP per 10 minutes → HTTP 429.
@@ -175,3 +181,86 @@ payloads are never logged.
 - There is no conversation-history endpoint yet; the app should keep its
   own local chat history (the platform stores sessions internally without
   a clean REST read path).
+
+## 9. Hosted mode — pair over the internet
+
+When Sarviq runs on a hosted machine (VPS, home server) instead of the PC
+beside you, the companion app can still pair — over the internet, not the
+LAN.
+
+**Server setup**
+
+1. Put the API behind a reverse proxy that terminates TLS (the device
+   token is a bearer credential — it must never travel as plain HTTP).
+   Example nginx config (cert via `certbot --nginx -d sarviq.example.com`):
+
+```nginx
+server {
+    listen 443 ssl;
+    server_name sarviq.example.com;
+
+    ssl_certificate     /etc/letsencrypt/live/sarviq.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/sarviq.example.com/privkey.pem;
+
+    # The API listens on 127.0.0.1:4000 by default.
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+
+        # WebSocket upgrades: the companion push channel at
+        # /api/companion/ws (and remote-phone at /api/phone/ws).
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+        proxy_set_header X-Forwarded-Host $host;
+
+        # Long-lived push sockets.
+        proxy_read_timeout 3600s;
+    }
+}
+```
+
+2. Start the API with the public URL so pairing QRs encode it:
+
+```
+SARVIQ_PUBLIC_URL=https://sarviq.example.com bun src/index.ts
+```
+
+   (Trailing slashes are stripped; anything that is not an `http(s)://`
+   URL with a host is ignored with a warning and pairing stays LAN-only.)
+
+**What changes**
+
+- `POST /api/companion/pairing/code` and `GET /api/companion/pairing/qr`
+  return the hosted QR flavor
+  (`sarviq://pair?url=<public-url>&token=<ott>`) with
+  `mode: 'hosted'` and `serverLabel: '<public-url>'`. Without
+  `SARVIQ_PUBLIC_URL`, responses are exactly as before (`mode: 'lan'`).
+- The pairing handshake is otherwise identical — OTT single-use, exchange
+  for a device token, Bearer auth on every route — because it is plain
+  HTTPS; there are no LAN-only assumptions in the pairing or device code
+  paths.
+- The app connects its push socket as
+  `wss://sarviq.example.com/api/companion/ws?token=<deviceToken>` (https
+  upgrades to wss automatically). The server honors `X-Forwarded-Proto` /
+  `X-Forwarded-Host` (`trust proxy` is enabled) so scheme/host-dependent
+  behavior stays correct behind the proxy.
+- The web UI (Workspace → Devices) shows which network the QR encodes and
+  hints at `SARVIQ_PUBLIC_URL` when in LAN mode.
+
+**Security notes for hosted mode**
+
+- TLS is mandatory, not optional: without it, device tokens, approvals
+  and chat content travel in cleartext across the internet. The server
+  logs a warning if `SARVIQ_PUBLIC_URL` is plain `http`.
+- The QR / 6-digit code is still a short-lived secret (5-minute OTT):
+  treat it like a password — only scan/type it into your own phone. In
+  hosted mode the "physical proximity" assumption of LAN pairing is
+  weaker (a code could be relayed by message), so prefer the QR scan and
+  revoke unknown devices from Workspace → Devices.
+- Pairing and WS auth failures are IP rate-limited and audit-logged
+  (`companion.*`); the limiter keys off `X-Forwarded-For` behind a proxy.

@@ -6,11 +6,14 @@ import { join } from 'node:path';
 import http from 'node:http';
 import express from 'express';
 import type { AddressInfo } from 'node:net';
-import { beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 import { CompanionHub, CompanionStore, type CompanionSocket } from '../src/companion.js';
 import {
+  buildHostedQrPayload,
+  buildPairingPayload,
   buildQrPayload,
   getLanIp,
+  pairingMode,
   registerCompanionRoutes,
   type ApprovalView,
   type CompanionRouteDeps,
@@ -167,6 +170,37 @@ describe('QR payload', () => {
 
   it('getLanIp returns an IPv4 address', () => {
     expect(getLanIp()).toMatch(/^\d{1,3}(\.\d{1,3}){3}$/);
+  });
+});
+
+describe('QR payload flavors (LAN vs hosted)', () => {
+  it('buildHostedQrPayload encodes the public URL', () => {
+    expect(buildHostedQrPayload('https://sarviq.example.com', 'a'.repeat(32))).toBe(
+      `sarviq://pair?url=https%3A%2F%2Fsarviq.example.com&token=${'a'.repeat(32)}`,
+    );
+  });
+
+  it('pairingMode is hosted when publicBaseUrl is set, lan otherwise', () => {
+    expect(pairingMode({ publicBaseUrl: 'https://x.example.com' })).toBe('hosted');
+    expect(pairingMode({})).toBe('lan');
+    expect(pairingMode({ publicBaseUrl: '' })).toBe('lan');
+  });
+
+  it('buildPairingPayload selects the hosted flavor and label', () => {
+    const p = buildPairingPayload(
+      { publicBaseUrl: 'https://sarviq.example.com', lanIp: '192.168.1.10', port: 4567 },
+      'b'.repeat(32),
+    );
+    expect(p.mode).toBe('hosted');
+    expect(p.qrPayload).toBe(`sarviq://pair?url=https%3A%2F%2Fsarviq.example.com&token=${'b'.repeat(32)}`);
+    expect(p.serverLabel).toBe('https://sarviq.example.com');
+  });
+
+  it('buildPairingPayload falls back to the LAN flavor', () => {
+    const p = buildPairingPayload({ lanIp: '192.168.1.10', port: 4567 }, 'b'.repeat(32));
+    expect(p.mode).toBe('lan');
+    expect(p.qrPayload).toBe(`sarviq://pair?host=192.168.1.10&port=4567&token=${'b'.repeat(32)}`);
+    expect(p.serverLabel).toBe('192.168.1.10:4567');
   });
 });
 
@@ -771,5 +805,87 @@ describe('companion REST routes', () => {
       await chatCtx.close();
       await new Promise<void>((resolve, reject) => chatServer.close((e) => (e ? reject(e) : resolve())));
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hosted mode: SARVIQ_PUBLIC_URL pairing over the internet
+// ---------------------------------------------------------------------------
+
+describe('companion hosted mode (publicBaseUrl)', () => {
+  let ctx: RouteTestCtx;
+  const PUBLIC = 'https://sarviq.example.com';
+
+  beforeEach(async () => {
+    ctx = await makeRouteCtx({ publicBaseUrl: PUBLIC });
+  });
+
+  afterEach(async () => {
+    await ctx.close();
+  });
+
+  const post = (path: string, body?: unknown, headers: Record<string, string> = {}) =>
+    fetch(`${ctx.base}${path}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...headers },
+      body: body === undefined ? undefined : JSON.stringify(body),
+    });
+  const get = (path: string, headers: Record<string, string> = {}) => fetch(`${ctx.base}${path}`, { headers });
+
+  it('pairing/code and pairing/qr encode the public URL with mode=hosted', async () => {
+    const codeRes = await post('/api/companion/pairing/code');
+    expect(codeRes.status).toBe(200);
+    const code = (await codeRes.json()) as {
+      ott: string;
+      qrPayload: string;
+      expiresAt: number;
+      mode: string;
+      serverLabel: string;
+    };
+    expect(code.mode).toBe('hosted');
+    expect(code.serverLabel).toBe(PUBLIC);
+    expect(code.qrPayload).toBe(`sarviq://pair?url=${encodeURIComponent(PUBLIC)}&token=${code.ott}`);
+    expect(code.qrPayload).not.toContain('host=');
+
+    const qrRes = await get('/api/companion/pairing/qr');
+    expect(qrRes.status).toBe(200);
+    const qr = (await qrRes.json()) as { qrPayload: string; mode: string; serverLabel: string };
+    expect(qr.mode).toBe('hosted');
+    expect(qr.qrPayload.startsWith('sarviq://pair?url=')).toBe(true);
+  });
+
+  it('full pair → exchange → authed API flow works with no LAN assumptions', async () => {
+    const codeRes = await post('/api/companion/pairing/code');
+    const { ott } = (await codeRes.json()) as { ott: string };
+    const ex = await post('/api/companion/pairing/exchange', { ott, deviceName: 'Remote Pixel' });
+    expect(ex.status).toBe(200);
+    const { deviceToken } = (await ex.json()) as { deviceToken: string };
+    const status = await get('/api/companion/status', ctx.authHeader(deviceToken));
+    expect(status.status).toBe(200);
+    expect(((await status.json()) as { ok: boolean }).ok).toBe(true);
+  });
+
+  it('pairing endpoints honor X-Forwarded-For / X-Forwarded-Proto behind a proxy', async () => {
+    const fwd = { 'X-Forwarded-For': '203.0.113.9', 'X-Forwarded-Proto': 'https' };
+    const r = await post('/api/companion/pairing/code', undefined, fwd);
+    expect(r.status).toBe(200);
+    // Rate limiting keys off the forwarded client IP, not the proxy's.
+    for (let i = 0; i < 9; i++) {
+      expect((await post('/api/companion/pairing/code', undefined, fwd)).status).toBe(200);
+    }
+    const limited = await post('/api/companion/pairing/code', undefined, fwd);
+    expect(limited.status).toBe(429);
+    expect(
+      ctx.audits.some(
+        (a) =>
+          a.action === 'companion.pair_rate_limited' &&
+          (a.fields.detail as Record<string, unknown>)?.ip === '203.0.113.9',
+      ),
+    ).toBe(true);
+    // A different client IP is unaffected.
+    const other = await post('/api/companion/pairing/code', undefined, {
+      'X-Forwarded-For': '203.0.113.10',
+    });
+    expect(other.status).toBe(200);
   });
 });

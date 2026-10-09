@@ -14,10 +14,39 @@ export interface AppConfig {
   skillsDir: string;
   workspaceDir: string;
   webOutDir: string;
+  /**
+   * Public base URL for hosted deployments, from SARVIQ_PUBLIC_URL
+   * (e.g. "https://sarviq.example.com"). When set, the companion app's
+   * pairing QR encodes this URL so phones can pair over the internet
+   * instead of the LAN. When unset, pairing stays LAN-only (zero-config).
+   */
+  publicBaseUrl?: string;
 }
 
 function resolveDir(envValue: string | undefined, fallback: string): string {
   return envValue ? path.resolve(envValue) : fallback;
+}
+
+/**
+ * Normalize SARVIQ_PUBLIC_URL: trim, drop trailing slashes, require an
+ * http(s) scheme and a non-empty host. Returns undefined (with a warning)
+ * for anything else — pairing then stays LAN-only.
+ */
+export function parsePublicBaseUrl(raw: string | undefined): string | undefined {
+  if (!raw || !raw.trim()) return undefined;
+  const v = raw.trim().replace(/\/+$/, '');
+  const m = /^(https?):\/\/([^/\s]+)(\/\S*)?$/i.exec(v);
+  if (!m) {
+    console.warn(`[config] ignoring invalid SARVIQ_PUBLIC_URL — expected like "https://sarviq.example.com"`);
+    return undefined;
+  }
+  const scheme = m[1].toLowerCase();
+  if (scheme !== 'https') {
+    console.warn(
+      '[config] SARVIQ_PUBLIC_URL is not https — companion device tokens would travel in cleartext. Use https in production.',
+    );
+  }
+  return `${scheme}://${m[2].toLowerCase()}${m[3] ?? ''}`;
 }
 
 /**
@@ -54,5 +83,6 @@ export function loadConfig(): AppConfig {
     workspaceDir: path.join(dataDir, 'workspace'),
     // ../web/out relative to apps/api (src/ and dist/ are both one level deep).
     webOutDir: path.resolve(SRC_DIR, '../../web/out'),
+    publicBaseUrl: parsePublicBaseUrl(process.env.SARVIQ_PUBLIC_URL),
   };
 }

@@ -65,6 +65,14 @@ interface PairingState {
   qrPayload: string;
   ott?: string;
   expiresAt?: number;
+  mode?: 'lan' | 'hosted';
+  serverLabel?: string;
+}
+
+/** "QR encodes: WiFi (192.168.1.5:4000)" / "QR encodes: internet (https://…)". */
+export function pairingModeLabel(mode: 'lan' | 'hosted' | undefined, serverLabel?: string): string {
+  const where = serverLabel ? ` (${serverLabel})` : '';
+  return mode === 'hosted' ? `QR encodes: internet${where}` : `QR encodes: WiFi LAN${where}`;
 }
 
 const POLL_MS = 15000;
@@ -105,7 +113,7 @@ export default function DevicesPanel() {
   const loadPairing = useCallback(async () => {
     try {
       const r = await getCompanionQr();
-      setPairing({ qrPayload: r.qrPayload });
+      setPairing({ qrPayload: r.qrPayload, mode: r.mode ?? 'lan', serverLabel: r.serverLabel });
       setUnavailable(false);
       setError(null);
     } catch (e) {
@@ -149,7 +157,13 @@ export default function DevicesPanel() {
     setBusy(true);
     try {
       const r = await requestCompanionCode();
-      setPairing({ qrPayload: r.qrPayload, ott: r.ott, expiresAt: normalizeTs(r.expiresAt) });
+      setPairing({
+        qrPayload: r.qrPayload,
+        ott: r.ott,
+        expiresAt: normalizeTs(r.expiresAt),
+        mode: r.mode ?? 'lan',
+        serverLabel: r.serverLabel,
+      });
       setError(null);
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -269,6 +283,23 @@ export default function DevicesPanel() {
             <h2 id="pair-phone-heading" style={{ marginTop: 0 }}>
               Pair a phone
             </h2>
+            {pairing && (
+              <p className="muted" style={{ margin: '0 0 12px' }}>
+                <span className="chip" title="Which network this QR code pairs over">
+                  {pairingModeLabel(pairing.mode, pairing.serverLabel)}
+                </span>{' '}
+                {pairing.mode === 'hosted' ? (
+                  <>Phones can pair over the internet — no WiFi needed.</>
+                ) : (
+                  <>
+                    Phones pair over your local WiFi. To pair over the internet
+                    instead, set <code className="mono">SARVIQ_PUBLIC_URL</code>{' '}
+                    (e.g. <code className="mono">https://sarviq.example.com</code>) on
+                    the server and tap Refresh.
+                  </>
+                )}
+              </p>
+            )}
             {pairing ? (
               <div className="phone-pairing">
                 <div

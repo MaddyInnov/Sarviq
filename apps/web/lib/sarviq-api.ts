@@ -317,6 +317,10 @@ export interface CompanionDevice {
 export interface CompanionQr {
   ok: boolean;
   qrPayload: string;
+  /** 'lan' (QR encodes host:port) or 'hosted' (QR encodes SARVIQ_PUBLIC_URL). */
+  mode?: 'lan' | 'hosted';
+  /** Human label for the server the QR points at. */
+  serverLabel?: string;
 }
 
 export interface CompanionCode {
@@ -324,6 +328,10 @@ export interface CompanionCode {
   ott: string;
   qrPayload: string;
   expiresAt: number;
+  /** 'lan' (QR encodes host:port) or 'hosted' (QR encodes SARVIQ_PUBLIC_URL). */
+  mode?: 'lan' | 'hosted';
+  /** Human label for the server the QR points at. */
+  serverLabel?: string;
 }
 
 /**

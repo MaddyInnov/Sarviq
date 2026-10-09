@@ -573,6 +573,14 @@ async function boot(): Promise<void> {
 
   // 4. HTTP layer. API routes first, then the frontend.
   const app = express();
+  // Trust one reverse-proxy hop (nginx in hosted deployments): express then
+  // honors X-Forwarded-Proto / X-Forwarded-Host / X-Forwarded-For for
+  // req.protocol, req.hostname and req.ip, so the companion pairing and
+  // WebSocket upgrade paths behave correctly behind TLS termination.
+  // Direct (non-proxied) clients can still reach the server; the companion
+  // and phone pairing rate limiters read X-Forwarded-For themselves and are
+  // unaffected by this setting either way.
+  app.set('trust proxy', 1);
   // MVP: allow any origin — the Tauri webview calls the sidecar API
   // cross-origin (http://127.0.0.1:4567). Revisit with an allowlist when
   // auth/multi-user ships.

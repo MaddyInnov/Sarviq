@@ -107,3 +107,25 @@ picker (`GET /api/bots`) or a settings field once the server exposes one.
 - `…/ui/` screens: `PairingScreen`, `HomeScreen`, `ApprovalsScreen`, `RunsScreen`,
   `ChatScreen`, `ActivityBriefingScreens`, `MoreScreen`, `Common` (shared scaffold), `Theme`.
 - `app/src/main/AndroidManifest.xml` — CAMERA + INTERNET, cleartext for LAN HTTP.
+
+## Hosted mode — pair over the internet
+
+When Sarviq runs on a hosted machine (VPS, home server), the app pairs over
+the internet instead of WiFi:
+
+1. The server owner puts the API behind a reverse proxy with TLS and starts
+   it with `SARVIQ_PUBLIC_URL=https://sarviq.example.com` (see
+   `apps/api/src/companion-PROTOCOL.md` §9 for the nginx config).
+2. In Workspace → Devices the QR then encodes
+   `sarviq://pair?url=https://sarviq.example.com&token=<ott>` — scan it as
+   usual, and the app connects to the public URL (REST over https, push
+   socket over wss).
+3. No QR handy? Tap **Enter details manually** → **Hosted**, type the server
+   URL (`https://…`) and the pairing code shown in Workspace → Devices
+   (*Generate pairing code*), then pair.
+
+The Home screen's connection line shows which server the app is attached to
+(URL in hosted mode, `host:port` on LAN). Pairing, device tokens and the push
+channel work identically in both modes — only the transport address changes.
+Never pair with a server you don't trust: a paired phone can approve tool
+calls and drive chat sessions on that Sarviq instance.
