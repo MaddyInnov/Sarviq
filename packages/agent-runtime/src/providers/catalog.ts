@@ -23,13 +23,19 @@ export interface ProviderPreset {
   id: string;
   name: string;
   /** Wire protocol driver to use. */
-  api: 'openai-compatible' | 'anthropic';
+  api: 'openai-compatible' | 'anthropic' | 'ollama';
   /** Base URL of the chat-completions (or messages) API. Empty for BYO presets until the user configures it. */
   baseUrl: string;
   /** Env var holding the user's API key. */
   envKey: string;
   /** Bring-your-own: no pre-configured endpoint or credentials; the user points this at their own access. */
   byo?: boolean;
+  /**
+   * Local provider (Octop parity): runs on the user's own machine, no API
+   * key ever required. Skips the apiKey requirement in createProvider and
+   * reports `configured: true` in the provider list.
+   */
+  local?: boolean;
   /**
    * Subscription/CLI bridge: the API key is the user's own CLI login token,
    * loaded consent-gated from the CLI's credential file at request time
@@ -229,6 +235,8 @@ export const FREE_MODELS_ONLY_ENV_VAR = 'FREE_MODELS_ONLY';
  */
 export function isFreeModel(providerId: string, modelId: string): boolean {
   const preset = resolvePreset(providerId);
+  // Local providers (Ollama): on-machine inference, $0 per token — always free.
+  if (preset?.local) return true;
   if (preset?.models.some((m) => m.id === modelId && m.free === true)) return true;
   return modelId.endsWith(':free') || modelId.endsWith('-free');
 }

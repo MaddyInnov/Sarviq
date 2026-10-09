@@ -22,6 +22,7 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { Router } from 'express';
 import type { Request, Response } from 'express';
+import { KnowledgeIndex } from './knowledge.js';
 
 export interface Note {
   id: string;
@@ -140,8 +141,14 @@ export interface NotesDeps {
 export function registerNotesRoutes(router: Router, deps: NotesDeps): void {
   const store = deps.noteStore ?? new NoteStore(deps.dataDir);
 
-  router.get('/', (_req: Request, res: Response) => {
+  router.get('/', (req: Request, res: Response) => {
     try {
+      // Obsidian-style tag filter: GET /api/notes?tag=foo
+      const tag = typeof req.query.tag === 'string' ? req.query.tag : undefined;
+      if (tag && tag.trim()) {
+        res.json(new KnowledgeIndex(store).notesByTag(tag));
+        return;
+      }
       res.json(store.list());
     } catch (err) {
       res.status(500).json({ error: errMessage(err, 'failed to list notes') });

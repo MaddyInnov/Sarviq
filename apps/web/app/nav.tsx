@@ -80,10 +80,46 @@ const DESTS: Dest[] = [
   {
     href: '/workspace',
     label: 'Workspace',
-    match: (p) => p.startsWith('/workspace') || p.startsWith('/notes') || p.startsWith('/tasks'),
+    match: (p) =>
+      p.startsWith('/workspace') ||
+      p.startsWith('/notes') ||
+      p.startsWith('/tasks') ||
+      p.startsWith('/pages') ||
+      p.startsWith('/knowledge'), // content surfaces under Workspace
     icon: icon(
       <>
         <path d="M22 19a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5l2 3h9a2 2 0 0 1 2 2z" />
+      </>,
+    ),
+  },
+  {
+    href: '/activity',
+    label: 'Activity',
+    match: (p) => p.startsWith('/activity') || p.startsWith('/approvals') || p.startsWith('/audit'),
+    icon: icon(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />),
+  },
+];
+
+/**
+ * Secondary destinations: deliberately NOT top-level. The primary nav is
+ * exactly six destinations (Chat, Bots, Workflows, Marketplace, Workspace,
+ * Activity). Knowledge, Pages, Terminal and Teams live in the "More" menu
+ * (header) and the drawer's "More" section instead of the primary nav bar.
+ * Preferences moved to the settings menu.
+ */
+const MORE_DESTS: Dest[] = [
+  {
+    href: '/knowledge',
+    label: 'Knowledge',
+    match: (p) => p.startsWith('/knowledge'),
+    icon: icon(
+      <>
+        <circle cx="12" cy="12" r="2.5" />
+        <circle cx="5" cy="6" r="1.8" />
+        <circle cx="19" cy="6" r="1.8" />
+        <circle cx="5" cy="18" r="1.8" />
+        <circle cx="19" cy="18" r="1.8" />
+        <path d="M6.5 7.2 10 10.5M17.5 7.2 14 10.5M6.5 16.8 10 13.5M17.5 16.8 14 13.5" />
       </>,
     ),
   },
@@ -99,27 +135,35 @@ const DESTS: Dest[] = [
     ),
   },
   {
-    href: '/preferences',
-    label: 'Preferences',
-    match: (p) => p.startsWith('/preferences'),
+    href: '/terminal',
+    label: 'Terminal',
+    match: (p) => p.startsWith('/terminal'),
     icon: icon(
       <>
-        <circle cx="12" cy="12" r="3" />
-        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 1 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 1 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 1 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 1 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
+        <path d="M4 17l6-6-6-6" />
+        <path d="M12 19h8" />
       </>,
     ),
   },
   {
-    href: '/activity',
-    label: 'Activity',
-    match: (p) => p.startsWith('/activity') || p.startsWith('/approvals') || p.startsWith('/audit'),
-    icon: icon(<path d="M22 12h-4l-3 9L9 3l-3 9H2" />),
+    href: '/teams',
+    label: 'Teams',
+    match: (p) => p.startsWith('/teams'),
+    icon: icon(
+      <>
+        <circle cx="9" cy="8" r="3.2" />
+        <circle cx="17" cy="10" r="2.4" />
+        <path d="M3.5 19c.6-3 2.8-4.5 5.5-4.5s4.9 1.5 5.5 4.5" />
+        <path d="M15.5 15.4c2.3.3 4 1.6 4.5 3.6" />
+      </>,
+    ),
   },
 ];
 
 const SETTINGS_LINKS = [
   { href: '/accounts', label: 'Accounts & API keys' },
   { href: '/providers', label: 'Providers & models' },
+  { href: '/preferences', label: 'Preferences' },
   { href: '/more', label: 'Modules hub' },
 ];
 
@@ -149,9 +193,67 @@ function ModeToggle({ mode, onChange }: { mode: UxMode; onChange: (m: UxMode) =>
   );
 }
 
+/** Layout toggle: Classic (full chrome) vs Minimal (distraction-free, Octop parity). */
+function LayoutToggle() {
+  const [layout, setLayout] = useState<'classic' | 'minimal'>('classic');
+  useEffect(() => {
+    try {
+      const l = localStorage.getItem('mvp:layout');
+      setLayout(l === 'minimal' ? 'minimal' : 'classic');
+    } catch { /* ignore */ }
+  }, []);
+  const toggle = () => {
+    const next = layout === 'classic' ? 'minimal' : 'classic';
+    setLayout(next);
+    try {
+      localStorage.setItem('mvp:layout', next);
+    } catch { /* ignore */ }
+    document.documentElement.dataset.layout = next;
+  };
+  return (
+    <button
+      className="theme-btn"
+      onClick={toggle}
+      aria-pressed={layout === 'minimal'}
+      title={layout === 'classic' ? 'Switch to Minimal layout' : 'Switch to Classic layout'}
+      aria-label={layout === 'classic' ? 'Switch to Minimal layout' : 'Switch to Classic layout'}
+    >
+      <span aria-hidden="true">{layout === 'classic' ? '◧' : '◨'}</span>
+      <span className="small">{layout === 'classic' ? 'Classic' : 'Minimal'}</span>
+    </button>
+  );
+}
+
+/** 3D toggle: enable/disable the tasteful 3D hero (accessibility + low-end devices). */
+function ThreeDToggle() {  const [on, setOn] = useState(true);
+  useEffect(() => {
+    try {
+      setOn(localStorage.getItem('mvp:3d-enabled') !== '0');
+    } catch { /* ignore */ }
+  }, []);
+  const toggle = () => {
+    const next = !on;
+    setOn(next);
+    try {
+      localStorage.setItem('mvp:3d-enabled', next ? '1' : '0');
+    } catch { /* ignore */ }
+  };
+  return (
+    <button
+      className={`theme-btn${on ? '' : ' off'}`}
+      onClick={toggle}
+      aria-pressed={on}
+      title={on ? 'Disable 3D effects' : 'Enable 3D effects'}
+      aria-label={on ? 'Disable 3D effects' : 'Enable 3D effects'}
+    >
+      <span aria-hidden="true">{on ? '🧊' : '📦'}</span>
+      <span className="small">3D</span>
+    </button>
+  );
+}
+
 /** Theme chooser: Dark / Light / System + signature clay themes. */
-function ThemeSwitcher() {
-  const [choice, setChoice] = useTheme();
+function ThemeSwitcher() {  const [choice, setChoice] = useTheme();
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const active = THEMES.find((t) => t.id === choice) ?? THEMES[0];
@@ -228,6 +330,8 @@ export default function Nav() {
   const [drawerOpen, setDrawerOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
   const settingsRef = useRef<HTMLDivElement>(null);
+  const [moreOpen, setMoreOpen] = useState(false);
+  const moreRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
     setApiBase(getApiBase() || '(same origin)');
@@ -254,6 +358,24 @@ export default function Nav() {
       document.removeEventListener('keydown', onKey);
     };
   }, [settingsOpen]);
+  // Close the "More" menu on outside click / Escape.
+  useEffect(() => {
+    if (!moreOpen) return;
+    const onDown = (e: MouseEvent) => {
+      if (moreRef.current && !moreRef.current.contains(e.target as Node)) {
+        setMoreOpen(false);
+      }
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setMoreOpen(false);
+    };
+    document.addEventListener('mousedown', onDown);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onDown);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [moreOpen]);
 
   return (
     <>
@@ -262,7 +384,7 @@ export default function Nav() {
         {DESTS.map((d) => (
           <Link key={d.href} href={d.href} className={`navlink${d.match(pathname) ? ' active' : ''}`}>
             <span className="navlink-icon">{d.icon}</span>
-            {d.label}
+            <span className="navlink-label">{d.label}</span>
           </Link>
         ))}
       </nav>
@@ -284,9 +406,37 @@ export default function Nav() {
         api: {apiBase}
       </span>
       <ThemeSwitcher />
+      <ThreeDToggle />
+      <LayoutToggle />
       <ModeToggle mode={mode} onChange={setMode} />
 
-      {/* Settings menu (accounts, providers, modules hub) */}
+      {/* Secondary destinations: not top-level, reachable via "More" */}
+      <div className="settings-wrap" ref={moreRef}>
+        <button
+          className="icon-btn"
+          aria-label="More destinations"
+          aria-expanded={moreOpen}
+          onClick={() => setMoreOpen((v) => !v)}
+          title="More: Knowledge, Pages, Terminal, Teams"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+            <circle cx="5" cy="12" r="1.8" />
+            <circle cx="12" cy="12" r="1.8" />
+            <circle cx="19" cy="12" r="1.8" />
+          </svg>
+        </button>
+        {moreOpen && (
+          <div className="settings-menu" role="menu" aria-label="More destinations">
+            {MORE_DESTS.map((d) => (
+              <Link key={d.href} href={d.href} role="menuitem" onClick={() => setMoreOpen(false)}>
+                {d.label}
+              </Link>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Settings menu (accounts, providers, preferences, modules hub) */}
       <div className="settings-wrap" ref={settingsRef}>
         <button
           className="icon-btn"
@@ -332,10 +482,22 @@ export default function Nav() {
               onClick={() => setDrawerOpen(false)}
             >
               <span className="navlink-icon">{d.icon}</span>
-              {d.label}
+              <span className="navlink-label">{d.label}</span>
             </Link>
           ))}
         </nav>
+        <div className="drawer-section">More</div>
+        {MORE_DESTS.map((d) => (
+          <Link
+            key={d.href}
+            href={d.href}
+            className={`drawer-link${d.match(pathname) ? ' active' : ''}`}
+            onClick={() => setDrawerOpen(false)}
+          >
+            <span className="navlink-icon">{d.icon}</span>
+            <span className="navlink-label">{d.label}</span>
+          </Link>
+        ))}
         <div className="drawer-section">Settings</div>
         {SETTINGS_LINKS.map((s) => (
           <Link key={s.href} href={s.href} className="drawer-link" onClick={() => setDrawerOpen(false)}>

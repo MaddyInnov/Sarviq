@@ -236,6 +236,7 @@ async function defaultBuildRuntime(): Promise<ChatCliRuntime> {
     skillsDir: path.join(seedDir, 'skills'),
     governanceAdapter,
     getBotConfig: (id) => botsById.get(id),
+    workspaceDir: config.workspaceDir,
     audit: (action, fields) => governance.audit(action, fields),
   });
 

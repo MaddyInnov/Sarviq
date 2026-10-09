@@ -11,6 +11,7 @@ const { DatabaseSync } = process.getBuiltinModule(
 ) as typeof import('node:sqlite');
 type Database = InstanceType<typeof DatabaseSync>;
 import { DENYLIST_COMMAND_RE } from './default-policy.js';
+import { checkHardFloor, type HardFloorConfig } from './hard-floors.js';
 import type {
   ActionClass,
   ApprovalRecord,
@@ -32,6 +33,8 @@ export interface GatewayOptions {
   policy: Policy;
   /** Fallback timeout for awaitDecision(). */
   approvalTimeoutMs?: number;
+  /** Hard floors config. Defaults to { enabled: true }. */
+  hardFloors?: HardFloorConfig;
 }
 
 export type PreHook = (
@@ -65,6 +68,7 @@ interface ApprovalRow {
   decided_at: number | null;
   decided_by: string | null;
   note: string | null;
+  provenance: string | null;
 }
 
 /** Raw DB row shape for the audit_log table. */
@@ -91,7 +95,8 @@ CREATE TABLE IF NOT EXISTS approvals (
   status TEXT NOT NULL,
   decided_at INTEGER,
   decided_by TEXT,
-  note TEXT
+  note TEXT,
+  provenance TEXT
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -104,6 +109,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
   detail TEXT
 );
 CREATE INDEX IF NOT EXISTS idx_approvals_status ON approvals(status);
+CREATE INDEX IF NOT EXISTS idx_approvals_status_ts ON approvals(status, ts DESC);
 CREATE INDEX IF NOT EXISTS idx_audit_ts ON audit_log(ts);
 `;
 
@@ -138,6 +144,7 @@ export class GovernanceGateway {
   private readonly db: Database;
   private readonly policy: Policy;
   private readonly approvalTimeoutMs: number;
+  private readonly hardFloorConfig: HardFloorConfig;
   private readonly waiters = new Map<string, Waiter>();
   private readonly preHooks: PreHook[] = [];
   private readonly postHooks: PostHook[] = [];
@@ -145,8 +152,15 @@ export class GovernanceGateway {
   constructor(options: GatewayOptions) {
     this.policy = options.policy;
     this.approvalTimeoutMs = options.approvalTimeoutMs ?? DEFAULT_APPROVAL_TIMEOUT_MS;
+    this.hardFloorConfig = options.hardFloors ?? { enabled: true };
     this.db = new DatabaseSync(options.dbPath);
     this.db.exec(SCHEMA);
+    // Migration: provenance column for older databases.
+    try {
+      this.db.exec('ALTER TABLE approvals ADD COLUMN provenance TEXT');
+    } catch {
+      // Column already exists.
+    }
   }
 
   /** Release the SQLite connection. */
@@ -207,6 +221,50 @@ export class GovernanceGateway {
     policy: Policy,
   ): Promise<EvaluateResult> {
     const actionClass = this.classify(toolName);
+
+    // Hard floors FIRST — before denylist, policy rules, always-allow,
+    // learned preferences, and reviewer. No mode can bypass these.
+    //
+    // TWO TIERS (see hard-floors.ts):
+    // - 'catastrophic' → UNCONDITIONAL DENIAL. Never executable, never
+    //   approvable: no approval record is minted, so there is nothing a
+    //   human can click to approve. A human approval click is not a
+    //   sufficient safeguard for instant-destruction commands.
+    // - 'destructive' → human approval required (approval minted below).
+    const floorHit = checkHardFloor(toolName, args, this.hardFloorConfig);
+    if (floorHit && floorHit.tier === 'catastrophic') {
+      this.audit('tool.evaluate', {
+        actor: ctx.actor,
+        sessionId: ctx.sessionId,
+        toolName,
+        decision: 'deny',
+        detail: {
+          reason: floorHit.reason,
+          actionClass,
+          catastrophic: true,
+          patternId: floorHit.patternId,
+          args: redactSecrets(args),
+        },
+      });
+      return { effect: 'deny' };
+    }
+    if (floorHit) {
+      const approvalId = this.requestApproval(toolName, args, ctx, { provenance: 'hard-floor-escalated' });
+      this.audit('tool.evaluate', {
+        actor: ctx.actor,
+        sessionId: ctx.sessionId,
+        toolName,
+        decision: 'require-approval',
+        detail: {
+          reason: floorHit.reason,
+          actionClass,
+          provenance: 'hard-floor-escalated',
+          patternId: floorHit.patternId,
+          args: redactSecrets(args),
+        },
+      });
+      return { effect: 'require-approval', approvalId };
+    }
 
     // Hard denylist on run_command args — unconditional deny, no rule needed.
     const command = args['command'];
@@ -275,6 +333,7 @@ export class GovernanceGateway {
     toolName: string,
     args: Record<string, unknown>,
     ctx: EvalContext,
+    opts: { provenance?: string } = {},
   ): string {
     const record: ApprovalRecord = {
       id: randomUUID(),
@@ -285,12 +344,13 @@ export class GovernanceGateway {
       toolName,
       args: redactSecrets(args),
       status: 'pending',
+      provenance: opts.provenance,
     };
     this.db
       .prepare(
         `INSERT INTO approvals
-           (id, ts, session_id, bot_id, actor, tool_name, args_json, status)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+           (id, ts, session_id, bot_id, actor, tool_name, args_json, status, provenance)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .run(
         record.id,
@@ -301,6 +361,7 @@ export class GovernanceGateway {
         record.toolName,
         JSON.stringify(record.args),
         record.status,
+        record.provenance ?? null,
       );
     return record.id;
   }
@@ -543,6 +604,7 @@ export class GovernanceGateway {
       decidedAt: row.decided_at ?? undefined,
       decidedBy: row.decided_by ?? undefined,
       note: row.note ?? undefined,
+      provenance: row.provenance ?? undefined,
     };
   }
 }

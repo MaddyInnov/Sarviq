@@ -6,10 +6,12 @@ import type { Policy, PolicyRule } from './types.js';
  * Hard denylist applied to `run_command` args.command BEFORE any policy rule.
  * A match is an unconditional 'deny' and is audited.
  *
- * Matches: `rm -rf /` (exact root wipe), mkfs invocations, and shell fork
- * bombs like `:(){ :|:& };:` or `(){ ... }`.
+ * Matches: `rm -rf /` (exact root wipe), mkfs invocations, `dd` writing to a
+ * raw block device (`of=/dev/...`), disk wipe/partition tools
+ * (shred/wipefs/fdisk/parted/…), and shell fork bombs like
+ * `:(){ :|:& };:` or `(){ ... }`.
  */
-export const DENYLIST_COMMAND_RE = /\brm\s+-rf\s+\/$|mkfs|:?\(\)\s*\{/;
+export const DENYLIST_COMMAND_RE = /\brm\s+-rf\s+\/$|mkfs|\bdd\b[^;&|]*\bof=\/dev\/|\b(shred|wipefs|fdisk|sfdisk|gdisk|sgdisk|cgdisk|parted)\b|:?\(\)\s*\{/;
 
 /**
  * Default policy for the gateway: deny-by-default.

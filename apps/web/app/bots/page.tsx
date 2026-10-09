@@ -2,8 +2,8 @@
 'use client';
 
 import { useCallback, useEffect, useState } from 'react';
-import { getBots, updateBotPolicy } from '../../lib/api';
-import type { BotConfig, BotPolicyEffect, BotPolicyRule } from '../../lib/api';
+import { getBots, getPersonas, setBotPersona, setBotWorkspace, updateBotPolicy } from '../../lib/api';
+import type { BotConfig, BotPolicyEffect, BotPolicyRule, PersonaInfo } from '../../lib/api';
 
 const EFFECTS: BotPolicyEffect[] = ['allow', 'deny', 'require-approval'];
 
@@ -167,8 +167,134 @@ function RulesEditor({
   );
 }
 
-export default function BotsPage() {
-  const [bots, setBots] = useState<BotConfig[]>([]);
+function PersonaPicker({
+  bot,
+  onSaved,
+}: {
+  bot: BotConfig;
+  onSaved: (botId: string, persona: string | null) => void;
+}) {
+  const [personas, setPersonas] = useState<PersonaInfo[]>([]);
+  const [selected, setSelected] = useState<string>(bot.persona ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setSelected(bot.persona ?? '');
+    setError('');
+  }, [bot.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  useEffect(() => {
+    getPersonas().then((r) => setPersonas(r.personas)).catch(() => undefined);
+  }, []);
+
+  const active = personas.find((p) => p.type === selected);
+
+  const save = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await setBotPersona(bot.id, selected || null);
+      onSaved(bot.id, res.persona);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Personality</h3>
+      <p className="small muted">
+        Give this bot an MBTI persona. It shapes tone and working style — the bot&apos;s own
+        instructions always come first.
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <select
+          className="select"
+          value={selected}
+          onChange={(e) => setSelected(e.target.value)}
+          aria-label="MBTI persona"
+        >
+          <option value="">No persona</option>
+          {personas.map((p) => (
+            <option key={p.type} value={p.type}>
+              {p.type} — {p.name}
+            </option>
+          ))}
+        </select>
+        <button className="btn btn-primary btn-sm" disabled={saving} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save persona'}
+        </button>
+      </div>
+      {active && (
+        <p className="small muted" style={{ marginTop: 8 }}>
+          <strong>{active.name}:</strong> {active.traits.join(' · ')} — {active.communicationStyle}
+        </p>
+      )}
+      {error && <div className="error-box" style={{ marginTop: 8 }}>{error}</div>}
+    </div>
+  );
+}
+
+function WorkspacePicker({
+  bot,
+  onSaved,
+}: {
+  bot: BotConfig;
+  onSaved: (botId: string, workspace: string | null) => void;
+}) {
+  const [value, setValue] = useState<string>(bot.workspace ?? '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+
+  useEffect(() => {
+    setValue(bot.workspace ?? '');
+    setError('');
+  }, [bot.id]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const save = async () => {
+    setSaving(true);
+    setError('');
+    try {
+      const res = await setBotWorkspace(bot.id, value.trim() || null);
+      onSaved(bot.id, res.workspace);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 16 }}>
+      <h3 style={{ marginTop: 0 }}>Workspace</h3>
+      <p className="small muted">
+        Give this bot its own workspace directory (Octop-style isolation) so two bots
+        working at once don&apos;t collide on files. Leave empty for the shared
+        workspace. Relative names resolve under the server data dir
+        (e.g. <code>coder</code>).
+      </p>
+      <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+        <input
+          className="input"
+          value={value}
+          onChange={(e) => setValue(e.target.value)}
+          placeholder="default (shared)"
+          aria-label="Bot workspace"
+          style={{ minWidth: 220 }}
+        />
+        <button className="btn btn-primary btn-sm" disabled={saving} onClick={() => void save()}>
+          {saving ? 'Saving…' : 'Save workspace'}
+        </button>
+      </div>
+      {error && <div className="error-box" style={{ marginTop: 8 }}>{error}</div>}
+    </div>
+  );
+}
+
+export default function BotsPage() {  const [bots, setBots] = useState<BotConfig[]>([]);
   const [selectedBotId, setSelectedBotId] = useState('');
   const [error, setError] = useState('');
 
@@ -189,6 +315,14 @@ export default function BotsPage() {
 
   const onSaved = (botId: string, rules: BotPolicyRule[]) => {
     setBots((prev) => prev.map((b) => (b.id === botId ? { ...b, policy: { rules } } : b)));
+  };
+
+  const onPersonaSaved = (botId: string, persona: string | null) => {
+    setBots((prev) => prev.map((b) => (b.id === botId ? { ...b, persona } : b)));
+  };
+
+  const onWorkspaceSaved = (botId: string, workspace: string | null) => {
+    setBots((prev) => prev.map((b) => (b.id === botId ? { ...b, workspace: workspace ?? undefined } : b)));
   };
 
   const selectedBot = bots.find((b) => b.id === selectedBotId);
@@ -222,7 +356,11 @@ export default function BotsPage() {
         </aside>
         <div className="chat-main">
           {selectedBot ? (
-            <RulesEditor key={selectedBot.id} bot={selectedBot} onSaved={onSaved} />
+            <>
+              <PersonaPicker key={`persona-${selectedBot.id}`} bot={selectedBot} onSaved={onPersonaSaved} />
+              <WorkspacePicker key={`workspace-${selectedBot.id}`} bot={selectedBot} onSaved={onWorkspaceSaved} />
+              <RulesEditor key={selectedBot.id} bot={selectedBot} onSaved={onSaved} />
+            </>
           ) : (
             <p className="muted">Select a bot to edit its policy.</p>
           )}

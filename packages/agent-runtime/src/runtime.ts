@@ -15,6 +15,7 @@ import type {
 import { addUsage, emptyUsage, withToolCalls } from './types.js';
 import type { AuditEntry, GovernanceDecision, GovernanceGateway } from './governance.js';
 import { createProvider } from './providers/factory.js';
+import { reviewToolCall } from './reviewer.js';
 import {
   assertModelAllowed,
   getDefaultModel,
@@ -27,6 +28,7 @@ import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
 import { routeModel } from './routing.js';
 import type { TaskType } from './routing.js';
+import { resolvePersona } from './personas.js';
 
 export interface AgentRuntimeOptions {
   dbPath: string;
@@ -103,6 +105,18 @@ export interface RunTurnOptions {
    * bot's configured sandboxMode for this turn only.
    */
   sandboxMode?: SandboxMode;
+  /**
+   * Persistent E2B sandbox ID (Dot environments). When set, `run_command`
+   * executes inside this persistent sandbox instead of a fresh ephemeral
+   * one, giving the agent a stable "own computer" across turns.
+   */
+  persistentSandboxId?: string;
+  /**
+   * Tiered-memory recall block ("What I remember"), injected into the system
+   * prompt when the host retrieved relevant atoms for this turn. Optional;
+   * the host computes it via TieredMemoryStore.recallForPrompt().
+   */
+  memoryContext?: string;
 }
 
 export interface PreviewToolInfo {
@@ -177,6 +191,14 @@ export class AgentRuntime {
   private readonly toolRegistry: Map<string, ToolDefinition>;
   private readonly defaultProviderId: string;
   private readonly onBeforeFileMutate?: AgentRuntimeOptions['onBeforeFileMutate'];
+  /** Provider instances cached per providerId (see resolveProvider). */
+  private readonly providerCache = new Map<string, LLMProvider>();
+  /**
+   * Circuit breaker: denial counts per session. When denials reach the
+   * threshold, auto-approve is disabled for that session (fail-safe).
+   */
+  private readonly denialCounts = new Map<string, number>();
+  private readonly trippedSessions = new Set<string>();
 
   constructor(opts: AgentRuntimeOptions) {
     this.store = new SessionStore(opts.dbPath, opts.sessionStoreOptions);
@@ -203,9 +225,21 @@ export class AgentRuntime {
   /**
    * Provider resolution point. Subclasses (and tests) may override this to
    * inject a provider without touching the runTurn signature.
+   *
+   * Providers are cached per providerId: createProvider() is pure
+   * construction (no I/O beyond the already-cached catalog), but caching
+   * avoids repeated allocation and any per-instance setup on hot paths.
+   * The demo mock provider is stateful (scripted cursor) and must NOT be
+   * shared across turns — it bypasses the cache.
    */
   protected resolveProvider(providerId: string): LLMProvider {
-    return createProvider(providerId);
+    if (providerId === 'demo') return createProvider(providerId);
+    let provider = this.providerCache.get(providerId);
+    if (!provider) {
+      provider = createProvider(providerId);
+      this.providerCache.set(providerId, provider);
+    }
+    return provider;
   }
 
   private audit(entry: Omit<AuditEntry, 'ts'>): void {
@@ -216,11 +250,21 @@ export class AgentRuntime {
     }
   }
 
-  private async buildSystemPrompt(bot: BotConfig): Promise<{ prompt: string; loadedSkills: string[] }> {
+  private async buildSystemPrompt(bot: BotConfig, memoryContext?: string): Promise<{ prompt: string; loadedSkills: string[] }> {
     // The untrusted-content floor rides along on every turn: the bot's own
     // prompt first, then the security instruction (it must hold regardless
     // of what skills or tool output say later).
     const parts: string[] = [bot.systemPrompt, '\n\n' + UNTRUSTED_CONTENT_INSTRUCTION];
+    // MBTI persona: shape tone/working style without replacing the bot's
+    // own instructions.
+    const persona = resolvePersona(bot.persona);
+    if (persona) {
+      parts.push(`\n\n# Persona: ${persona.name} (${persona.type})\n${persona.systemPromptAddendum}`);
+    }
+    // Tiered-memory recall ("What I remember"), injected by the host.
+    if (memoryContext && memoryContext.trim()) {
+      parts.push('\n\n' + memoryContext.trim());
+    }
     const loadedSkills: string[] = [];
     if (bot.skills.length > 0) {
       // Progressive disclosure: the prompt carries only name+description
@@ -295,9 +339,13 @@ export class AgentRuntime {
     };
 
     const sessionId = opts.sessionId ?? this.store.createSession(opts.bot.id);
-    const ctx: ToolContext = { sessionId, botId: opts.bot.id };
+    const ctx: ToolContext = {
+      sessionId,
+      botId: opts.bot.id,
+      persistentSandboxId: opts.persistentSandboxId,
+    };
 
-    const { prompt: systemPrompt } = await this.buildSystemPrompt(opts.bot);
+    const { prompt: systemPrompt } = await this.buildSystemPrompt(opts.bot, opts.memoryContext);
     const { tools } = this.resolveTools(opts.bot);
 
     const userMessage: ChatMessage = { role: 'user', content: opts.message };
@@ -431,26 +479,80 @@ export class AgentRuntime {
 
           let approvalId: string | undefined;
           if (decision === 'require-approval') {
+            // Circuit breaker: if this session tripped (too many denials),
+            // force manual approvals even when autoApprove was requested.
+            const circuitTripped = this.trippedSessions.has(sessionId);
+            const useAutoApprove = opts.autoApprove && !circuitTripped;
             // Session auto-approve (user explicitly enabled "auto-approve this
-            // session" in the UI): skip the approval card, audit the
-            // auto-decision, and execute. This is the "auto approve" mode —
-            // manual approve remains the default.
-            if (opts.autoApprove) {
-              this.audit({
-                type: 'tool.approval_auto_approved',
-                sessionId,
-                botId: ctx.botId,
-                call,
-                detail: { mode: 'session-auto-approve' },
-              });
-              await emit({ type: 'tool_call', call, approvalRequired: false });
+            // session" in the UI): the reviewer model vets the call instead
+            // of blindly allowing. YES → allow (audited as reviewer-approved).
+            // NO/skip → escalate to a human approval card. Manual approve
+            // remains the default.
+            if (useAutoApprove) {
+              const review = await reviewToolCall(provider, call, { signal: opts.signal });
+              if (review.verdict === 'yes') {
+                this.audit({
+                  type: 'tool.approval_auto_approved',
+                  sessionId,
+                  botId: ctx.botId,
+                  call,
+                  detail: { mode: 'reviewer-approved', reason: review.reason, model: review.model },
+                  provenance: 'reviewer',
+                });
+                await emit({ type: 'tool_call', call, approvalRequired: false });
+              } else {
+                // Escalate to human approval card.
+                this.audit({
+                  type: 'tool.approval_escalated',
+                  sessionId,
+                  botId: ctx.botId,
+                  call,
+                  detail: { reason: review.reason, from: 'reviewer' },
+                  provenance: 'reviewer',
+                });
+                approvalId = gatewayApprovalId ?? newApprovalId();
+                turnApprovalIds.push(approvalId);
+                this.audit({ type: 'tool.approval_requested', sessionId, botId: ctx.botId, call, detail: { approvalId, escalated: true }, provenance: 'reviewer' });
+                await emit({ type: 'approval_required', approvalId, call });
+                await emit({ type: 'tool_call', call, approvalRequired: true, approvalId });
+                let verdict: 'approved' | 'denied';
+                try {
+                  verdict = await this.awaitDecisionAbortable(approvalId, approvalTimeoutMs, opts.signal);
+                } catch {
+                  verdict = 'denied';
+                }
+                this.audit({
+                  type: 'tool.approval_decided',
+                  sessionId,
+                  botId: ctx.botId,
+                  call,
+                  detail: { approvalId, verdict },
+                  provenance: 'human',
+                });
+                this.recordDenial(sessionId, verdict, async (msg) => {
+                  await emit({ type: 'notice', kind: 'circuit-breaker', message: msg });
+                });
+                if (verdict !== 'approved') {
+                  const result = { denied: true, reason: 'approval denied or timed out' };
+                  await emit({ type: 'tool_result', call, result, denied: true });
+                  const toolMsg: ChatMessage = {
+                    role: 'tool',
+                    content: 'Tool call was not approved.',
+                    toolCallId: call.id,
+                    toolName: call.name,
+                  };
+                  this.store.appendMessage(sessionId, toolMsg);
+                  messages.push(toolMsg);
+                  continue;
+                }
+              }
             } else {
               // Prefer the gateway-minted id when the gateway supplies one:
               // the UI's approve/deny then hits the real record with no
               // id-translation race.
               approvalId = gatewayApprovalId ?? newApprovalId();
               turnApprovalIds.push(approvalId);
-              this.audit({ type: 'tool.approval_requested', sessionId, botId: ctx.botId, call, detail: { approvalId } });
+              this.audit({ type: 'tool.approval_requested', sessionId, botId: ctx.botId, call, detail: { approvalId }, provenance: 'human' });
               await emit({ type: 'approval_required', approvalId, call });
               await emit({ type: 'tool_call', call, approvalRequired: true, approvalId });
               let verdict: 'approved' | 'denied';
@@ -465,6 +567,10 @@ export class AgentRuntime {
                 botId: ctx.botId,
                 call,
                 detail: { approvalId, verdict },
+                provenance: 'human',
+              });
+              this.recordDenial(sessionId, verdict, async (msg) => {
+                await emit({ type: 'notice', kind: 'circuit-breaker', message: msg });
               });
               if (verdict !== 'approved') {
                 const result = { denied: true, reason: 'approval denied or timed out' };
@@ -546,6 +652,39 @@ export class AgentRuntime {
       return costOfUsage(this.defaultProviderId, model, usage).total;
     } catch {
       return 0;
+    }
+  }
+
+  /**
+   * Circuit breaker: count denials per session. When denials reach the
+   * threshold (CIRCUIT_BREAKER_DENIALS env, default 3), auto-approve is
+   * disabled for the session and a notice is emitted. Approvals reset the
+   * count (user is engaged, not blindly denying).
+   */
+  private recordDenial(
+    sessionId: string,
+    verdict: 'approved' | 'denied',
+    notify: (message: string) => Promise<void> | void,
+  ): void {
+    if (verdict === 'approved') {
+      this.denialCounts.delete(sessionId);
+      return;
+    }
+    const count = (this.denialCounts.get(sessionId) ?? 0) + 1;
+    this.denialCounts.set(sessionId, count);
+    const threshold = Math.max(1, parseInt(process.env.CIRCUIT_BREAKER_DENIALS ?? '3', 10) || 3);
+    if (count >= threshold && !this.trippedSessions.has(sessionId)) {
+      this.trippedSessions.add(sessionId);
+      this.audit({
+        type: 'autoapprove.circuit_breaker_tripped',
+        sessionId,
+        botId: '',
+        detail: { denials: count, threshold },
+        provenance: 'human',
+      });
+      void notify(
+        `Auto-approve paused after ${count} denials — back to manual approvals for this session.`,
+      );
     }
   }
 

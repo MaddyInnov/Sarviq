@@ -330,3 +330,145 @@ export async function executeSandboxedCommand(
       'or install Docker for the local sandbox.',
   );
 }
+
+/**
+ * Connect to an existing persistent E2B sandbox by ID.
+ * Throws if E2B_API_KEY is not set or the sandbox is gone.
+ */
+export async function connectPersistentSandbox(sandboxId: string): Promise<Sandbox> {
+  if (typeof process.env.E2B_API_KEY !== 'string' || process.env.E2B_API_KEY.trim() === '') {
+    throw new Error('E2B_API_KEY is not set — persistent environments require E2B.');
+  }
+  try {
+    return await Sandbox.connect(sandboxId);
+  } catch (err) {
+    throw new Error(
+      `Failed to connect to sandbox "${sandboxId}": ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Create a new persistent E2B sandbox (long-lived, not killed after use).
+ * Returns the sandbox ID for reconnection. The sandbox stays alive for
+ * `timeoutMs` (default 12h); callers should handle expiry by recreating.
+ */
+export async function createPersistentSandbox(timeoutMs = 12 * 3_600_000): Promise<string> {
+  if (typeof process.env.E2B_API_KEY !== 'string' || process.env.E2B_API_KEY.trim() === '') {
+    throw new Error('E2B_API_KEY is not set — persistent environments require E2B.');
+  }
+  const proxy = process.env.HTTPS_PROXY ?? process.env.https_proxy;
+  try {
+    const sbx = await Sandbox.create({
+      timeoutMs,
+      ...(proxy ? { proxy } : {}),
+    });
+    return sbx.sandboxId;
+  } catch (err) {
+    throw new Error(
+      `E2B persistent sandbox creation failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}
+
+/**
+ * Run a command inside an existing persistent E2B sandbox.
+ * The sandbox is NOT killed — it stays alive for reuse.
+ */
+export async function executeInPersistentSandbox(
+  sandboxId: string,
+  cmd: string,
+  opts: SandboxCommandOptions = {},
+): Promise<SandboxCommandResult> {
+  const sbx = await connectPersistentSandbox(sandboxId);
+  const timeoutMs = resolveTimeoutMs(opts.timeoutMs);
+  const maxBytes = resolveMaxOutputBytes(opts.maxOutputBytes);
+
+  let stdout = '';
+  let stderr = '';
+  let truncatedStdout = false;
+  let truncatedStderr = false;
+  const onChunk = (into: 'stdout' | 'stderr', chunk: string): void => {
+    let target = into === 'stdout' ? stdout : stderr;
+    const room = maxBytes - Buffer.byteLength(target, 'utf8');
+    if (room <= 0) {
+      if (into === 'stdout') truncatedStdout = true;
+      else truncatedStderr = true;
+      return;
+    }
+    const bytes = Buffer.from(chunk, 'utf8');
+    if (bytes.byteLength > room) {
+      target += bytes.subarray(0, room).toString('utf8');
+      if (into === 'stdout') truncatedStdout = true;
+      else truncatedStderr = true;
+    } else {
+      target += chunk;
+    }
+    if (into === 'stdout') stdout = target;
+    else stderr = target;
+  };
+  const capNotice = (s: string, wasTruncated: boolean): string =>
+    wasTruncated ? s + `\n…[truncated to ${maxBytes} bytes]` : s;
+
+  try {
+    const handle = await sbx.commands.run(cmd, {
+      background: true,
+      timeoutMs,
+      onStdout: (data) => onChunk('stdout', data),
+      onStderr: (data) => onChunk('stderr', data),
+    });
+    const result = await withTimeout(handle.wait(), timeoutMs, () => {
+      void handle.kill().catch(() => {});
+    });
+    return {
+      exitCode: result.exitCode,
+      stdout: capNotice(stdout, truncatedStdout),
+      stderr: capNotice(stderr, truncatedStderr),
+    };
+  } catch (err) {
+    if (isOurTimeout(err)) {
+      return { exitCode: TIMEOUT_EXIT_CODE, timedOut: true, stdout: capNotice(stdout, truncatedStdout), stderr: capNotice(stderr, truncatedStderr) };
+    }
+    const completed = asCompletedResult(err);
+    if (completed) {
+      return { exitCode: completed.exitCode, stdout: capNotice(stdout, truncatedStdout), stderr: capNotice(stderr, truncatedStderr) };
+    }
+    throw new Error(
+      `E2B persistent sandbox execution failed: ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+  // NOTE: intentionally no sbx.kill() — the sandbox persists.
+}
+
+/**
+ * Kill a persistent E2B sandbox by ID. Best-effort; never throws.
+ */
+export async function killPersistentSandbox(sandboxId: string): Promise<void> {
+  try {
+    const sbx = await Sandbox.connect(sandboxId);
+    await sbx.kill();
+  } catch {
+    // Already gone or unreachable — treat as stopped.
+  }
+}
+
+/**
+ * List files in a persistent E2B sandbox at the given path.
+ */
+export async function listPersistentSandboxFiles(
+  sandboxId: string,
+  path = '/',
+): Promise<Array<{ name: string; type: 'file' | 'dir'; size?: number }>> {
+  const sbx = await connectPersistentSandbox(sandboxId);
+  try {
+    const entries = await sbx.files.list(path);
+    return entries.map((e) => ({
+      name: e.name,
+      type: e.type === 'dir' ? 'dir' : 'file',
+    }));
+  } catch (err) {
+    throw new Error(
+      `Failed to list files in sandbox "${sandboxId}": ${err instanceof Error ? err.message : String(err)}`,
+    );
+  }
+}

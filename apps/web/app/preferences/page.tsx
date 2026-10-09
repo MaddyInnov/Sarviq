@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import { PetPicker } from '../../components/pet/PetPicker';
 
 interface LearnedPreference {
   id: string;
@@ -80,6 +81,15 @@ export default function PreferencesPage() {
     <div className="page">
       <h1>Preferences & Recordings</h1>
       {error && <div className="error">{error}</div>}
+
+      <section className="card">
+        <h2>Companion pet</h2>
+        <p className="muted small">
+          Pick a sidekick. It hangs out in the top bar and the chat empty state, and reacts
+          while runs are working — thinking, typing away, celebrating when a run lands.
+        </p>
+        <PetPicker />
+      </section>
 
       <section className="card">
         <h2>Learned preferences</h2>

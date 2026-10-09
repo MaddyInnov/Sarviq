@@ -86,6 +86,15 @@ export function ApprovalsPanel({ hideHeader = false }: { hideHeader?: boolean })
             <div>
               <strong className="mono">{a.toolName}</strong>{' '}
               <span className="chip amber">pending</span>
+              {a.provenance && (
+                <span className="chip small" title={`Decision provenance: ${a.provenance}`}>
+                  {a.provenance === 'hard-floor-escalated' ? '🛡️ hard floor'
+                    : a.provenance === 'reviewer' ? '🤖 reviewer'
+                    : a.provenance === 'learned' ? '🧠 learned'
+                    : a.provenance === 'standing-rule' ? '📏 standing rule'
+                    : `· ${a.provenance}`}
+                </span>
+              )}
             </div>
             <span className="small muted">{fmtTs(a.ts)}</span>
           </div>

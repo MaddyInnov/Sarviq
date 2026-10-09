@@ -5,7 +5,8 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve, sep } from 'node:path';
 import { promisify } from 'node:util';
 import type { ToolContext, ToolDefinition } from '../types.js';
-import { executeSandboxedCommand, sandboxBackend } from './sandbox.js';
+import { executeInPersistentSandbox, executeSandboxedCommand, sandboxBackend } from './sandbox.js';
+import { resolveWorkspaceDir, type WorkspaceSource } from '../workspaces.js';
 
 const execFileAsync = promisify(execFile);
 
@@ -13,11 +14,20 @@ const MAX_OUTPUT_BYTES = 8 * 1024; // 8KB truncation for command output
 const MAX_FETCH_BYTES = 200 * 1024; // 200KB cap for web_fetch
 const DEFAULT_COMMAND_TIMEOUT_MS = 30_000;
 
-/** Refuse obviously destructive shell patterns before they run. */
+/**
+ * Refuse obviously destructive shell patterns before they run.
+ *
+ * This is the tool-level hard floor (defense in depth alongside the
+ * governance gateway): catastrophic commands are refused UNCONDITIONALLY —
+ * a human approval can never lift this. Merely destructive-but-recoverable
+ * commands (deleting a specific project file, etc.) are not denylisted here;
+ * they go through the governance approval path instead.
+ */
 const COMMAND_DENYLIST: RegExp[] = [
   /rm\s+-rf\s+\//, // rm -rf /
   /mkfs/, // filesystem formatting
-  /dd\s+of=/, // raw disk writes
+  /\bdd\b[^;&|]*\bof=\s*\/dev\//, // dd writing to a raw block device
+  /\b(shred|wipefs|fdisk|sfdisk|gdisk|sgdisk|cgdisk|parted)\b/, // disk wipe/partition tools
   /:\(\)\s*\{/, // fork bombs
 ];
 
@@ -40,7 +50,7 @@ function confine(workspaceDir: string, p: string): string {
   return resolved;
 }
 
-function readFileTool(workspaceDir: string): ToolDefinition {
+function readFileTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'read_file',
     description: 'Read a UTF-8 text file inside the workspace. Path is relative to the workspace root.',
@@ -50,14 +60,14 @@ function readFileTool(workspaceDir: string): ToolDefinition {
       required: ['path'],
       additionalProperties: false,
     },
-    handler: async (args) => {
-      const file = confine(workspaceDir, String(args.path));
+    handler: async (args, ctx) => {
+      const file = confine(resolveWorkspaceDir(workspaceDir, ctx), String(args.path));
       return readFileSync(file, 'utf8');
     },
   };
 }
 
-function writeFileTool(workspaceDir: string): ToolDefinition {
+function writeFileTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'write_file',
     description: 'Write (or overwrite) a UTF-8 text file inside the workspace. Parent directories are created.',
@@ -70,8 +80,8 @@ function writeFileTool(workspaceDir: string): ToolDefinition {
       required: ['path', 'content'],
       additionalProperties: false,
     },
-    handler: async (args) => {
-      const file = confine(workspaceDir, String(args.path));
+    handler: async (args, ctx) => {
+      const file = confine(resolveWorkspaceDir(workspaceDir, ctx), String(args.path));
       mkdirSync(dirname(file), { recursive: true });
       writeFileSync(file, String(args.content), 'utf8');
       return { written: file, bytes: Buffer.byteLength(String(args.content), 'utf8') };
@@ -79,7 +89,7 @@ function writeFileTool(workspaceDir: string): ToolDefinition {
   };
 }
 
-function runCommandTool(workspaceDir: string): ToolDefinition {
+function runCommandTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'run_command',
     description:
@@ -98,7 +108,7 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
       required: ['command'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
       const command = String(args.command);
       for (const pattern of COMMAND_DENYLIST) {
         if (pattern.test(command)) {
@@ -109,6 +119,30 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
         typeof args.timeoutMs === 'number' && args.timeoutMs > 0
           ? Math.min(args.timeoutMs, 120_000)
           : DEFAULT_COMMAND_TIMEOUT_MS;
+      // Persistent Dot environment: run inside the Dot's own long-lived E2B
+      // sandbox instead of a fresh ephemeral one. Falls back to ephemeral on
+      // connect failure (the sandbox may have expired).
+      const persistentId = ctx?.persistentSandboxId;
+      if (persistentId && sandboxBackend() === 'e2b') {
+        try {
+          const result = await executeInPersistentSandbox(persistentId, command, {
+            timeoutMs,
+            maxOutputBytes: MAX_OUTPUT_BYTES * 4,
+          });
+          return {
+            exitCode: result.exitCode,
+            timedOut: result.timedOut ?? false,
+            stdout: truncate(result.stdout, MAX_OUTPUT_BYTES),
+            stderr: truncate(result.stderr, MAX_OUTPUT_BYTES),
+            sandboxed: true,
+            backend: 'e2b-persistent',
+          };
+        } catch (err) {
+          // Persistent sandbox gone (expired/killed) — fall through to
+          // ephemeral rather than failing the turn.
+          console.warn(`[run_command] persistent sandbox ${persistentId} unreachable, using ephemeral: ${err instanceof Error ? err.message : String(err)}`);
+        }
+      }
       // Phase 3: prefer the sandboxed backend (E2B cloud, else Docker).
       // Host execution remains only as a last resort so the tool keeps
       // working on machines with neither; the result is flagged.
@@ -128,7 +162,7 @@ function runCommandTool(workspaceDir: string): ToolDefinition {
       }
       try {
         const { stdout, stderr } = await execFileAsync('sh', ['-c', command], {
-          cwd: workspaceDir,
+          cwd: resolveWorkspaceDir(workspaceDir, ctx),
           timeout: timeoutMs,
           maxBuffer: MAX_OUTPUT_BYTES * 4,
           windowsHide: true,
@@ -252,7 +286,7 @@ function webFetchTool(): ToolDefinition {
 }
 
 /** Built-in tools available to every bot: file I/O, shell, and web. */
-export function createBuiltInTools(opts: { workspaceDir: string }): ToolDefinition[] {
+export function createBuiltInTools(opts: { workspaceDir: WorkspaceSource }): ToolDefinition[] {
   const { workspaceDir } = opts;
   return [
     readFileTool(workspaceDir),

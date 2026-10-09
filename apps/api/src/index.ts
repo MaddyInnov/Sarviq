@@ -43,6 +43,9 @@ import { PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime'
 // imported directly (not re-exported from the agent-runtime index — index
 // untouched), following the pricing.ts precedent in routes.ts.
 import { computerUsePolicyRules, registerComputerUseTool } from '@mvp/agent-runtime/dist/tools/computer.js';
+// Real foreground OS layer (opt-in via COMPUTER_USE_REAL=1; mock by default).
+// Same direct-dist-subpath import pattern as computer.js above.
+import { selectOSLayer } from '@mvp/agent-runtime/dist/tools/computer-real.js';
 import {
   ModuleDb,
   ReminderStore,
@@ -140,6 +143,13 @@ async function boot(): Promise<void> {
   // Phase 2: per-bot policy overrides persisted in <dataDir>/bot-policies.json
   // are applied onto the in-memory bot configs before anything else reads them.
   applyBotPolicies(seed.bots, config.dataDir);
+  // MBTI personas: per-bot overlay from <dataDir>/bot-personas.json.
+  const { applyBotPersonas } = await import('./bot-personas.js');
+  applyBotPersonas(seed.bots, config.dataDir);
+  // Per-bot workspaces (Octop-style isolation): overlay from
+  // <dataDir>/bot-workspaces.json. Unset → global workspaceDir.
+  const { applyBotWorkspaces } = await import('./bot-workspaces.js');
+  applyBotWorkspaces(seed.bots, config.dataDir);
   const botsById = new Map<string, BotConfig>(seed.bots.map((b) => [b.id, b]));
 
   // 2. Governance + tools.
@@ -171,7 +181,7 @@ async function boot(): Promise<void> {
     getPreference: (botId, toolName) => preferenceStore.getPreference(botId, toolName)?.preference,
   });
 
-  const { registry: toolRegistry, connections: mcpConnections, close: closeMcp } =
+  const { registry: toolRegistry, connections: mcpConnections, connectMcp, close: closeMcp } =
     await buildToolRegistry({
       workspaceDir: config.workspaceDir,
       dataDir: config.dataDir,
@@ -180,13 +190,34 @@ async function boot(): Promise<void> {
       // GovernanceGateway satisfies SchemaDriftApprovalBroker structurally:
       // MCP schema drift at (re)connect raises a human approval here.
       approvalBroker: governance,
+      // Per-bot workspaces: file/shell/git tools resolve the calling bot's
+      // workspace per tool-call (Octop-style isolation).
+      getBotConfig: (id) => botsById.get(id),
     });
 
   // Phase 4: computer-use tools (sandboxed GUI automation; mutating actions
   // are approval-gated via computerUsePolicyRules above; the default OS
   // layer is the mock — no real input) and Muse-module tools (research_deep,
   // browser_action — browser_action approval-gated via museModuleToolPolicies).
-  registerComputerUseTool(toolRegistry);
+  // selectOSLayer() returns the REAL foreground layer only when
+  // COMPUTER_USE_REAL=1; otherwise the safe mock. The approval gate applies
+  // identically either way — governance evaluates before the handler runs.
+  registerComputerUseTool(toolRegistry, {
+    os: selectOSLayer({
+      onRealAction: (action, detail) => {
+        console.log(`[computer-real] ${action}`, JSON.stringify(detail));
+        try {
+          governance.audit('tool.computer_real_action', {
+            actor: 'agent',
+            toolName: `computer_${action}`,
+            detail,
+          });
+        } catch {
+          // Audit must never break input.
+        }
+      },
+    }),
+  });
   registerMuseModuleTools(toolRegistry, { dataDir: config.dataDir });
 
   // 3. Agent runtime + workflows.
@@ -198,6 +229,11 @@ async function boot(): Promise<void> {
 
   const { RecordingStore } = await import('./recordings.js');
   const recordingStore = new RecordingStore(config.dataDir);
+
+  const { ChatQueueStore } = await import('./chat-queue.js');
+  const chatQueueStore = new ChatQueueStore(config.dataDir);
+  // Reset any 'started' rows left by a crashed turn back to queued for retry.
+  chatQueueStore.resetStarted();
 
   const agentRuntime = new AgentRuntime({
     dbPath: `${config.dataDir}/agent.db`,
@@ -226,6 +262,7 @@ async function boot(): Promise<void> {
     registry: toolRegistry,
     dataDir: config.dataDir,
     skillsDir: path.join(seedDir, 'skills'),
+    workspaceDir: config.workspaceDir,
     governanceAdapter,
     getBotConfig: (id) => botsById.get(id),
     audit: (action, fields) => governance.audit(action, fields),
@@ -340,6 +377,7 @@ async function boot(): Promise<void> {
     store: threadScheduleStore,
     agentRuntime,
     getBots: () => seed.bots,
+    getPersistentSandboxId: (sessionId) => dotStore.getBySessionId(sessionId)?.environmentId,
     onWake: ({ schedule, ok, error }) => {
       try {
         createTask({
@@ -402,6 +440,9 @@ async function boot(): Promise<void> {
       dotStore,
       preferenceStore,
       recordingStore,
+      chatQueueStore,
+      mcpServers: seed.mcpServers,
+      tieredMemoryStore: new (await import('@mvp/agent-runtime')).TieredMemoryStore(config.dataDir),
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).
@@ -415,8 +456,17 @@ async function boot(): Promise<void> {
     console.log(
       `[api] data dir: ${config.dataDir} | bots: ${seed.bots.length} | ` +
         `workflows: ${seed.workflows.length} | tools: ${toolRegistry.size} | ` +
-        `mcp: ${mcpConnections.filter((c) => c.ok).length}/${mcpConnections.length} connected`,
+        `mcp: warming up in background`,
     );
+    // MCP servers connect AFTER listen so a slow/failing server never
+    // delays boot. The shared mcpConnections array fills in as they land.
+    void connectMcp()
+      .catch((err) => console.error('[tools] MCP warmup crashed:', err))
+      .finally(() => {
+        console.log(
+          `[tools] MCP warmup done: ${mcpConnections.filter((c) => c.ok).length}/${mcpConnections.length} connected`,
+        );
+      });
   });
 
   const shutdown = async () => {

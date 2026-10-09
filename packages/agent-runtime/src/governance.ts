@@ -30,6 +30,15 @@ export interface GovernanceEvaluation {
   approvalId?: string;
 }
 
+/** Where an approval decision came from. Surfaced in the inbox UI. */
+export type ApprovalProvenance =
+  | 'human'
+  | 'auto-approve'
+  | 'reviewer'
+  | 'standing-rule'
+  | 'learned'
+  | 'hard-floor-escalated';
+
 export interface AuditEntry {
   type: string;
   sessionId: string;
@@ -37,6 +46,8 @@ export interface AuditEntry {
   call?: ToolCall;
   detail?: unknown;
   ts: string;
+  /** Where the decision came from (for tool approval decisions). */
+  provenance?: ApprovalProvenance;
 }
 
 export interface GovernanceGateway {

@@ -35,6 +35,13 @@
 //   /places      GET /search · GET /:id · GET /:id/map
 //   /social      GET /watchlist · POST /watchlist · DELETE /watchlist/:id
 //                GET /digest
+//   /meetings    GET / · POST /upload { fileName, audioBase64, title? }
+//   /slides      GET / · POST / · GET /:id · PUT /:id · DELETE /:id
+//                POST /:id/export { format: 'html' | 'markdown' }
+//   /kb          POST /documents (octet-stream, ?fileName=&title=&mimeType=&corpusId=)
+//                GET /documents · DELETE /documents/:id
+//                POST /query { query, topK?, corpusIds? } · POST /answer
+//                GET /corpora · POST /corpora · DELETE /corpora/:id
 //
 // Trust notes:
 // - Browser actions are approval-gated (request → decide → execute); the
@@ -46,7 +53,7 @@
 //   credentials remain environment variables (see workstream-e.md).
 
 import { join } from 'node:path';
-import { Router } from 'express';
+import express, { Router } from 'express';
 import type { Request, Response } from 'express';
 import { TriggerStore } from '@mvp/workflows';
 import {
@@ -70,7 +77,7 @@ import {
   MockSearchTool,
   runDeepResearch,
   BrowserAutomation,
-  MockBrowserDriver,
+  selectBrowserDriver,
   IdeaStore,
   ShoppingStore,
   searchProducts,
@@ -82,8 +89,24 @@ import {
   WatchlistStore,
   buildDigest,
   renderDigestMarkdown,
+  MeetingStore,
+  transcribeMeetingAudio,
+  meetingSummaryPrompt,
+  parseMeetingSummary,
+  renderMeetingNotesMarkdown,
+  validateAudioFile,
+  SlideDeckStore,
+  exportDeckMarkdown,
+  exportDeckHtml,
+  KnowledgeBaseStore,
+  LocalEmbedder,
+  extractText,
+  formatCitedSources,
+  appendSourcesSection,
 } from '@mvp/muse-modules';
 import type { RouteDeps } from './routes.js';
+import { MockSTTProvider } from '@mvp/voice';
+import { PageStore } from './pages.js';
 
 function sendError(res: Response, err: unknown, fallback: string): void {
   res.status(statusForError(err)).json({ error: messageForError(err, fallback) });
@@ -107,7 +130,10 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
   const threads = new ThreadStore(mdb);
   const research = new ResearchStore(mdb);
   const searchTool = new MockSearchTool();
-  const browser = new BrowserAutomation(mdb, new MockBrowserDriver());
+  // Real foreground browser only when BROWSER_REAL=1; otherwise the mock.
+  // The request → approve → execute pipeline is unchanged — approval is
+  // still required before anything runs, regardless of driver.
+  const browser = new BrowserAutomation(mdb, selectBrowserDriver());
   const ideas = new IdeaStore(mdb);
   const shopping = new ShoppingStore(mdb);
   const places = new MockPlaceSearch();
@@ -127,6 +153,12 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
         calls: { count: calls.list(1).length },
         research: { reports: research.list().length },
         social: { watchlist: watchlist.list().length },
+        meetings: { count: new MeetingStore(mdb).list().length },
+        slides: { count: new SlideDeckStore(mdb).list().length },
+        kb: {
+          documents: new KnowledgeBaseStore(mdb, new LocalEmbedder()).listDocuments().length,
+          corpora: new KnowledgeBaseStore(mdb, new LocalEmbedder()).listCorpora().length,
+        },
       });
     } catch (err) {
       sendError(res, err, 'failed to build modules overview');
@@ -689,4 +721,273 @@ export function registerMuseModuleRoutes(router: Router, deps: RouteDeps): void 
     }
   });
   router.use('/social', socialRouter);
+
+  // ---- Meetings (meeting-notes pipeline) ----------------------------------
+  // POST /upload { fileName, audioBase64, title? } → transcribe → summarize
+  // via agent → save as Page → audio bytes are never persisted (privacy).
+  const meetings = new MeetingStore(mdb);
+  const pages = new PageStore(dataDir);
+  const meetingsRouter = Router();
+
+  meetingsRouter.get('/', (_req, res) => {
+    try {
+      res.json(meetings.list());
+    } catch (err) {
+      sendError(res, err, 'failed to list meetings');
+    }
+  });
+
+  meetingsRouter.post('/upload', async (req, res) => {
+    try {
+      const b = body(req);
+      const fileName = String(b.fileName ?? '');
+      const audioBase64 = String(b.audioBase64 ?? '');
+      if (!audioBase64) {
+        res.status(400).json({ error: 'audioBase64 is required' });
+        return;
+      }
+      const audio = Buffer.from(audioBase64, 'base64');
+      validateAudioFile(fileName, audio.length);
+
+      // 1. Transcribe (mock STT by default; real provider when wired).
+      const stt = new MockSTTProvider();
+      const { text: transcript, durationMs } = await transcribeMeetingAudio(stt, audio, fileName);
+
+      // 2. Summarize via the agent runtime.
+      const bot = deps.bots[0];
+      if (!bot) {
+        res.status(503).json({ error: 'no bots configured' });
+        return;
+      }
+      let summaryJson = '';
+      await deps.agentRuntime.runTurn({
+        bot,
+        message: meetingSummaryPrompt(transcript),
+        sessionId: `meeting-${Date.now()}`,
+        onEvent: async (event) => {
+          if (event.type === 'token') summaryJson += event.content;
+        },
+      });
+      const summary = parseMeetingSummary(summaryJson);
+
+      // 3. Save as a Page.
+      const date = new Date().toISOString().slice(0, 10);
+      const title = String(b.title ?? '').trim() || `Meeting notes — ${date}`;
+      const markdown = renderMeetingNotesMarkdown({ title, date, transcript, summary });
+      const page = pages.create({ title, content: markdown, createdBy: 'meetings' });
+
+      // 4. Audio is never written to disk — the Buffer above is the only copy
+      //    and it goes out of scope here (privacy, like Space's plugin).
+      const meeting = meetings.record({ title, pageId: page.id, fileName, durationMs });
+      res.status(201).json({ meeting, pageId: page.id, summary });
+    } catch (err) {
+      sendError(res, err, 'failed to process meeting audio');
+    }
+  });
+  router.use('/meetings', meetingsRouter);
+
+  // ---- Slides (slide deck builder) ----------------------------------------
+  const slides = new SlideDeckStore(mdb);
+  const slidesRouter = Router();
+
+  slidesRouter.get('/', (_req, res) => {
+    try {
+      res.json(slides.list());
+    } catch (err) {
+      sendError(res, err, 'failed to list slide decks');
+    }
+  });
+
+  slidesRouter.post('/', (req, res) => {
+    try {
+      const b = body(req);
+      res.status(201).json(slides.create({ title: String(b.title ?? ''), slides: (b.slides as never[]) ?? [] }));
+    } catch (err) {
+      sendError(res, err, 'failed to create slide deck');
+    }
+  });
+
+  slidesRouter.get('/:id', (req, res) => {
+    try {
+      res.json(slides.get(req.params.id));
+    } catch (err) {
+      sendError(res, err, 'failed to get slide deck');
+    }
+  });
+
+  slidesRouter.put('/:id', (req, res) => {
+    try {
+      const b = body(req);
+      res.json(
+        slides.update(req.params.id, {
+          title: b.title !== undefined ? String(b.title) : undefined,
+          slides: b.slides !== undefined ? ((b.slides as never[]) ?? []) : undefined,
+        }),
+      );
+    } catch (err) {
+      sendError(res, err, 'failed to update slide deck');
+    }
+  });
+
+  slidesRouter.delete('/:id', (req, res) => {
+    try {
+      slides.delete(req.params.id);
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, 'failed to delete slide deck');
+    }
+  });
+
+  slidesRouter.post('/:id/export', (req, res) => {
+    try {
+      const deck = slides.get(req.params.id);
+      const format = String(body(req).format ?? 'html');
+      if (format === 'markdown' || format === 'md') {
+        res.json({ format: 'markdown', content: exportDeckMarkdown(deck) });
+      } else {
+        res.json({ format: 'html', content: exportDeckHtml(deck) });
+      }
+    } catch (err) {
+      sendError(res, err, 'failed to export slide deck');
+    }
+  });
+  router.use('/slides', slidesRouter);
+
+  // ---- Knowledge base (RAG over user documents, Octop parity) ------------
+  // Local-first: trigram-hash embeddings, zero API keys. Document bytes are
+  // never persisted — text is extracted at ingest and the buffer dropped.
+  const kb = new KnowledgeBaseStore(mdb, new LocalEmbedder());
+  const kbRouter = Router();
+
+  // Raw binary upload (up to 50MB). The global express.json (1mb) only
+  // parses application/json, so this octet-stream parser does not conflict.
+  kbRouter.post(
+    '/documents',
+    express.raw({ limit: '55mb', type: 'application/octet-stream' }),
+    async (req, res) => {
+      try {
+        const buf = req.body as Buffer;
+        if (!buf || buf.length === 0) {
+          res.status(400).json({ error: 'empty upload body' });
+          return;
+        }
+        if (buf.length > 50 * 1024 * 1024) {
+          res.status(413).json({ error: 'file too large (max 50MB)' });
+          return;
+        }
+        const fileName = String(req.query.fileName ?? 'upload').slice(0, 200);
+        const title = String(req.query.title ?? '').slice(0, 200) || fileName;
+        const mimeType = String(req.query.mimeType ?? '').slice(0, 100);
+        const corpusId = typeof req.query.corpusId === 'string' ? req.query.corpusId : null;
+        const text = extractText(fileName, mimeType, buf);
+        if (!text.trim()) {
+          res.status(422).json({ error: 'no extractable text (scanned/image PDFs need OCR)' });
+          return;
+        }
+        const doc = await kb.addDocument({ title, fileName, mimeType, text, corpusId });
+        res.status(201).json(doc);
+      } catch (err) {
+        sendError(res, err, 'failed to ingest document');
+      }
+    },
+  );
+
+  kbRouter.get('/documents', (req, res) => {
+    try {
+      const corpusId = typeof req.query.corpusId === 'string' ? req.query.corpusId : undefined;
+      res.json(kb.listDocuments(corpusId));
+    } catch (err) {
+      sendError(res, err, 'failed to list documents');
+    }
+  });
+
+  kbRouter.delete('/documents/:id', (req, res) => {
+    try {
+      kb.deleteDocument(req.params.id);
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, 'failed to delete document');
+    }
+  });
+
+  kbRouter.post('/query', async (req, res) => {
+    try {
+      const b = body(req);
+      const chunks = await kb.query({
+        query: String(b.query ?? ''),
+        topK: typeof b.topK === 'number' ? b.topK : 5,
+        corpusIds: Array.isArray(b.corpusIds) ? (b.corpusIds as string[]) : undefined,
+      });
+      res.json({ chunks });
+    } catch (err) {
+      sendError(res, err, 'failed to query knowledge base');
+    }
+  });
+
+  // Retrieval + LLM synthesis with inline [n] citations.
+  kbRouter.post('/answer', async (req, res) => {
+    try {
+      const b = body(req);
+      const question = String(b.query ?? '').trim();
+      if (!question) {
+        res.status(400).json({ error: 'query is required' });
+        return;
+      }
+      const topK = typeof b.topK === 'number' ? Math.min(Math.max(b.topK, 1), 10) : 5;
+      const corpusIds = Array.isArray(b.corpusIds) ? (b.corpusIds as string[]) : undefined;
+      const chunks = await kb.query({ query: question, topK, corpusIds });
+      if (chunks.length === 0) {
+        res.json({ answer: 'I found no relevant documents in the knowledge base.', chunks: [] });
+        return;
+      }
+      const bot = deps.bots[0];
+      if (!bot) {
+        res.status(503).json({ error: 'no bots configured' });
+        return;
+      }
+      const prompt =
+        `Answer the question using ONLY the sources below. Cite every factual claim inline as [1], [2], etc. ` +
+        `If the sources do not contain the answer, say so.\n\nQuestion: ${question}\n\nSources:\n${formatCitedSources(chunks)}`;
+      let answer = '';
+      await deps.agentRuntime.runTurn({
+        bot,
+        message: prompt,
+        sessionId: `kb-answer-${Date.now()}`,
+        onEvent: async (event) => {
+          if (event.type === 'token') answer += event.content;
+        },
+      });
+      res.json({ answer: appendSourcesSection(answer, chunks), chunks });
+    } catch (err) {
+      sendError(res, err, 'failed to answer from knowledge base');
+    }
+  });
+
+  kbRouter.get('/corpora', (_req, res) => {
+    try {
+      res.json(kb.listCorpora());
+    } catch (err) {
+      sendError(res, err, 'failed to list corpora');
+    }
+  });
+
+  kbRouter.post('/corpora', (req, res) => {
+    try {
+      const b = body(req);
+      res.status(201).json(kb.createCorpus(String(b.name ?? ''), String(b.description ?? '')));
+    } catch (err) {
+      sendError(res, err, 'failed to create corpus');
+    }
+  });
+
+  kbRouter.delete('/corpora/:id', (req, res) => {
+    try {
+      kb.deleteCorpus(req.params.id);
+      res.json({ ok: true });
+    } catch (err) {
+      sendError(res, err, 'failed to delete corpus');
+    }
+  });
+
+  router.use('/kb', kbRouter);
 }

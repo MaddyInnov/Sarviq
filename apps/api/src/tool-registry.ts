@@ -10,15 +10,22 @@ import path from 'node:path';
 import {
   BotMemoryStore,
   MCPClient,
+  McpOAuthClient,
+  McpOAuthRequiredError,
   SkillLoader,
   createBuiltInTools,
   createCodingTools,
   createGitTools,
   createMemoryTools,
   createSkillTools,
+  makeWorkspaceResolver,
 } from '@mvp/agent-runtime';
-import type { SchemaDriftApprovalBroker, ToolDefinition } from '@mvp/agent-runtime';
+import type { BotConfig, SchemaDriftApprovalBroker, ToolDefinition } from '@mvp/agent-runtime';
 import type { McpServerConfig } from './seed.js';
+import {
+  createMcpOAuthTokenStore,
+  peekMcpOAuthClientInfo,
+} from './mcp-oauth.js';
 
 export interface McpConnection {
   server: string;
@@ -30,6 +37,13 @@ export interface McpConnection {
 export interface BuiltRegistry {
   registry: Map<string, ToolDefinition>;
   connections: McpConnection[];
+  /**
+   * Connect to configured MCP servers and register their tools.
+   * Deferred until after the HTTP server is listening so a slow/failing
+   * MCP server (e.g. npx registry timeouts) never delays boot. Mutates the
+   * shared `connections` array and `registry` map in place.
+   */
+  connectMcp: () => Promise<void>;
   close: () => Promise<void>;
 }
 
@@ -42,20 +56,35 @@ export async function buildToolRegistry(opts: {
   mcpServers: Record<string, McpServerConfig>;
   /** Broker used to request human approval when an MCP tool's schema drifts. */
   approvalBroker?: SchemaDriftApprovalBroker;
+  /**
+   * Optional bot lookup for per-bot workspaces (Octop-style isolation).
+   * When provided, file/shell/git tools resolve the calling bot's workspace
+   * per tool-call; bots without a workspace use `workspaceDir`.
+   */
+  getBotConfig?: (botId: string) => BotConfig | undefined;
 }): Promise<BuiltRegistry> {
   const registry = new Map<string, ToolDefinition>();
-  for (const tool of createBuiltInTools({ workspaceDir: opts.workspaceDir })) {
+  // Per-bot workspace resolver: falls back to the global workspaceDir when
+  // no bot lookup is wired or the bot has no workspace configured.
+  const resolveWorkspace = opts.getBotConfig
+    ? makeWorkspaceResolver({
+        getBotWorkspace: (botId) => opts.getBotConfig!(botId)?.workspace,
+        globalWorkspaceDir: opts.workspaceDir,
+        dataDir: opts.dataDir,
+      })
+    : opts.workspaceDir;
+  for (const tool of createBuiltInTools({ workspaceDir: resolveWorkspace })) {
     registry.set(tool.name, tool);
   }
   // Phase 2: coding tools (patch/edit/glob/grep/LSP), per-bot memory tools,
   // and read_skill (progressive skill disclosure). All are ordinary registry
   // tools, so deny-by-default governance applies to each of them.
-  for (const tool of createCodingTools({ workspaceDir: opts.workspaceDir })) {
+  for (const tool of createCodingTools({ workspaceDir: resolveWorkspace })) {
     registry.set(tool.name, tool);
   }
   // PR integration: git tools (status/diff auto-allowed; commit/branch/push
   // require approval via the default deny-by-default policy).
-  for (const tool of createGitTools({ workspaceDir: opts.workspaceDir })) {
+  for (const tool of createGitTools({ workspaceDir: resolveWorkspace })) {
     registry.set(tool.name, tool);
   }
   for (const tool of createMemoryTools({ store: new BotMemoryStore(opts.dataDir) })) {
@@ -73,6 +102,7 @@ export async function buildToolRegistry(opts: {
   const connections: McpConnection[] = [];
   const clients: MCPClient[] = [];
 
+  async function connectMcp(): Promise<void> {
   for (const [serverName, serverConfig] of Object.entries(opts.mcpServers)) {
     // serverName becomes the `<server>` segment of `mcp:<server>:<tool>` so
     // governance policy can allowlist per server (mcpServerAllowRule).
@@ -88,7 +118,31 @@ export async function buildToolRegistry(opts: {
     });
     try {
       if ('url' in serverConfig && serverConfig.url) {
-        await client.connectHttp(serverConfig.url);
+        // OAuth-protected MCP server: mint a bearer token from the encrypted
+        // store (refreshing when needed). Missing/expired tokens fail with a
+        // clear "OAuth required" error pointing at the connect URL.
+        let authToken: string | undefined;
+        if (serverConfig.oauth === true) {
+          const oauthStore = createMcpOAuthTokenStore(opts.dataDir);
+          const oauthClient = new McpOAuthClient({
+            serverId: serverName,
+            serverUrl: serverConfig.url,
+            store: oauthStore,
+            resolveClient: async (sid, metadata) => {
+              const peeked = peekMcpOAuthClientInfo(opts.dataDir, sid);
+              if (peeked) return peeked;
+              // No client known and no request context for dynamic
+              // registration here — the user must run the API connect flow.
+              void metadata;
+              throw new McpOAuthRequiredError(
+                sid,
+                `/api/mcp/oauth/start?server=${encodeURIComponent(sid)}`,
+              );
+            },
+          });
+          authToken = await oauthClient.getValidAccessToken();
+        }
+        await client.connectHttp(serverConfig.url, authToken ? { authToken } : undefined);
       } else if ('command' in serverConfig) {
         await client.connectStdio(serverConfig);
       } else {
@@ -120,10 +174,12 @@ export async function buildToolRegistry(opts: {
       }
     }
   }
+  }
 
   return {
     registry,
     connections,
+    connectMcp,
     close: async () => {
       await Promise.allSettled(clients.map((c) => c.close()));
     },

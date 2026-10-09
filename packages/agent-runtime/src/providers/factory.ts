@@ -11,6 +11,7 @@ import {
   resolveBaseUrl,
 } from './catalog.js';
 import { MockProvider } from './mock.js';
+import { OllamaProvider } from './ollama.js';
 import { OpenAICompatibleProvider } from './openai-compatible.js';
 
 /**
@@ -57,8 +58,7 @@ export function createProvider(providerId: string): LLMProvider {
   }
 
   const baseUrl = resolveBaseUrl(providerId);
-  if (!baseUrl) {
-    const label = preset.byo ? `${preset.name} is a bring-your-own provider: no endpoint is pre-configured. ` : '';
+  if (!baseUrl) {    const label = preset.byo ? `${preset.name} is a bring-your-own provider: no endpoint is pre-configured. ` : '';
     throw new Error(
       `${label}Open the Providers settings page and enter an API endpoint (base URL) plus your own ${preset.envKey}, then try again. ` +
         `Never use a shared or pooled key.`,
@@ -66,6 +66,21 @@ export function createProvider(providerId: string): LLMProvider {
   }
 
   const apiKey = resolveApiKey(providerId);
+  // Local providers (Ollama): no API key, ever. Skip the key requirement.
+  if (preset.local) {
+    if (preset.api === 'ollama') {
+      return new OllamaProvider();
+    }
+    // Future local providers fall through to the openai-compatible driver
+    // with a dummy key (local endpoints ignore auth).
+    return new OpenAICompatibleProvider({
+      providerId: preset.id,
+      baseUrl,
+      apiKey: 'local-no-key-needed',
+      extraHeaders: preset.extraHeaders,
+      defaultModel: getDefaultModel(preset.id),
+    });
+  }
   if (!apiKey) {
     if (preset.bridge) {
       const label = preset.bridge === 'claude' ? 'Claude Code' : 'Codex CLI';

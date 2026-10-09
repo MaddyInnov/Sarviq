@@ -4,7 +4,7 @@
 //
 // 13 modules, each with its own store + logic + colocated vitest tests:
 //   feed, reminders, goals, artifacts, media, calls, threads, research,
-//   browser, ideas, shopping, places, social.
+//   browser, ideas, shopping, places, social, meetings, slides.
 // Shared: ModuleDb (one muse-modules.db, namespaced tables), error types,
 // and registerMuseModuleTools() for the agent-invokable tools.
 
@@ -19,9 +19,13 @@ export * from './calls/index.js';
 export * from './threads/index.js';
 export * from './research/index.js';
 export * from './browser/index.js';
+export * from './browser/real.js';
 export * from './ideas/index.js';
 export * from './shopping/index.js';
 export * from './places/index.js';
 export * from './social/index.js';
+export * from './meetings/index.js';
+export * from './slides/index.js';
+export * from './knowledge-base/index.js';
 export { registerMuseModuleTools, museModuleToolPolicies, tagUntrusted } from './tools.js';
 export type { MuseModuleToolOptions } from './tools.js';

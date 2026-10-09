@@ -39,6 +39,18 @@ export interface BrowserDriver {
   navigate(url: string): Promise<NavigateResult>;
   extractText(): Promise<string>;
   screenshot(): Promise<Uint8Array>;
+  /**
+   * Optional real-driver capabilities. MockBrowserDriver does not implement
+   * these; PlaywrightBrowserDriver does. Callers must feature-check.
+   */
+  /** Click a CSS selector. */
+  click?(selector: string): Promise<void>;
+  /** Fill a CSS selector with text. */
+  fill?(selector: string, text: string): Promise<void>;
+  /** Full HTML content of the current page. */
+  content?(): Promise<string>;
+  /** Release browser resources. */
+  close?(): Promise<void>;
 }
 
 /** Deterministic offline driver: fixture pages, no network. */

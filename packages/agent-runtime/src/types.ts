@@ -26,11 +26,19 @@ export type StreamEvent =
   | { type: 'done'; usage: TokenUsage }
   | { type: 'error'; message: string }
   | { type: 'interrupted'; reason: string }
-  | { type: 'approval_required'; approvalId: string; call: ToolCall };
+  | { type: 'approval_required'; approvalId: string; call: ToolCall }
+  | { type: 'queued_turn_start'; queueId: string; message: string }
+  | { type: 'notice'; kind: string; message: string };
 
 export interface ToolContext {
   sessionId: string;
   botId: string;
+  /**
+   * Persistent E2B sandbox ID for this turn (Dot environments). When set,
+   * `run_command` executes inside the persistent sandbox instead of a fresh
+   * ephemeral one. Undefined → normal ephemeral sandbox behavior.
+   */
+  persistentSandboxId?: string;
 }
 
 export interface ToolDefinition {
@@ -84,6 +92,22 @@ export interface BotConfig {
   policy?: BotPolicy;
   /** Sandbox mode for this bot (default: 'workspace-write'). */
   sandboxMode?: SandboxMode;
+  /** MBTI persona template (e.g. 'INTJ'); null/undefined = no persona. */
+  persona?: string | null;
+  /**
+   * Per-bot workspace (Octop-style isolation). Optional.
+   * - unset/empty → the bot uses the global workspaceDir (backward compatible).
+   * - relative (e.g. "coder") → resolved against <dataDir>/workspaces.
+   * - absolute → must be inside the server data directory.
+   */
+  workspace?: string;
+  /**
+   * ACP (Agent Client Protocol) delegation target (Octop parity). When set,
+   * `delegate` with `via: 'acp'` spawns this command and speaks ACP over
+   * stdio instead of using the built-in subagent. Example:
+   * `{ command: 'opencode', args: ['acp'] }`.
+   */
+  acp?: { command: string; args?: string[] };
 }
 
 export interface LLMProvider {

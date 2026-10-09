@@ -61,6 +61,15 @@ export class WorkflowRunner {
   private bots: Map<string, BotConfig>;
   private listeners = new Set<RunUpdateCallback>();
   private executing = new Set<string>();
+  /**
+   * In-memory run cache for the duration of executeRun(). The runner is the
+   * sole writer of a run while it executes (guarded by `executing`), so
+   * caching the assembled run eliminates ~7 redundant DB round trips per
+   * node (each getRun = 2 queries: runs + node_states). All mutations write
+   * through to the store immediately — the DB stays the durable source of
+   * truth for crash-resume and the API still reads from the store directly.
+   */
+  private runCache = new Map<string, WorkflowRun>();
 
   constructor(opts: WorkflowRunnerOptions) {
     this.store = new WorkflowStore(opts.dbPath);
@@ -285,6 +294,10 @@ export class WorkflowRunner {
   private async executeRun(runId: string): Promise<void> {
     if (this.executing.has(runId)) return;
     this.executing.add(runId);
+    // Prime the run cache: every getRunOrThrow below hits memory instead of
+    // re-assembling the run from SQLite (2 queries per call).
+    const primed = this.store.getRun(runId);
+    if (primed) this.runCache.set(runId, primed);
     try {
       const run = this.getRunOrThrow(runId);
       const def = this.getWorkflow(run.workflowId);
@@ -317,6 +330,7 @@ export class WorkflowRunner {
       }
       this.setRunStatus(runId, 'succeeded');
     } finally {
+      this.runCache.delete(runId);
       this.executing.delete(runId);
     }
   }
@@ -537,6 +551,8 @@ export class WorkflowRunner {
   // -- state helpers ----------------------------------------------------------
 
   private getRunOrThrow(id: string): WorkflowRun {
+    const cached = this.runCache.get(id);
+    if (cached) return cached;
     const run = this.store.getRun(id);
     if (!run) throw new Error(`unknown run: ${id}`);
     return run;
@@ -555,11 +571,21 @@ export class WorkflowRunner {
     const current = run.nodeStates[nodeId] ?? { status: 'pending' as NodeStatus };
     const next: NodeState = { ...current, ...patch };
     this.store.upsertNodeState(runId, nodeId, next);
+    // Write-through: keep the cached run in sync so later reads in this
+    // execution don't re-assemble from SQLite.
+    const cached = this.runCache.get(runId);
+    if (cached) cached.nodeStates[nodeId] = next;
     this.emitUpdate(runId);
   }
 
   private setRunStatus(runId: string, status: RunStatus): void {
-    this.store.updateRunStatus(runId, status, Date.now());
+    const now = Date.now();
+    this.store.updateRunStatus(runId, status, now);
+    const cached = this.runCache.get(runId);
+    if (cached) {
+      cached.status = status;
+      cached.updatedAt = now;
+    }
     this.emitUpdate(runId);
   }
 
@@ -582,7 +608,7 @@ export class WorkflowRunner {
   }
 
   private emitUpdate(runId: string): void {
-    const run = this.store.getRun(runId);
+    const run = this.runCache.get(runId) ?? this.store.getRun(runId);
     if (!run) return;
     for (const cb of this.listeners) {
       try {

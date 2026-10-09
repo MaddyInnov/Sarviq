@@ -1,0 +1,74 @@
+{
+  "ts": "2026-10-09T11:16:52.869Z",
+  "quick": false,
+  "results": {
+    "boot_ms": {
+      "value": 351,
+      "unit": "ms"
+    },
+    "GET /api/health": {
+      "value": "4.7/8.7",
+      "unit": "ms p50/p95"
+    },
+    "GET /api/bots": {
+      "value": "2.8/5.2",
+      "unit": "ms p50/p95"
+    },
+    "GET /api/workflows": {
+      "value": "2.8/5.7",
+      "unit": "ms p50/p95"
+    },
+    "GET /api/preferences": {
+      "value": "3.0/7.7",
+      "unit": "ms p50/p95"
+    },
+    "POST /api/chat first-token": {
+      "value": "8/99",
+      "unit": "ms p50/p95"
+    },
+    "workflow 9x50ms sequential": {
+      "value": "462",
+      "unit": "ms p50 (floor ~450ms)"
+    },
+    "workflow 9x50ms parallel": {
+      "value": "57",
+      "unit": "ms p50 (floor ~50ms)"
+    },
+    "parallel speedup": {
+      "value": "8.1x",
+      "unit": ""
+    },
+    "1000 session writes": {
+      "value": "72",
+      "unit": "ms (13813 writes/s)"
+    },
+    "read 100 msgs": {
+      "value": "3.02",
+      "unit": "ms"
+    },
+    "query_plans": {
+      "messages by session": "SEARCH messages USING INDEX idx_messages_session (session_id=?)",
+      "approvals by status": "n/a (no such table: approvals)"
+    },
+    "RSS after boot": {
+      "value": "84",
+      "unit": "MB"
+    },
+    "RSS after 10 chat turns": {
+      "value": "84",
+      "unit": "MB"
+    },
+    "mvp-server binary": {
+      "value": "82.6",
+      "unit": "MB"
+    },
+    "web static export": {
+      "value": "3.4",
+      "unit": "MB total"
+    },
+    "web JS": {
+      "value": "2.1",
+      "unit": "MB js"
+    }
+  }
+}

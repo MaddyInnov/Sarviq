@@ -36,6 +36,10 @@ export interface DelegateWiringOpts {
   governanceAdapter: GovernanceAdapter;
   getBotConfig: (botId: string) => BotConfig | undefined;
   /**
+   * Workspace root — the external ACP agent's cwd is confined here.
+   */
+  workspaceDir: string;
+  /**
    * Audit sink — receives `subagent.spawned` / `subagent.finished` entries
    * (without `ts`; the gateway stamps it). They surface in Audit/Activity.
    */
@@ -134,7 +138,13 @@ export function registerDelegateTools(opts: DelegateWiringOpts): void {
     }
   };
 
-  for (const tool of createDelegateTools({ spawn, store, audit })) {
+  for (const tool of createDelegateTools({
+    spawn,
+    store,
+    audit,
+    getBotConfig: opts.getBotConfig,
+    workspaceDir: opts.workspaceDir,
+  })) {
     if (!opts.registry.has(tool.name)) {
       opts.registry.set(tool.name, tool);
     }

@@ -21,6 +21,8 @@ import type { BotPolicyRule, ToolDefinition } from '@mvp/agent-runtime';
 import { ModuleDb } from './db.js';
 import { ResearchStore, MockSearchTool, runDeepResearch } from './research/index.js';
 import { BrowserAutomation, MockBrowserDriver, type BrowserAction } from './browser/index.js';
+import { SlideDeckStore, SLIDE_LAYOUTS, exportDeckMarkdown } from './slides/index.js';
+import { KnowledgeBaseStore, LocalEmbedder, formatCitedSources } from './knowledge-base/index.js';
 
 /** Tag external content as untrusted, mirroring runtime.ts's convention. */
 export function tagUntrusted(toolName: string, text: string): string {
@@ -152,6 +154,59 @@ function browserActionTool(dataDir: string): ToolDefinition {
 }
 
 /**
+ * kb_search: retrieval over the user's local document knowledge base.
+ * Returns ranked chunks with [n] citation markers and a cited-sources
+ * block the agent should reference in its answer. Chunk text is the
+ * user's own data (trusted as their documents), but treat it as data.
+ */
+function kbSearchTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'kb_search',
+    description:
+      'Search the user\'s local knowledge base (their uploaded documents: pdf, md, txt, html). ' +
+      'Returns ranked text chunks with [1], [2] citation markers — cite them in your answer like [1]. ' +
+      'Use when the user asks about their documents or you need grounded facts from their files.',
+    parameters: {
+      type: 'object',
+      properties: {
+        query: { type: 'string', description: 'Search query (max 500 chars)' },
+        topK: { type: 'number', description: 'Max chunks to return (1-20, default 5)' },
+        corpusIds: {
+          type: 'array',
+          items: { type: 'string' },
+          description: 'Restrict to these corpus ids (omit for all)',
+        },
+      },
+      required: ['query'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const kb = new KnowledgeBaseStore(db, new LocalEmbedder());
+        const chunks = await kb.query({
+          query: String(args.query ?? '').slice(0, 500),
+          topK: typeof args.topK === 'number' ? args.topK : 5,
+          corpusIds: Array.isArray(args.corpusIds) ? (args.corpusIds as string[]) : undefined,
+        });
+        return {
+          results: chunks.map((c, i) => ({
+            citation: `[${i + 1}]`,
+            documentTitle: c.documentTitle,
+            text: c.text,
+            score: c.score,
+          })),
+          citedSources: formatCitedSources(chunks),
+          hint: 'Cite sources as [1], [2] inline in your answer.',
+        };
+      } finally {
+        db.close();
+      }
+    },
+  };
+}
+
+/**
  * Register the Muse-parity agent tools into an existing tool registry map.
  * Matches the repo's registration shape (Map<string, ToolDefinition>).
  */
@@ -159,10 +214,65 @@ export function registerMuseModuleTools(
   registry: Map<string, ToolDefinition>,
   opts: MuseModuleToolOptions,
 ): void {
-  for (const tool of [researchDeepTool(opts.dataDir), browserActionTool(opts.dataDir)]) {
+  for (const tool of [researchDeepTool(opts.dataDir), browserActionTool(opts.dataDir), createSlidesTool(opts.dataDir), kbSearchTool(opts.dataDir)]) {
     if (registry.has(tool.name)) {
       throw new Error(`tool name collision: "${tool.name}" is already registered`);
     }
     registry.set(tool.name, tool);
   }
+}
+
+function createSlidesTool(dataDir: string): ToolDefinition {
+  return {
+    name: 'create_slides',
+    description:
+      'Build a slide deck from a title and a list of slides. Each slide has a layout ' +
+      `(${SLIDE_LAYOUTS.join(' | ')}), a heading, bullets, optional extra (right-column bullets ` +
+      'for two-column, image URL for image), and speaker notes. Returns the deck id and a markdown preview.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Deck title' },
+        slides: {
+          type: 'array',
+          description: 'Slides in order',
+          items: {
+            type: 'object',
+            properties: {
+              layout: { type: 'string', enum: SLIDE_LAYOUTS, description: 'Slide layout' },
+              heading: { type: 'string', description: 'Slide heading' },
+              bullets: { type: 'array', items: { type: 'string' }, description: 'Bullet points' },
+              extra: {
+                type: 'array',
+                items: { type: 'string' },
+                description: 'Right-column bullets (two-column) or image URL (image)',
+              },
+              notes: { type: 'string', description: 'Speaker notes' },
+            },
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ['title', 'slides'],
+      additionalProperties: false,
+    },
+    handler: async (args) => {
+      const db = moduleDb(dataDir);
+      try {
+        const store = new SlideDeckStore(db);
+        const deck = store.create({
+          title: String(args.title ?? ''),
+          slides: (Array.isArray(args.slides) ? args.slides : []) as Array<Record<string, unknown>>,
+        });
+        return {
+          deckId: deck.id,
+          title: deck.title,
+          slideCount: deck.slides.length,
+          preview: exportDeckMarkdown(deck).slice(0, 2000),
+        };
+      } finally {
+        db.close();
+      }
+    },
+  };
 }

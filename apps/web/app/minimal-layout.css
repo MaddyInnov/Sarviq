@@ -1,0 +1,61 @@
+
+/* ------------------------------------------------------------------ */
+/* Minimal layout (Octop parity: Classic vs Minimal).                    */
+/* Activated via html[data-layout="minimal"]. Keeps all functionality    */
+/* reachable; reduces chrome for distraction-free work. Uses existing    */
+/* theme variables so it works across all 5 themes.                      */
+/* ------------------------------------------------------------------ */
+
+[data-layout='minimal'] .navlink-label {
+  display: none;
+}
+[data-layout='minimal'] .navlink {
+  padding: 8px 10px;
+}
+[data-layout='minimal'] .topbar {
+  padding: 6px 12px;
+}
+[data-layout='minimal'] .api-base {
+  display: none;
+}
+[data-layout='minimal'] .brand span {
+  display: none;
+}
+
+/* Slimmer conversation sidebar on the chat page */
+[data-layout='minimal'] .chat-layout .bot-roster {
+  width: 200px;
+  min-width: 200px;
+}
+[data-layout='minimal'] .bot-roster .conv-title,
+[data-layout='minimal'] .bot-roster .bot-name {
+  max-width: 130px;
+}
+
+/* Model bar: keep the core picker, hide extras (they live in the ⚙️ popover) */
+[data-layout='minimal'] .chat-header .theme-btn .small,
+[data-layout='minimal'] .chat-header .mode-opt {
+  display: none;
+}
+
+/* Composer footer: hide stats, keep send hint */
+[data-layout='minimal'] .composer-footer .usage-line,
+[data-layout='minimal'] .composer-footer .ctx-meter {
+  display: none;
+}
+
+/* Empty-state: tighter */
+[data-layout='minimal'] .empty-state {
+  padding-top: 4vh;
+}
+[data-layout='minimal'] .empty-3d {
+  height: 110px;
+}
+
+/* Mobile: minimal is the default (see LAYOUT_INIT_SCRIPT), reinforce here */
+@media (max-width: 768px) {
+  [data-layout='minimal'] .chat-layout .bot-roster {
+    width: 180px;
+    min-width: 180px;
+  }
+}

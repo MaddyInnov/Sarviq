@@ -26,6 +26,13 @@ export interface ChatRequestBody {
    * Per-turn sandbox mode override (Codex-style orthogonal dial).
    */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /**
+   * Steering mode for when a turn is already in-flight on this session:
+   * - 'interrupt' (default): abort the in-flight turn, start this one now.
+   * - 'queue': append to the session queue; runs automatically when the
+   *   current turn completes (queue-at-boundary, Claude Code style).
+   */
+  queueMode?: 'interrupt' | 'queue';
 }
 
 export interface DecideApprovalBody {
@@ -57,6 +64,11 @@ export interface ProviderInfo {
   detected?: boolean;
   /** Bridge only: the user granted Connect consent (token readable in memory). */
   connected?: boolean;
+  /**
+   * Local provider (Ollama): runs on the user's own machine, no API key
+   * ever required. The UI shows a "Local" badge instead of a key field.
+   */
+  local?: boolean;
 }
 
 export interface RunWorkflowBody {

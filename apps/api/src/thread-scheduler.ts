@@ -176,6 +176,12 @@ export interface ThreadSchedulerDeps {
   getBots: () => BotConfig[];
   /** Called after a scheduled turn completes (e.g. to notify). */
   onWake?: (info: { schedule: ThreadSchedule; ok: boolean; error?: string }) => void;
+  /**
+   * Resolve a persistent E2B sandbox ID for a session (Dot environments).
+   * When the session belongs to a Dot with a live environment, its turns
+   * run `run_command` inside that sandbox.
+   */
+  getPersistentSandboxId?: (sessionId: string) => string | undefined;
 }
 
 /**
@@ -218,6 +224,7 @@ export class ThreadScheduler {
             bot,
             message: s.prompt,
             sessionId: s.sessionId,
+            persistentSandboxId: this.deps.getPersistentSandboxId?.(s.sessionId),
             onEvent: () => {},
           });
           this.deps.onWake?.({ schedule: s, ok: true });

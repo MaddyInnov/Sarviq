@@ -36,8 +36,7 @@ function seedCommandsPath(): string {
   return path.join(here, '..', '..', 'seed', 'slash-commands.json');
 }
 
-export function loadSlashCommands(dataDir: string): SlashCommandMap {
-  // Try the data dir first, then fall back to the seed file (shipped defaults).
+export function loadSlashCommands(dataDir: string): SlashCommandMap {  // Try the data dir first, then fall back to the seed file (shipped defaults).
   const candidates = [commandsPath(dataDir), seedCommandsPath()];
   for (const p of candidates) {
     try {
@@ -78,6 +77,7 @@ export function saveSlashCommand(dataDir: string, name: string, cmd: SlashComman
   };
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(commandsPath(dataDir), JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+  invalidateSlashCommandCache(dataDir);
   return all;
 }
 
@@ -87,6 +87,7 @@ export function deleteSlashCommand(dataDir: string, name: string): boolean {
   delete all[name];
   fs.mkdirSync(dataDir, { recursive: true });
   fs.writeFileSync(commandsPath(dataDir), JSON.stringify(all, null, 2) + '\n', { mode: 0o600 });
+  invalidateSlashCommandCache(dataDir);
   return true;
 }
 
@@ -120,4 +121,41 @@ export function expandSlashCommand(
     .replaceAll('{args}', parsed.args)
     .replaceAll('{message}', message.trim());
   return { expanded, commandName: parsed.name };
+}
+
+/**
+ * Cached slash-command loader for hot paths (the chat route calls this on
+ * every message). Caches per dataDir and invalidates when the data-dir
+ * file's mtime/size changes. The seed fallback never changes at runtime;
+ * if the data-dir file appears/disappears the stat mismatch triggers a
+ * reload, so the cache stays correct.
+ */
+const slashCommandCache = new Map<string, { mtimeMs: number; size: number; commands: SlashCommandMap }>();
+
+function statForCache(p: string): { mtimeMs: number; size: number } | null {
+  try {
+    const s = fs.statSync(p);
+    return { mtimeMs: s.mtimeMs, size: s.size };
+  } catch {
+    return null;
+  }
+}
+
+export function loadSlashCommandsCached(dataDir: string): SlashCommandMap {
+  const cached = slashCommandCache.get(dataDir);
+  const primary = statForCache(commandsPath(dataDir));
+  const mtimeMs = primary?.mtimeMs ?? -1;
+  const size = primary?.size ?? -1;
+  if (cached && cached.mtimeMs === mtimeMs && cached.size === size) {
+    return cached.commands;
+  }
+  const commands = loadSlashCommands(dataDir);
+  slashCommandCache.set(dataDir, { mtimeMs, size, commands });
+  return commands;
+}
+
+/** Drop the cached entry (called after save/delete). */
+export function invalidateSlashCommandCache(dataDir?: string): void {
+  if (dataDir) slashCommandCache.delete(dataDir);
+  else slashCommandCache.clear();
 }

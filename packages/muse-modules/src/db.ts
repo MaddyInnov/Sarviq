@@ -158,6 +158,51 @@ CREATE TABLE IF NOT EXISTS mm_social_watchlist (
   keyword TEXT NOT NULL UNIQUE,
   created_at INTEGER NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS mm_meetings (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  page_id TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  duration_ms INTEGER,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_meetings_created ON mm_meetings (created_at DESC);
+
+CREATE TABLE IF NOT EXISTS mm_slide_decks (
+  id TEXT PRIMARY KEY,
+  title TEXT NOT NULL,
+  slides_json TEXT NOT NULL,
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS mm_kb_corpora (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS mm_kb_documents (
+  id TEXT PRIMARY KEY,
+  corpus_id TEXT,
+  title TEXT NOT NULL,
+  file_name TEXT NOT NULL,
+  mime_type TEXT NOT NULL DEFAULT '',
+  char_count INTEGER NOT NULL DEFAULT 0,
+  chunk_count INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_kb_documents_corpus ON mm_kb_documents (corpus_id, created_at DESC);
+CREATE TABLE IF NOT EXISTS mm_kb_chunks (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL,
+  idx INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  page INTEGER,
+  embedding TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_mm_kb_chunks_doc ON mm_kb_chunks (document_id, idx);
 `;
 
 /**

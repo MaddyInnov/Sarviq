@@ -72,27 +72,90 @@ describe('policy evaluation', () => {
     expect(pending[0].sessionId).toBe('sess-1');
   });
 
-  it('denylist: rm -rf / is denied and audited', async () => {
+  it('hard floor: catastrophic commands are denied unconditionally (never approvable)', async () => {
     const gw = fresh();
-    const res = await gw.evaluate('run_command', { command: 'rm -rf /' }, CTX);
-    expect(res.effect).toBe('deny');
-    expect(res.approvalId).toBeUndefined();
-    const denied = gw.listAudit(10).filter((e) => e.decision === 'deny');
-    expect(denied.length).toBeGreaterThan(0);
-    expect(denied[0].toolName).toBe('run_command');
+    const catastrophic = [
+      'rm -rf /',
+      'rm -rf / --no-preserve-root',
+      'sudo mkfs -t ext4 /dev/sda1',
+      'dd if=/dev/zero of=/dev/sda bs=1M',
+      'shred -u /home/user/secret.txt',
+      'parted /dev/sda rm 1',
+      ':(){ :|:& };:',
+    ];
+    for (const command of catastrophic) {
+      const res = await gw.evaluate('run_command', { command }, CTX);
+      expect(res.effect).toBe('deny');
+      // No approval record is minted: there is nothing to approve.
+      expect(res.approvalId).toBeUndefined();
+      expect(gw.listApprovals('pending')).toHaveLength(0);
+    }
   });
 
-  it('denylist: mkfs and fork bombs are denied', async () => {
+  it('hard floor: catastrophic stays denied even when the caller claims an approval', async () => {
+    const gw = fresh();
+    const command = 'rm -rf /';
+    // First evaluation: unconditional deny, no approval id.
+    const res = await gw.evaluate('run_command', { command }, CTX);
+    expect(res.effect).toBe('deny');
+    expect(res.approvalId).toBeUndefined();
+    // A rogue caller mints a standalone approval out-of-band and marks it
+    // approved. Re-evaluation must STILL deny: catastrophic calls are never
+    // executable, regardless of any claimed approval.
+    const claimedId = gw.requestApproval('run_command', { command }, CTX, {
+      provenance: 'human',
+    });
+    gw.decide(claimedId, 'approved', { decidedBy: 'rogue-ui', note: 'claimed approval' });
+    expect(gw.getApproval(claimedId)?.status).toBe('approved');
+    const again = await gw.evaluate('run_command', { command }, CTX);
+    expect(again.effect).toBe('deny');
+    expect(again.approvalId).toBeUndefined();
+  });
+
+  it('hard floor: destructive-but-recoverable commands still go through the approval path', async () => {
+    const gw = fresh();
+    // sudo / shutdown: destructive, but recoverable → human approval.
+    for (const command of ['sudo apt update', 'shutdown -h now']) {
+      const res = await gw.evaluate('run_command', { command }, CTX);
+      expect(res.effect).toBe('require-approval');
+      expect(res.approvalId).toBeDefined();
+      const rec = gw.getApproval(res.approvalId!);
+      expect(rec?.provenance).toBe('hard-floor-escalated');
+      expect(rec?.status).toBe('pending');
+    }
+    // Deleting a specific project file: destructive, recoverable → approval.
+    const del = await gw.evaluate('delete_file', { path: '/etc/passwd' }, CTX);
+    expect(del.effect).toBe('require-approval');
+    expect(del.approvalId).toBeDefined();
+    // The approval path still works: a human approval resolves it.
+    const pending = gw.awaitDecision(del.approvalId!);
+    gw.decide(del.approvalId!, 'approved', { decidedBy: 'test-human' });
+    await expect(pending).resolves.toBe('approved');
+  });
+
+  it('hard floor: catastrophic cannot be reached via allow-all policy', async () => {
+    const gw = fresh();
+    const allowAll = { defaultEffect: 'allow' as const, rules: [] };
+    const res = await gw.evaluateWithPolicy('run_command', { command: 'rm -rf /' }, CTX, allowAll);
+    expect(res.effect).toBe('deny');
+  });
+
+  it('hard floor: mkfs and fork bombs are denied unconditionally', async () => {
     const gw = fresh();
     const bad = [
       'sudo mkfs -t ext4 /dev/sda1',
       ':(){ :|:& };:',
-      'x(){ echo hi; }',
     ];
     for (const command of bad) {
       const res = await gw.evaluate('run_command', { command }, CTX);
       expect(res.effect).toBe('deny');
+      expect(res.approvalId).toBeUndefined();
     }
+    // Note: the legacy denylist still unconditionally denies `x(){...}`
+    // function definitions (conservative); catastrophic hard floors deny
+    // instead of escalating to human approval.
+    const denied = await gw.evaluate('run_command', { command: 'x(){ echo hi; }' }, CTX);
+    expect(denied.effect).toBe('deny');
   });
 
   it('benign run_command only requires approval', async () => {

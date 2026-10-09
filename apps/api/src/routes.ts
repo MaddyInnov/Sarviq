@@ -9,7 +9,7 @@
 //   id → real approval id translation.
 
 import express from 'express';
-import { BotMemoryStore, isFreeModel, listProviderPresets, resolveApiKey } from '@mvp/agent-runtime';
+import { BotMemoryStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir } from '@mvp/agent-runtime';
 import type { AgentRuntime, BotConfig, StreamEvent } from '@mvp/agent-runtime';
 // pricing.ts is not re-exported from the agent-runtime index (index untouched);
 // import the built subpath directly.
@@ -24,14 +24,18 @@ import {
   deleteSlashCommand,
   expandSlashCommand,
   loadSlashCommands,
+  loadSlashCommandsCached,
   saveSlashCommand,
 } from './slash-commands.js';
 import { ThreadScheduler, ThreadScheduleStore } from './thread-scheduler.js';
 import { CheckpointStore } from './checkpoints.js';
 import { DotStore, dotWakePrompt } from './dots.js';
+import { EnvironmentManager } from './environments.js';
 import { confineFile, listWorkspaceFiles, readWorkspaceFile } from './files.js';
+import { saveBotWorkspace } from './bot-workspaces.js';
 import { PreferenceStore } from './preferences.js';
 import { RecordingStore, recordingToWorkflow } from './recordings.js';
+import { ChatQueueStore } from './chat-queue.js';
 import {
   createPullRequest,
   isGitHubConfigured,
@@ -40,10 +44,18 @@ import {
 } from './github.js';
 // Phase 3: connected apps (OAuth), messaging gateway, notes, tasks/calendar.
 import { registerOAuthRoutes } from './oauth.js';
+import { registerMcpOAuthRoutes } from './mcp-oauth.js';
+import type { McpServerConfig } from './seed.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { registerNotesRoutes } from './notes.js';
+import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerTasksRoutes } from './tasks.js';
 import { registerPagesRoutes } from './pages.js';
+import { registerTerminalRoutes } from './terminal-routes.js';
+import { registerTeamRoutes } from './teams-routes.js';
+import { TieredMemoryStore } from '@mvp/agent-runtime';
+import { PERSONAS, MBTI_TYPES, QUIZ_QUESTIONS, scoreQuiz, resolvePersona } from '@mvp/agent-runtime';
+import { saveBotPersona } from './bot-personas.js';
 // Phase 4: marketplace + billing + tenancy/vault + protocols/voice + muse modules.
 import { registerMarketplaceRoutes } from './marketplace.js';
 import { registerBillingRoutes } from './billing.js';
@@ -102,6 +114,12 @@ export interface RouteDeps {
   preferenceStore: PreferenceStore;
   /** Recording store (teach-by-recording). */
   recordingStore: RecordingStore;
+  /** Chat message queue (queue-at-boundary steering). */
+  chatQueueStore: ChatQueueStore;
+  /** MCP server configs (for OAuth-protected servers). */
+  mcpServers: Record<string, McpServerConfig>;
+  /** Tiered memory store (L0 events → L2 atoms → L3 entity pages). */
+  tieredMemoryStore: TieredMemoryStore;
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -141,13 +159,25 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore } = deps;
 
   // Mid-turn interruption (Claude Code-style steering): at most one live turn
   // per session. A new message on a session aborts the previous turn — the
   // runtime withdraws its pending approvals fail-closed and emits
   // 'interrupted' on the old stream.
   const activeTurns = new Map<string, AbortController>();
+
+  // Resolve a bot's effective workspace root (Octop-style per-bot isolation).
+  // Bots without a workspace use the global workspaceDir.
+  const botWorkspaceRoot = (botId: string): string => {
+    const bot = bots.find((b) => b.id === botId);
+    if (!bot) throw new Error(`Unknown bot "${botId}"`);
+    return resolveBotWorkspaceDir({
+      botWorkspace: bot.workspace,
+      globalWorkspaceDir: config.workspaceDir,
+      dataDir: config.dataDir,
+    });
+  };
 
   router.get('/health', (_req, res) => {
     res.json({
@@ -398,6 +428,60 @@ export function createRouter(deps: RouteDeps): express.Router {
     res.json({ ok: true, deleted: req.params.id });
   });
 
+  // ---- Dot persistent environments ----------------------------------------
+  // Each Dot's "own computer": a long-lived E2B sandbox. The user can
+  // inspect/take over via these routes; the Dot's own turns run inside it.
+  const envManager = new EnvironmentManager(dotStore);
+
+  router.get('/dots/:id/environment', (req, res) => {
+    try {
+      res.json({ ok: true, ...envManager.status(req.params.id) });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 500;
+      res.status(status).json(errorBody('Failed to get environment status', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  router.post('/dots/:id/environment/exec', async (req, res) => {
+    const body = (req.body ?? {}) as { command?: unknown; timeoutMs?: unknown };
+    if (typeof body.command !== 'string' || !body.command.trim()) {
+      res.status(400).json(errorBody('command is required'));
+      return;
+    }
+    try {
+      const result = await envManager.exec(
+        req.params.id,
+        body.command,
+        typeof body.timeoutMs === 'number' && body.timeoutMs > 0 ? Math.min(body.timeoutMs, 300_000) : undefined,
+      );
+      res.json({ ok: true, ...result });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 500;
+      res.status(status).json(errorBody('Environment exec failed', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  router.get('/dots/:id/environment/files', async (req, res) => {
+    const path = typeof req.query.path === 'string' && req.query.path ? req.query.path : '/';
+    try {
+      const files = await envManager.listFiles(req.params.id, path);
+      res.json({ ok: true, path, files });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 500;
+      res.status(status).json(errorBody('Failed to list environment files', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  router.post('/dots/:id/environment/stop', async (req, res) => {
+    try {
+      await envManager.stop(req.params.id);
+      res.json({ ok: true, stopped: req.params.id });
+    } catch (err) {
+      const status = (err as { statusCode?: number }).statusCode ?? 500;
+      res.status(status).json(errorBody('Failed to stop environment', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
   // ---- File browser -------------------------------------------------------
   // Read-only view into config.workspaceDir — where the agent's write_file /
   // edit_file tools land. Powers the Workspace "Files" tab and chat diffs.
@@ -646,10 +730,168 @@ export function createRouter(deps: RouteDeps): express.Router {
     res.json({ ok: true, botId: bot.id });
   });
 
+  // ---- Tiered memory (L0 events → L2 atom cards → L3 entity pages) --------
+  // Octop parity: distilled durable facts per bot, with keyword recall.
+  router.get('/memory/atoms', (req, res) => {
+    const botId = typeof req.query.botId === 'string' ? req.query.botId : '';
+    if (!botId) {
+      res.status(400).json(errorBody('query param "botId" is required'));
+      return;
+    }
+    try {
+      res.json({ ok: true, botId, atoms: tieredMemoryStore.getAtoms(botId) });
+    } catch (err) {
+      res.status(500).json(errorBody('Failed to list memory atoms', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  router.get('/memory/entities', (req, res) => {
+    const botId = typeof req.query.botId === 'string' ? req.query.botId : '';
+    if (!botId) {
+      res.status(400).json(errorBody('query param "botId" is required'));
+      return;
+    }
+    try {
+      res.json({ ok: true, botId, entities: tieredMemoryStore.getEntities(botId) });
+    } catch (err) {
+      res.status(500).json(errorBody('Failed to list entity pages', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  router.delete('/memory/atoms/:id', (req, res) => {
+    const botId = typeof req.query.botId === 'string' ? req.query.botId : '';
+    if (!botId) {
+      res.status(400).json(errorBody('query param "botId" is required'));
+      return;
+    }
+    try {
+      if (!tieredMemoryStore.deleteAtom(botId, req.params.id)) {
+        res.status(404).json(errorBody(`Unknown atom "${req.params.id}"`));
+        return;
+      }
+      res.json({ ok: true, deleted: req.params.id });
+    } catch (err) {
+      res.status(500).json(errorBody('Failed to delete atom', err instanceof Error ? err.message : String(err)));
+    }
+  });
+
+  // ---- MBTI personas --------------------------------------------------------
+  // Octop parity: 16 personality templates shaping bot tone/working style.
+  router.get('/personas', (_req, res) => {
+    res.json({
+      ok: true,
+      personas: MBTI_TYPES.map((t) => {
+        const p = PERSONAS[t];
+        return { type: p.type, name: p.name, traits: p.traits, communicationStyle: p.communicationStyle };
+      }),
+      quiz: QUIZ_QUESTIONS,
+    });
+  });
+
+  router.post('/personas/quiz', (req, res) => {
+    const body = (req.body ?? {}) as { answers?: unknown };
+    const answers = (body.answers ?? {}) as Partial<Record<'energy' | 'information' | 'decisions' | 'lifestyle', 0 | 1>>;
+    for (const [k, v] of Object.entries(answers)) {
+      if (!['energy', 'information', 'decisions', 'lifestyle'].includes(k) || (v !== 0 && v !== 1)) {
+        res.status(400).json(errorBody('answers must map question id → 0 or 1'));
+        return;
+      }
+    }
+    const type = scoreQuiz(answers);
+    const persona = PERSONAS[type];
+    res.json({
+      ok: true,
+      type,
+      persona: { type: persona.type, name: persona.name, traits: persona.traits, communicationStyle: persona.communicationStyle },
+    });
+  });
+
+  router.put('/bots/:id/persona', (req, res) => {
+    const body = (req.body ?? {}) as { persona?: unknown };
+    try {
+      const persona = saveBotPersona(config.dataDir, bots, req.params.id, body.persona);
+      const template = resolvePersona(persona);
+      res.json({
+        ok: true,
+        botId: req.params.id,
+        persona,
+        name: template?.name ?? null,
+      });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot') ? 404 : 400;
+      res.status(status).json(errorBody('Failed to save persona', message));
+    }
+  });
+
+  // ---- Per-bot workspace (Octop-style isolation) ---------------------------
+  // PUT body: { workspace: string | null }. Empty/null clears → the bot uses
+  // the global workspaceDir. Relative values resolve against
+  // <dataDir>/workspaces; absolute paths must be inside dataDir.
+  // Persisted to <dataDir>/bot-workspaces.json and applied to the in-memory
+  // bot immediately; also applied at boot (see bot-workspaces.ts).
+  router.put('/bots/:id/workspace', (req, res) => {
+    const body = (req.body ?? {}) as { workspace?: unknown };
+    try {
+      const workspace = saveBotWorkspace(config.dataDir, bots, req.params.id, body.workspace);
+      let root: string | null = null;
+      try {
+        root = botWorkspaceRoot(req.params.id);
+      } catch { /* resolution creates the dir; ignore errors here */ }
+      res.json({ ok: true, botId: req.params.id, workspace: workspace || null, root });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot') ? 404 : 400;
+      res.status(status).json(errorBody('Failed to save workspace', message));
+    }
+  });
+
+  // Read-only file browser scoped to a bot's workspace.
+  router.get('/bots/:id/files', (req, res) => {
+    try {
+      const root = botWorkspaceRoot(req.params.id);
+      res.json({ ok: true, botId: req.params.id, root, files: listWorkspaceFiles(root) });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot') ? 404 : 500;
+      res.status(status).json(errorBody('Failed to list bot files', message));
+    }
+  });
+
+  router.get('/bots/:id/files/content', (req, res) => {
+    const rel = typeof req.query.path === 'string' ? req.query.path : '';
+    if (!rel || rel.length > 512) {
+      res.status(400).json(errorBody('query param "path" is required (workspace-relative)'));
+      return;
+    }
+    try {
+      const root = botWorkspaceRoot(req.params.id);
+      confineFile(root, rel);
+      const file = readWorkspaceFile(root, rel);
+      res.json({ ok: true, botId: req.params.id, path: rel, ...file });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      const status = message.startsWith('Unknown bot')
+        ? 404
+        : message.includes('escapes')
+          ? 403
+          : message.includes('Not a file')
+            ? 404
+            : 500;
+      res.status(status).json(errorBody('Failed to read bot file', message));
+    }
+  });
+
   // ---- Chat (SSE) -------------------------------------------------------
   // The stream stays open while approvals are pending: the agent loop awaits
   // governance decisions, and the client decides via POST /api/approvals/:id.
   // Heartbeat comment every 15s keeps proxies from closing idle streams.
+  //
+  // Steering modes (queueMode):
+  // - 'interrupt' (default): abort any in-flight turn on this session, start now.
+  // - 'queue': if a turn is in-flight, persist the message and return
+  //   { queued: true } immediately; it runs automatically when the current
+  //   turn completes (queue-at-boundary). If no turn is in-flight, runs now.
   router.post('/chat', async (req, res) => {
     const body = (req.body ?? {}) as Partial<ChatRequestBody>;
     if (typeof body.botId !== 'string' || !body.botId) {
@@ -666,14 +908,17 @@ export function createRouter(deps: RouteDeps): express.Router {
       return;
     }
 
+    const sessionKey = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    const queueMode = body.queueMode === 'queue' ? 'queue' : 'interrupt';
+
     // Custom slash commands: expand `/name args` before the agent sees it.
+    // Done before the queue check so queued messages are stored expanded.
     // Unknown `/command` → 400 with the list of known commands.
     let chatMessage = body.message;
-    let slashCommandName: string | null = null;
     if (chatMessage.trim().startsWith('/')) {
-      const expanded = expandSlashCommand(chatMessage, loadSlashCommands(config.dataDir));
+      const expanded = expandSlashCommand(chatMessage, loadSlashCommandsCached(config.dataDir));
       if (expanded === null) {
-        const known = Object.keys(loadSlashCommands(config.dataDir));
+        const known = Object.keys(loadSlashCommandsCached(config.dataDir));
         res.status(400).json(
           errorBody(
             `Unknown slash command. Known: ${known.length ? known.map((k) => `/${k}`).join(', ') : '(none yet)'}`,
@@ -682,7 +927,29 @@ export function createRouter(deps: RouteDeps): express.Router {
         return;
       }
       chatMessage = expanded.expanded;
-      slashCommandName = expanded.commandName;
+    }
+
+    // Queue-at-boundary: a turn is already running on this session, so
+    // persist the (slash-expanded) message instead of aborting. Returns JSON (not SSE).
+    if (queueMode === 'queue' && sessionKey && activeTurns.has(sessionKey)) {
+      const taskType =
+        body.taskType === 'code' || body.taskType === 'chat' || body.taskType === 'reasoning' || body.taskType === 'simple-qa'
+          ? body.taskType
+          : undefined;
+      const { id, position } = chatQueueStore.enqueue({
+        sessionId: sessionKey,
+        botId: bot.id,
+        message: chatMessage,
+        provider: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
+        model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+        taskType,
+        autoApprove: body.autoApprove === true,
+        planMode: body.planMode === true,
+        maxBudgetUsd: typeof body.maxBudgetUsd === 'number' && body.maxBudgetUsd >= 0 ? body.maxBudgetUsd : undefined,
+        sandboxMode: body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access' ? body.sandboxMode : undefined,
+      });
+      res.json({ ok: true, queued: true, id, position, sessionId: sessionKey });
+      return;
     }
 
     sseHeaders(res);
@@ -705,6 +972,9 @@ export function createRouter(deps: RouteDeps): express.Router {
     // in-flight turn so it doesn't keep spending tokens in the background.
     // turnController is assigned below; the closure sees the final value.
     let turnController: AbortController | null = null;
+    // Tiered-memory per-turn accumulators (reset in runOneTurn).
+    let turnAssistantText = '';
+    let turnToolCalls: string[] = [];
     res.on('close', () => {
       closed = true;
       clearInterval(heartbeat);
@@ -714,11 +984,15 @@ export function createRouter(deps: RouteDeps): express.Router {
     const onEvent = async (event: StreamEvent): Promise<void> => {
       if (closed) return;
       if (event.type === 'done' || event.type === 'error' || event.type === 'interrupted') terminalEmitted = true;
+      // Tiered memory: accumulate this turn's assistant text + tool calls for L0.
+      if (event.type === 'token') turnAssistantText += event.content;
+      else if (event.type === 'tool_call') turnToolCalls.push(event.call.name);
       res.write(`data: ${serializeEvent(event)}\n\n`);
     };
 
     // Abort any in-flight turn on this session before starting the new one.
-    const sessionKey = typeof body.sessionId === 'string' && body.sessionId ? body.sessionId : null;
+    // (queueMode 'queue' with an active turn returned early above, so reaching
+    // here means interrupt mode or no active turn.)
     turnController = new AbortController();
     if (sessionKey) {
       const prev = activeTurns.get(sessionKey);
@@ -726,33 +1000,89 @@ export function createRouter(deps: RouteDeps): express.Router {
       activeTurns.set(sessionKey, turnController);
     }
 
-    try {
-      // Phase 3: pass the RAW explicit values (no bot-default merging here).
-      // runTurn applies bot defaults, then smart model routing when nothing
-      // is pinned; taskType selects the routing profile.
-      const rawTaskType = body.taskType;
-      const taskType =
-        rawTaskType === 'code' || rawTaskType === 'chat' || rawTaskType === 'reasoning' || rawTaskType === 'simple-qa'
-          ? rawTaskType
-          : undefined;
+    // Helper: run one turn's agent loop on this SSE stream.
+    const runOneTurn = async (turnMessage: string, turnOpts: {
+      providerId?: string; model?: string; taskType?: 'code' | 'chat' | 'reasoning' | 'simple-qa';
+      autoApprove?: boolean; planMode?: boolean; maxBudgetUsd?: number;
+      sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+    }): Promise<void> => {
+      terminalEmitted = false;
+      // Tiered memory: reset per-turn accumulators; recall relevant atoms.
+      turnAssistantText = '';
+      turnToolCalls = [];
+      let memoryContext: string | undefined;
+      try {
+        memoryContext = tieredMemoryStore.recallForPrompt(bot.id, turnMessage) || undefined;
+      } catch {
+        memoryContext = undefined; // memory must never break chat
+      }
       await agentRuntime.runTurn({
         bot,
-        message: chatMessage,
+        message: turnMessage,
         sessionId: body.sessionId,
-        providerId: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
-        model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
-        taskType,
-        signal: turnController.signal,
-        autoApprove: body.autoApprove === true,
-        planMode: body.planMode === true,
-        maxBudgetUsd: typeof body.maxBudgetUsd === 'number' && body.maxBudgetUsd >= 0 ? body.maxBudgetUsd : undefined,
-        sandboxMode: body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access' ? body.sandboxMode : undefined,
+        providerId: turnOpts.providerId,
+        model: turnOpts.model,
+        taskType: turnOpts.taskType,
+        signal: turnController!.signal,
+        autoApprove: turnOpts.autoApprove,
+        planMode: turnOpts.planMode,
+        maxBudgetUsd: turnOpts.maxBudgetUsd,
+        sandboxMode: turnOpts.sandboxMode,
+        memoryContext,
         onEvent,
       });
+      // Tiered memory: ingest this turn (L0 events + async L2 distillation).
+      // Fire-and-forget by design — ingestTurn never throws into the caller.
+      tieredMemoryStore.ingestTurn(bot.id, sessionKey ?? 'default', turnMessage, turnAssistantText, turnToolCalls);
       // The runtime should emit done/error itself; emit a terminal event only
       // if it resolved without one so clients never hang.
       if (!terminalEmitted && !closed) {
         res.write(`data: ${JSON.stringify({ type: 'done', usage: null })}\n\n`);
+      }
+    };
+
+    // Phase 3: pass the RAW explicit values (no bot-default merging here).
+    // runTurn applies bot defaults, then smart model routing when nothing
+    // is pinned; taskType selects the routing profile.
+    const rawTaskType = body.taskType;
+    const taskType =
+      rawTaskType === 'code' || rawTaskType === 'chat' || rawTaskType === 'reasoning' || rawTaskType === 'simple-qa'
+        ? rawTaskType
+        : undefined;
+    const firstTurnOpts = {
+      providerId: typeof body.provider === 'string' && body.provider.trim() ? body.provider.trim() : undefined,
+      model: typeof body.model === 'string' && body.model.trim() ? body.model.trim() : undefined,
+      taskType,
+      autoApprove: body.autoApprove === true,
+      planMode: body.planMode === true,
+      maxBudgetUsd: typeof body.maxBudgetUsd === 'number' && body.maxBudgetUsd >= 0 ? body.maxBudgetUsd : undefined,
+      sandboxMode: body.sandboxMode === 'read-only' || body.sandboxMode === 'workspace-write' || body.sandboxMode === 'danger-full-access' ? body.sandboxMode : undefined,
+    };
+
+    try {
+      await runOneTurn(chatMessage, firstTurnOpts);
+
+      // Queue-at-boundary: drain queued messages FIFO on this same SSE stream.
+      // Each queued turn runs to completion before the next starts. Stops if
+      // the client disconnected or the turn was aborted (Stop/interrupt).
+      while (sessionKey && !closed && !turnController.signal.aborted) {
+        const next = chatQueueStore.nextForSession(sessionKey);
+        if (!next) break;
+        chatQueueStore.markStarted(next.id);
+        if (!closed) {
+          res.write(`data: ${JSON.stringify({ type: 'queued_turn_start', queueId: next.id, message: next.message.slice(0, 200) })}\n\n`);
+        }
+        // Slash commands in queued messages are expanded at enqueue time
+        // (they were already expanded when first received), so run as-is.
+        await runOneTurn(next.message, {
+          providerId: next.provider,
+          model: next.model,
+          taskType: next.taskType,
+          autoApprove: next.autoApprove,
+          planMode: next.planMode,
+          maxBudgetUsd: next.maxBudgetUsd,
+          sandboxMode: next.sandboxMode,
+        });
       }
     } catch (err) {
       if (!terminalEmitted && !closed) {
@@ -765,6 +1095,21 @@ export function createRouter(deps: RouteDeps): express.Router {
       }
       finish();
     }
+  });
+
+  // ---- Chat queue ---------------------------------------------------------
+  // Queue-at-boundary steering: list and remove queued messages.
+  router.get('/chat/queue', (req, res) => {
+    const sessionId = typeof req.query.sessionId === 'string' ? req.query.sessionId : undefined;
+    res.json({ ok: true, queue: chatQueueStore.list(sessionId) });
+  });
+
+  router.delete('/chat/queue/:id', (req, res) => {
+    if (!chatQueueStore.remove(req.params.id)) {
+      res.status(404).json(errorBody(`Unknown queued message "${req.params.id}"`));
+      return;
+    }
+    res.json({ ok: true, removed: req.params.id });
   });
 
   // ---- Approvals ----------------------------------------------------------
@@ -1095,6 +1440,7 @@ export function createRouter(deps: RouteDeps): express.Router {
   // Both modules register relative paths on the main router, so they land
   // under /api/oauth/... and /api/messaging/....
   registerOAuthRoutes(router, { config, governance });
+  registerMcpOAuthRoutes(router, { config, governance, mcpServers });
   // Inbound bot mentions (Discord/Slack) run an agent turn through the chat
   // pipeline and reply in the channel. The turn uses the default bot; the
   // session is scoped per (provider, channel) so the bot keeps context.
@@ -1131,7 +1477,10 @@ export function createRouter(deps: RouteDeps): express.Router {
   // ---- Phase 3: user notes + tasks/calendar ------------------------------
   // Notes live on a sub-router mounted at /api/notes; tasks registers
   // /api/tasks and /api/events on the main router itself.
+  // Knowledge routes (graph/search/tags/daily/backlinks) must be registered
+  // BEFORE registerNotesRoutes so they aren't swallowed by /:id.
   const notesRouter = express.Router();
+  registerKnowledgeRoutes(notesRouter, { dataDir: config.dataDir });
   registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
   router.use('/notes', notesRouter);
   registerTasksRoutes(router, { dataDir: config.dataDir });
@@ -1195,6 +1544,24 @@ export function createRouter(deps: RouteDeps): express.Router {
   const modulesRouter = express.Router();
   registerMuseModuleRoutes(modulesRouter, deps);
   router.use('/modules', modulesRouter);
+
+  // ---- Octop parity: interactive terminal + agent teams --------------------
+  const terminalRouter = express.Router();
+  registerTerminalRoutes(terminalRouter, {
+    workspaceDir: config.workspaceDir,
+    agentRuntime,
+    getBots: () => bots,
+    governance,
+  });
+  router.use('/terminal', terminalRouter);
+
+  const teamsRouter = express.Router();
+  registerTeamRoutes(teamsRouter, {
+    dataDir: config.dataDir,
+    agentRuntime,
+    getBots: () => bots,
+  });
+  router.use('/teams', teamsRouter);
 
   return router;
 }

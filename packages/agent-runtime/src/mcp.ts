@@ -220,9 +220,16 @@ export class MCPClient {
     await this.connectWith(transport, `stdio command "${config.command}"`);
   }
 
-  async connectHttp(url: string): Promise<void> {
+  async connectHttp(url: string, opts?: { authToken?: string }): Promise<void> {
     this.label = `mcp-http:${url}`;
-    const transport = new StreamableHTTPClientTransport(new URL(url));
+    const headers: Record<string, string> = {};
+    if (opts?.authToken) {
+      headers['Authorization'] = `Bearer ${opts.authToken}`;
+    }
+    const transport = new StreamableHTTPClientTransport(
+      new URL(url),
+      Object.keys(headers).length > 0 ? { requestInit: { headers } } : undefined,
+    );
     await this.connectWith(transport, `HTTP endpoint ${url}`);
   }
 

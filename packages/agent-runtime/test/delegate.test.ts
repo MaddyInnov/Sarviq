@@ -45,7 +45,7 @@ describe('createDelegateTools', () => {
     expect(tool!.name).toBe('delegate');
     const params = tool!.parameters as { required: string[]; properties: Record<string, unknown> };
     expect(params.required).toEqual(['task']);
-    expect(Object.keys(params.properties)).toEqual(['task', 'tools']);
+    expect(Object.keys(params.properties)).toEqual(['task', 'tools', 'bot', 'via']);
     // the description documents the safety contract
     expect(tool!.description).toMatch(/approval/i);
     expect(tool!.description).toMatch(/same governance/i);

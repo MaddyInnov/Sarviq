@@ -22,6 +22,7 @@ import {
 import { readdirSync, statSync } from 'node:fs';
 import { dirname, join, relative, resolve, sep } from 'node:path';
 import type { ToolDefinition } from '../types.js';
+import { resolveWorkspaceDir, type WorkspaceSource } from '../workspaces.js';
 
 /**
  * Resolve `p` inside `workspaceDir`. Throws if the resolved path escapes the
@@ -179,7 +180,7 @@ interface PatchFileResult {
   action?: 'modified' | 'created' | 'deleted';
 }
 
-function patchTool(workspaceDir: string): ToolDefinition {
+function patchTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'patch',
     description:
@@ -195,7 +196,8 @@ function patchTool(workspaceDir: string): ToolDefinition {
       required: ['diff'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
       const diff = String(args.diff ?? '');
       const dryRun = args.dryRun === true;
       if (!diff.trim()) throw new Error('patch: "diff" must not be empty');
@@ -210,7 +212,7 @@ function patchTool(workspaceDir: string): ToolDefinition {
         let abs: string;
         try {
           rel = target;
-          abs = confine(workspaceDir, rel);
+          abs = confine(ws, rel);
         } catch (err) {
           results.push({ path: target, ok: false, error: err instanceof Error ? err.message : String(err) });
           continue;
@@ -257,7 +259,7 @@ function patchTool(workspaceDir: string): ToolDefinition {
 // edit — surgical string replace
 // ---------------------------------------------------------------------------
 
-function editTool(workspaceDir: string): ToolDefinition {
+function editTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'edit',
     description:
@@ -277,8 +279,9 @@ function editTool(workspaceDir: string): ToolDefinition {
       required: ['path', 'oldText', 'newText'],
       additionalProperties: false,
     },
-    handler: async (args) => {
-      const file = confine(workspaceDir, String(args.path));
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
+      const file = confine(ws, String(args.path));
       const oldText = String(args.oldText ?? '');
       const newText = String(args.newText ?? '');
       if (oldText.length === 0) throw new Error('edit: "oldText" must not be empty');
@@ -361,7 +364,7 @@ function walkFiles(root: string, out: string[]): void {
   }
 }
 
-function globTool(workspaceDir: string): ToolDefinition {
+function globTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'glob',
     description:
@@ -373,15 +376,16 @@ function globTool(workspaceDir: string): ToolDefinition {
       required: ['pattern'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
       const pattern = String(args.pattern ?? '');
       if (!pattern) throw new Error('glob: "pattern" must not be empty');
       const rx = globToRegExp(pattern);
-      const root = resolve(workspaceDir);
+      const root = resolve(ws);
       const all: string[] = [];
       walkFiles(root, all);
       const matched = all
-        .map((abs) => wsRelative(workspaceDir, abs).split(sep).join('/'))
+        .map((abs) => wsRelative(ws, abs).split(sep).join('/'))
         .filter((rel) => rx.test(rel))
         .sort()
         .slice(0, MAX_GLOB_RESULTS);
@@ -418,7 +422,7 @@ function isBinaryFile(abs: string): boolean {
   }
 }
 
-function grepTool(workspaceDir: string): ToolDefinition {
+function grepTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'grep',
     description:
@@ -434,7 +438,8 @@ function grepTool(workspaceDir: string): ToolDefinition {
       required: ['pattern'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
       const pattern = String(args.pattern ?? '');
       if (!pattern) throw new Error('grep: "pattern" must not be empty');
       let rx: RegExp;
@@ -443,7 +448,7 @@ function grepTool(workspaceDir: string): ToolDefinition {
       } catch (err) {
         throw new Error(`grep: invalid regex: ${err instanceof Error ? err.message : String(err)}`);
       }
-      const baseAbs = args.path === undefined ? resolve(workspaceDir) : confine(workspaceDir, String(args.path));
+      const baseAbs = args.path === undefined ? resolve(ws) : confine(ws, String(args.path));
       const fileRx = args.filePattern === undefined ? null : globToRegExp(String(args.filePattern));
 
       const candidates: string[] = [];
@@ -458,7 +463,7 @@ function grepTool(workspaceDir: string): ToolDefinition {
 
       const matches: { path: string; line: number; text: string }[] = [];
       outer: for (const abs of candidates) {
-        const rel = wsRelative(workspaceDir, abs).split(sep).join('/');
+        const rel = wsRelative(ws, abs).split(sep).join('/');
         if (fileRx && !fileRx.test(rel)) continue;
         if (isBinaryFile(abs)) continue;
         let content: string;
@@ -624,7 +629,7 @@ async function lspRequest(
   }
 }
 
-function lspDefinitionTool(workspaceDir: string): ToolDefinition {
+function lspDefinitionTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'lsp_definition',
     description:
@@ -640,14 +645,15 @@ function lspDefinitionTool(workspaceDir: string): ToolDefinition {
       required: ['path', 'line', 'character'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
       if (!lspAvailable()) {
         return { degraded: true, error: 'language server not available' };
       }
-      const abs = confine(workspaceDir, String(args.path));
+      const abs = confine(ws, String(args.path));
       if (!existsSync(abs)) throw new Error(`lsp_definition: file does not exist: "${args.path}"`);
       try {
-        const result = await lspRequest(workspaceDir, abs, 'textDocument/definition', {
+        const result = await lspRequest(ws, abs, 'textDocument/definition', {
           line: Number(args.line),
           character: Number(args.character),
         });
@@ -666,7 +672,7 @@ function lspDefinitionTool(workspaceDir: string): ToolDefinition {
   };
 }
 
-function lspHoverTool(workspaceDir: string): ToolDefinition {
+function lspHoverTool(workspaceDir: WorkspaceSource): ToolDefinition {
   return {
     name: 'lsp_hover',
     description:
@@ -682,14 +688,15 @@ function lspHoverTool(workspaceDir: string): ToolDefinition {
       required: ['path', 'line', 'character'],
       additionalProperties: false,
     },
-    handler: async (args) => {
+    handler: async (args, ctx) => {
+      const ws = resolveWorkspaceDir(workspaceDir, ctx);
       if (!lspAvailable()) {
         return { degraded: true, error: 'language server not available' };
       }
-      const abs = confine(workspaceDir, String(args.path));
+      const abs = confine(ws, String(args.path));
       if (!existsSync(abs)) throw new Error(`lsp_hover: file does not exist: "${args.path}"`);
       try {
-        const result = (await lspRequest(workspaceDir, abs, 'textDocument/hover', {
+        const result = (await lspRequest(ws, abs, 'textDocument/hover', {
           line: Number(args.line),
           character: Number(args.character),
         })) as { contents?: unknown } | null;
@@ -710,7 +717,7 @@ function lspHoverTool(workspaceDir: string): ToolDefinition {
  * Returned tools are plain ToolDefinitions; the tool registry applies
  * governance (deny-by-default / approvals) exactly as for built-in tools.
  */
-export function createCodingTools(opts: { workspaceDir: string }): ToolDefinition[] {
+export function createCodingTools(opts: { workspaceDir: WorkspaceSource }): ToolDefinition[] {
   const { workspaceDir } = opts;
   return [
     patchTool(workspaceDir),

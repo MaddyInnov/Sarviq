@@ -42,6 +42,16 @@ export interface BotConfig {
   tools: string[];
   mcpServers: string[];
   policy?: BotPolicy;
+  persona?: string | null;
+  /** Per-bot workspace (Octop-style isolation); unset = global workspace. */
+  workspace?: string;
+}
+
+export interface PersonaInfo {
+  type: string;
+  name: string;
+  traits: string[];
+  communicationStyle: string;
 }
 
 export interface ToolCall {
@@ -72,6 +82,8 @@ export type StreamEvent =
   | { type: 'error'; message: string }
   | { type: 'interrupted'; reason: string }
   | { type: 'approval_required'; approvalId: string; call: ToolCall }
+  /** A queued message started its turn on this stream (queue-at-boundary). */
+  | { type: 'queued_turn_start'; queueId?: string }
   /**
    * Rich inline card. `widget` is validated client-side against the widget
    * schema (components/widgets) — invalid payloads render as an error block,
@@ -91,6 +103,7 @@ export interface ApprovalRecord {
   decidedAt?: number;
   decidedBy?: string;
   note?: string;
+  provenance?: string;
 }
 
 export interface AuditEntry {
@@ -141,6 +154,8 @@ export interface ProviderInfo {
   detected?: boolean;
   /** Bridge only: Connect consent granted (token readable in memory). */
   connected?: boolean;
+  /** Local provider (Ollama): on-machine, no API key ever required. */
+  local?: boolean;
 }
 
 export interface WorkflowNodeDef {
@@ -213,6 +228,17 @@ async function apiJson<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 export const getBots = (): Promise<BotConfig[]> => apiJson('/api/bots');
+export const setBotWorkspace = (botId: string, workspace: string | null): Promise<{ ok: boolean; botId: string; workspace: string | null; root: string | null }> =>
+  apiJson(`/api/bots/${encodeURIComponent(botId)}/workspace`, {
+    method: 'PUT',
+    body: JSON.stringify({ workspace }),
+  });
+export const getPersonas = (): Promise<{ ok: boolean; personas: PersonaInfo[] }> => apiJson('/api/personas');
+export const setBotPersona = (botId: string, persona: string | null): Promise<{ ok: boolean; botId: string; persona: string | null; name: string | null }> =>
+  apiJson(`/api/bots/${encodeURIComponent(botId)}/persona`, {
+    method: 'PUT',
+    body: JSON.stringify({ persona }),
+  });
 export const getProviders = (): Promise<ProviderInfo[]> => apiJson('/api/providers');
 export const getModels = (freeOnly = false): Promise<ModelPriceInfo[]> =>
   apiJson(`/api/models${freeOnly ? '?freeOnly=1' : ''}`);
@@ -475,6 +501,8 @@ export interface ChatRequest {
   model?: string;
   /** Sandbox mode: read-only | workspace-write | danger-full-access. */
   sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
+  /** Steering mode: 'interrupt' (default) aborts in-flight turn; 'queue' waits for boundary. */
+  queueMode?: 'interrupt' | 'queue';
   /** Session auto-approve: skip approval cards for this turn (audited). */
   autoApprove?: boolean;
   /** Plan mode: read-only exploration, mutating tools denied. */
@@ -485,8 +513,16 @@ export interface ChatRequest {
   signal?: AbortSignal;
 }
 
+/** Event yielded when a message is queued instead of starting a turn. */
+export interface QueuedEvent {
+  type: 'queued';
+  queueId: string;
+  position: number;
+  sessionId: string;
+}
+
 /** POST /api/chat and yield each SSE `data:` payload as a parsed StreamEvent. */
-export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent> {
+export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent | QueuedEvent> {
   const { signal, ...body } = req;
   const res = await apiFetch('/api/chat', {
     method: 'POST',
@@ -502,6 +538,15 @@ export async function* streamChat(req: ChatRequest): AsyncGenerator<StreamEvent>
       // ignore
     }
     throw new Error(`Chat failed (${res.status}): ${detail || res.statusText}`);
+  }
+  // Queue-at-boundary: server returns JSON { queued: true } instead of SSE.
+  const contentType = res.headers.get('content-type') ?? '';
+  if (!contentType.includes('text/event-stream')) {
+    const data = (await res.json()) as { queued?: boolean; id?: string; position?: number; sessionId?: string };
+    if (data.queued) {
+      yield { type: 'queued', queueId: data.id ?? '', position: data.position ?? 0, sessionId: data.sessionId ?? '' };
+    }
+    return;
   }
   const reader = res.body.getReader();
   const decoder = new TextDecoder();

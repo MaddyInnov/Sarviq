@@ -27,10 +27,13 @@ import { COST_ESTIMATE_TOOLTIP, contextMeter, costOfUsage, formatTokens, formatU
 import { WidgetRenderer, validateWidget } from '../components/widgets';
 import type { Widget, WidgetAction } from '../components/widgets';
 import { CodeBlock, LineDiffView, UnifiedDiffView } from '../components/code/CodeBlock';
+import LazyClayScene from '../components/three';
+import { Pet } from '../components/pet/Pet';
+import { usePet, type PetMood } from '../lib/pet';
 
 type ChatBlock =
-  | { kind: 'user'; id: string; text: string }
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean; usage?: TokenUsage; costUsd?: number }
+  | { kind: 'user'; id: string; text: string; ts: number }
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; usage?: TokenUsage; costUsd?: number; ts: number; botName?: string }
   | { kind: 'tool'; id: string; call: ToolCall; result?: unknown; denied?: boolean }
   | {
       kind: 'approval';
@@ -43,6 +46,80 @@ type ChatBlock =
   | { kind: 'widget'; id: string; widget: Widget }
   | { kind: 'error'; id: string; text: string }
   | { kind: 'interrupted'; id: string; text: string };
+
+/** A saved conversation (one chat session) belonging to a bot. */
+interface Conversation {
+  id: string;
+  title: string;
+  createdAt: number;
+}
+
+function loadConvos(): Record<string, Conversation[]> {
+  try {
+    const raw = localStorage.getItem('mvp:convos:v1');
+    return raw ? (JSON.parse(raw) as Record<string, Conversation[]>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveConvos(c: Record<string, Conversation[]>): void {
+  try {
+    localStorage.setItem('mvp:convos:v1', JSON.stringify(c));
+  } catch {
+    // ignore (quota)
+  }
+}
+
+function loadActiveConvo(): Record<string, string> {
+  try {
+    const raw = localStorage.getItem('mvp:activeConvo:v1');
+    return raw ? (JSON.parse(raw) as Record<string, string>) : {};
+  } catch {
+    return {};
+  }
+}
+
+const MAX_STORED_BLOCKS = 300;
+
+function loadBlocks(convoId: string): ChatBlock[] {
+  try {
+    const raw = localStorage.getItem(`mvp:blocks:${convoId}`);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw) as ChatBlock[];
+    // Never restore a block stuck in streaming state.
+    return parsed.map((b) => (b.kind === 'assistant' ? { ...b, streaming: false } : b));
+  } catch {
+    return [];
+  }
+}
+
+function saveBlocks(convoId: string, blocks: ChatBlock[]): void {
+  try {
+    const trimmed = blocks.slice(-MAX_STORED_BLOCKS);
+    localStorage.setItem(`mvp:blocks:${convoId}`, JSON.stringify(trimmed));
+  } catch {
+    // ignore (quota)
+  }
+}
+
+function convoTitle(text: string): string {
+  const t = text.replace(/\s+/g, ' ').trim();
+  return t.length > 42 ? `${t.slice(0, 42)}…` : t || 'New chat';
+}
+
+function fmtTime(ts: number): string {
+  try {
+    return new Date(ts).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  } catch {
+    return '';
+  }
+}
+
+/** Rough token estimate for the composer (≈4 chars per token). */
+function estimateTokens(text: string): number {
+  return Math.ceil(text.length / 4);
+}
 
 let blockSeq = 0;
 const nextId = () => `b${Date.now()}_${blockSeq++}`;
@@ -186,6 +263,49 @@ function ClayToggle({
   );
 }
 
+/** Copy-to-clipboard button for a message. */
+function CopyBtn({ text, title }: { text: string; title?: string }) {
+  const [copied, setCopied] = useState(false);
+  return (
+    <button
+      type="button"
+      className="copy-btn"
+      title={title ?? 'Copy message'}
+      aria-label={title ?? 'Copy message'}
+      onClick={async (e) => {
+        e.stopPropagation();
+        try {
+          await navigator.clipboard.writeText(text);
+        } catch {
+          // Clipboard API unavailable (non-secure context) — fallback.
+          const ta = document.createElement('textarea');
+          ta.value = text;
+          document.body.appendChild(ta);
+          ta.select();
+          try {
+            document.execCommand('copy');
+          } catch {
+            // ignore
+          }
+          ta.remove();
+        }
+        setCopied(true);
+        window.setTimeout(() => setCopied(false), 1400);
+      }}
+    >
+      {copied ? '✓ Copied' : '⧉ Copy'}
+    </button>
+  );
+}
+
+/** Suggestion chips for the empty state. */
+const SUGGESTIONS = [
+  'Explain a concept simply',
+  'Write a Python function',
+  'Plan a task step by step',
+  'Review this code for bugs',
+];
+
 export default function ChatPage() {
   const [bots, setBots] = useState<BotConfig[]>([]);
   const [providers, setProviders] = useState<ProviderInfo[]>([]);
@@ -194,6 +314,12 @@ export default function ChatPage() {
   const [modelId, setModelId] = useState<string>('');
   type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
   const [sandboxMode, setSandboxMode] = useState<SandboxMode>('workspace-write');
+  type QueueMode = 'interrupt' | 'queue';
+  const [queueMode, setQueueMode] = useState<QueueMode>('interrupt');
+  const queueModeRef = useRef(queueMode);
+  queueModeRef.current = queueMode;
+  // Queued messages waiting for the turn boundary (queue-at-boundary mode).
+  const [queuedCount, setQueuedCount] = useState(0);
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -210,11 +336,18 @@ export default function ChatPage() {
   const [slashMgrOpen, setSlashMgrOpen] = useState(false);
   const [slashDraft, setSlashDraft] = useState({ name: '', description: '', prompt: '' });
   const [slashError, setSlashError] = useState('');
-  const sessionIds = useRef<Record<string, string>>({});
+  // Conversations (chat sessions) per bot, persisted locally.
+  const [convos, setConvos] = useState<Record<string, Conversation[]>>({});
+  const [activeConvo, setActiveConvo] = useState<Record<string, string>>({});
+  const [renamingId, setRenamingId] = useState<string | null>(null);
+  const [renameDraft, setRenameDraft] = useState('');
+  // Sidebar (mobile drawer) + settings popover.
+  const [sideOpen, setSideOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const messagesRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const turnSeq = useRef(0);
-  const inputRef = useRef<HTMLInputElement>(null);
+  const inputRef = useRef<HTMLTextAreaElement>(null);
 
   const botIdRef = useRef(selectedBotId);
   botIdRef.current = selectedBotId;
@@ -237,6 +370,25 @@ export default function ChatPage() {
   const selectedProvider = providers.find((p) => p.id === providerId);
   const selectedBotRef = useRef(selectedBot);
   selectedBotRef.current = selectedBot;
+
+  // Companion pet: reacts to run state (idle → thinking/working → happy on completion).
+  const { choice: petChoice, name: petName } = usePet();
+  const [celebrate, setCelebrate] = useState(false);
+  const runActiveRef = useRef(false);
+  const anyStreaming = sending || blocks.some((b) => b.kind === 'assistant' && b.streaming);
+  const waitingForFirstToken =
+    anyStreaming && !blocks.some((b) => b.kind === 'assistant' && b.streaming && b.text.length > 0);
+  useEffect(() => {
+    if (runActiveRef.current && !anyStreaming) {
+      // A run just finished — celebrate briefly (only when it produced output).
+      setCelebrate(true);
+      const t = setTimeout(() => setCelebrate(false), 3200);
+      runActiveRef.current = false;
+      return () => clearTimeout(t);
+    }
+    runActiveRef.current = anyStreaming;
+  }, [anyStreaming]);
+  const petMood: PetMood = celebrate ? 'happy' : waitingForFirstToken ? 'thinking' : anyStreaming ? 'working' : 'idle';
 
   // Initial load.
   useEffect(() => {
@@ -286,13 +438,25 @@ export default function ChatPage() {
     } catch { /* ignore */ }
   }, [maxBudget]);
 
-  // When the bot changes, restore its provider/model override (or defaults).
+  // When the bot changes, restore its provider/model override (or defaults)
+  // and the active conversation's message history.
   useEffect(() => {
     if (!selectedBot) return;
     const override = loadOverride(selectedBot.id);
     const prov = override?.provider || selectedBot.provider;
     setProviderId(prov);
     setModelId(override?.model || selectedBot.model || '');
+    const cid = activeConvoRef.current[selectedBot.id];
+    const list = convosRef.current[selectedBot.id] ?? [];
+    if (cid && list.some((c) => c.id === cid)) {
+      setBlocks(loadBlocks(cid));
+    } else if (list.length > 0 && list[0]) {
+      // Fall back to the most recent conversation.
+      persistActiveConvo({ ...activeConvoRef.current, [selectedBot.id]: list[0].id });
+      setBlocks(loadBlocks(list[0].id));
+    } else {
+      setBlocks([]);
+    }
   }, [selectedBotId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Persist overrides.
@@ -307,14 +471,61 @@ export default function ChatPage() {
     if (el) el.scrollTop = el.scrollHeight;
   }, [blocks]);
 
-  const sessionIdFor = (botId: string): string => {
-    if (!sessionIds.current[botId]) {
-      sessionIds.current[botId] =
-        typeof crypto !== 'undefined' && 'randomUUID' in crypto
-          ? crypto.randomUUID()
-          : `s${Date.now()}`;
+  // Auto-grow the composer textarea (cap ~200px, then scroll).
+  useEffect(() => {
+    const ta = inputRef.current;
+    if (ta) {
+      ta.style.height = 'auto';
+      ta.style.height = `${Math.min(ta.scrollHeight, 200)}px`;
     }
-    return sessionIds.current[botId];
+  }, [input]);
+
+  const newId = () =>
+    typeof crypto !== 'undefined' && 'randomUUID' in crypto
+      ? crypto.randomUUID()
+      : `s${Date.now()}_${Math.floor(Math.random() * 1e6)}`;
+
+  const convosRef = useRef(convos);
+  convosRef.current = convos;
+  const activeConvoRef = useRef(activeConvo);
+  activeConvoRef.current = activeConvo;
+  const blocksRef = useRef(blocks);
+  blocksRef.current = blocks;
+
+  const persistConvos = (next: Record<string, Conversation[]>) => {
+    setConvos(next);
+    saveConvos(next);
+  };
+
+  const persistActiveConvo = (next: Record<string, string>) => {
+    setActiveConvo(next);
+    try {
+      localStorage.setItem('mvp:activeConvo:v1', JSON.stringify(next));
+    } catch {
+      // ignore
+    }
+  };
+
+  // Restore saved conversations on mount.
+  useEffect(() => {
+    setConvos(loadConvos());
+    setActiveConvo(loadActiveConvo());
+  }, []);
+
+  // Persist blocks for the active conversation whenever a turn settles.
+  useEffect(() => {
+    if (sending) return;
+    const cid = activeConvoRef.current[selectedBotId];
+    if (cid && blocksRef.current.length > 0) saveBlocks(cid, blocksRef.current);
+  }, [blocks, sending, selectedBotId]);
+
+  /** Switch to another conversation of the same bot. */
+  const switchConvo = (botId: string, convoId: string) => {
+    if (sending) stopTurn();
+    turnSeq.current++;
+    persistActiveConvo({ ...activeConvoRef.current, [botId]: convoId });
+    setBlocks(loadBlocks(convoId));
+    setSideOpen(false);
   };
 
   const applyEvent = useCallback((event: StreamEvent) => {
@@ -360,7 +571,7 @@ export default function ChatPage() {
           if (last && last.kind === 'assistant' && last.streaming) {
             next[next.length - 1] = { ...last, text: last.text + event.content };
           } else {
-            next.push({ kind: 'assistant', id: nextId(), text: event.content, streaming: true });
+            next.push({ kind: 'assistant', id: nextId(), text: event.content, streaming: true, ts: Date.now(), botName: selectedBotRef.current?.name });
           }
           break;
         }
@@ -441,24 +652,52 @@ export default function ChatPage() {
     abortRef.current = controller;
     setInput('');
     setSending(true);
-    const userBlock: ChatBlock = { kind: 'user', id: nextId(), text };
-    const assistantBlock: ChatBlock = { kind: 'assistant', id: nextId(), text: '', streaming: true };
+    // Ensure an active conversation — its id doubles as the backend session id.
+    let cid = activeConvoRef.current[selectedBot.id];
+    const convoList = convosRef.current[selectedBot.id] ?? [];
+    if (!cid || !convoList.some((c) => c.id === cid)) {
+      const c: Conversation = { id: newId(), title: convoTitle(text), createdAt: Date.now() };
+      persistConvos({ ...convosRef.current, [selectedBot.id]: [c, ...convoList] });
+      persistActiveConvo({ ...activeConvoRef.current, [selectedBot.id]: c.id });
+      cid = c.id;
+    } else if (convoList.find((c) => c.id === cid)?.title === 'New chat') {
+      // Retitle placeholder conversations from the first message.
+      persistConvos({
+        ...convosRef.current,
+        [selectedBot.id]: convoList.map((c) => (c.id === cid ? { ...c, title: convoTitle(text) } : c)),
+      });
+    }
+    const userBlock: ChatBlock = { kind: 'user', id: nextId(), text, ts: Date.now() };
+    const assistantBlock: ChatBlock = { kind: 'assistant', id: nextId(), text: '', streaming: true, ts: Date.now(), botName: selectedBot.name };
     setBlocks((prev) => [...prev, userBlock, assistantBlock]);
     const budget = parseFloat(maxBudgetRef.current);
     try {
       for await (const event of streamChat({
         botId: selectedBot.id,
         message: text,
-        sessionId: sessionIdFor(selectedBot.id),
+        sessionId: cid,
         provider: providerIdRef.current || undefined,
         model: modelIdRef.current || undefined,
         sandboxMode: sandboxModeRef.current,
+        queueMode: queueModeRef.current,
         autoApprove: autoApproveRef.current,
         planMode: planModeRef.current,
         maxBudgetUsd: Number.isFinite(budget) && budget >= 0 ? budget : undefined,
         signal: controller.signal,
       })) {
         if (turnSeq.current !== seq) break; // superseded by a newer turn
+        if (event.type === 'queued') {
+          // Message queued for the turn boundary — show indicator, remove the
+          // empty assistant block (the running turn's stream owns the UI).
+          setQueuedCount(event.position);
+          setBlocks((prev) => prev.filter((b) => b.id !== assistantBlock.id));
+          setSending(false);
+          break;
+        }
+        if (event.type === 'queued_turn_start') {
+          // A queued message started on this stream — clear the indicator.
+          setQueuedCount((n) => Math.max(0, n - 1));
+        }
         applyEvent(event);
       }
     } catch (err) {
@@ -548,7 +787,7 @@ export default function ChatPage() {
       }
       setBlocks((prev) => [
         ...prev,
-        { kind: 'assistant', id: nextId(), text: `✓ ${action.label}`, streaming: false },
+        { kind: 'assistant', id: nextId(), text: `✓ ${action.label}`, streaming: false, ts: Date.now() },
       ]);
     } catch (err) {
       setBlocks((prev) => [
@@ -566,7 +805,10 @@ export default function ChatPage() {
     if (!selectedBotId) return;
     stopTurn();
     turnSeq.current++;
-    delete sessionIds.current[selectedBotId];
+    const c: Conversation = { id: newId(), title: 'New chat', createdAt: Date.now() };
+    const list = convosRef.current[selectedBotId] ?? [];
+    persistConvos({ ...convosRef.current, [selectedBotId]: [c, ...list] });
+    persistActiveConvo({ ...activeConvoRef.current, [selectedBotId]: c.id });
     setSessionUsage((prev) => {
       const next = { ...prev };
       delete next[selectedBotId];
@@ -578,6 +820,38 @@ export default function ChatPage() {
       return next;
     });
     setBlocks([]);
+    setSideOpen(false);
+  };
+
+  const deleteConvo = (botId: string, convoId: string) => {
+    if (sending) stopTurn();
+    turnSeq.current++;
+    const list = (convosRef.current[botId] ?? []).filter((c) => c.id !== convoId);
+    persistConvos({ ...convosRef.current, [botId]: list });
+    try {
+      localStorage.removeItem(`mvp:blocks:${convoId}`);
+    } catch {
+      // ignore
+    }
+    if (activeConvoRef.current[botId] === convoId) {
+      const nextId = list[0]?.id;
+      const nextActive = { ...activeConvoRef.current };
+      if (nextId) nextActive[botId] = nextId;
+      else delete nextActive[botId];
+      persistActiveConvo(nextActive);
+      setBlocks(nextId ? loadBlocks(nextId) : []);
+    }
+  };
+
+  const commitRename = (botId: string) => {
+    const id = renamingId;
+    setRenamingId(null);
+    if (!id) return;
+    const title = renameDraft.trim() || 'Untitled';
+    persistConvos({
+      ...convosRef.current,
+      [botId]: (convosRef.current[botId] ?? []).map((c) => (c.id === id ? { ...c, title } : c)),
+    });
   };
 
   // ---- slash commands ----
@@ -665,133 +939,257 @@ export default function ChatPage() {
 
   return (
     <div className="chat-layout">
-      <aside className="bot-roster">
+      <aside className={`bot-roster${sideOpen ? ' open' : ''}`} aria-label="Conversations and bots">
+        <button className="btn btn-primary new-chat-btn" onClick={newConversation} disabled={!selectedBotId}>
+          ＋ New chat
+        </button>
+        {selectedBotId && (
+          <>
+            <h3>Conversations</h3>
+            <div className="convo-list">
+              {(convos[selectedBotId] ?? []).map((c) => {
+                const isActive = activeConvo[selectedBotId] === c.id;
+                return (
+                  <div key={c.id} className={`convo-item${isActive ? ' active' : ''}`}>
+                    {renamingId === c.id ? (
+                      <input
+                        className="input convo-rename"
+                        value={renameDraft}
+                        autoFocus
+                        onChange={(e) => setRenameDraft(e.target.value)}
+                        onBlur={() => commitRename(selectedBotId)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Enter') commitRename(selectedBotId);
+                          if (e.key === 'Escape') setRenamingId(null);
+                        }}
+                        aria-label="Rename conversation"
+                      />
+                    ) : (
+                      <button
+                        className="convo-title"
+                        onClick={() => switchConvo(selectedBotId, c.id)}
+                        title={new Date(c.createdAt).toLocaleString()}
+                      >
+                        {c.title}
+                      </button>
+                    )}
+                    <span className="convo-actions">
+                      <button
+                        className="icon-btn xs"
+                        title="Rename"
+                        aria-label={`Rename ${c.title}`}
+                        onClick={() => {
+                          setRenamingId(c.id);
+                          setRenameDraft(c.title);
+                        }}
+                      >
+                        ✏️
+                      </button>
+                      <button
+                        className="icon-btn xs"
+                        title="Delete"
+                        aria-label={`Delete ${c.title}`}
+                        onClick={() => deleteConvo(selectedBotId, c.id)}
+                      >
+                        🗑
+                      </button>
+                    </span>
+                  </div>
+                );
+              })}
+              {(convos[selectedBotId] ?? []).length === 0 && (
+                <div className="small muted convo-empty">No conversations yet.</div>
+              )}
+            </div>
+          </>
+        )}
         <h3>Bots</h3>
         {bots.map((b) => (
           <button
             key={b.id}
             className={`bot-item${b.id === selectedBotId ? ' selected' : ''}`}
-            onClick={() => setSelectedBotId(b.id)}
+            onClick={() => {
+              setSelectedBotId(b.id);
+              setSideOpen(false);
+            }}
           >
             <div className="bot-name">{b.name}</div>
             {b.description && <div className="bot-desc">{b.description}</div>}
+            <div className="bot-ws small muted" title={b.workspace ? `Isolated workspace: ${b.workspace}` : 'Shared workspace'}>
+              {b.workspace ? `📁 ${b.workspace}` : '📁 shared'}
+            </div>
           </button>
         ))}
         {bots.length === 0 && <div className="small muted">Loading bots…</div>}
       </aside>
+      {sideOpen && <div className="side-scrim" onClick={() => setSideOpen(false)} aria-hidden="true" />}
 
       <div className="chat-main">
         <div className="chat-header">
-          <select
-            className="select"
-            value={providerId}
-            onChange={(e) => {
-              setProviderId(e.target.value);
-              setModelId('');
-            }}
-            aria-label="Provider"
-            title="Provider (applies to the next message)"
+          <button
+            className="icon-btn side-toggle"
+            onClick={() => setSideOpen((v) => !v)}
+            aria-label="Toggle conversations sidebar"
+            title="Conversations"
           >
-            {providers.map((p) => (
-              <option key={p.id} value={p.id}>
-                {p.name}
-                {p.configured ? '' : ' (no key)'}
-              </option>
-            ))}
-          </select>
-          <select
-            className="select"
-            value={modelId}
-            onChange={(e) => setModelId(e.target.value)}
-            aria-label="Model"
-            title="Model — switch mid-conversation, applies to the next message"
+            ☰
+          </button>
+          <div
+            className="model-picker"
+            role="group"
+            aria-label="Model picker"
+            title="Provider · model · sandbox — switch mid-conversation, applies to the next message"
           >
-            <option value="">(bot default)</option>
-            {modelOptions.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-          <select
-            className="select"
-            value={sandboxMode}
-            onChange={(e) => setSandboxMode(e.target.value as SandboxMode)}
-            aria-label="Sandbox mode"
-            title="Sandbox mode — read-only blocks all writes/exec; workspace-write is default; danger-full-access lifts the cage (approvals still apply)"
-          >
-            <option value="workspace-write">🛡️ Workspace</option>
-            <option value="read-only">🔒 Read-only</option>
-            <option value="danger-full-access">⚠️ Full access</option>
-          </select>
-          <div className="chat-modes">
-            <ClayToggle
-              checked={autoApprove}
-              onChange={setAutoApprove}
-              label="Auto-approve"
-              title="Auto-approve this session: approval cards are skipped and tools run immediately (audited). Manual approval is the default."
-            />
-            <ClayToggle
-              checked={planMode}
-              onChange={setPlanMode}
-              label="Plan mode"
-              title="Plan mode: read-only exploration. File writes, shell commands and network calls are blocked."
-            />
-            <label className="budget-wrap" title="Fail-closed cap on estimated spend for one turn (USD).">
-              Max $
-              <input
-                className="input"
-                value={maxBudget}
-                onChange={(e) => setMaxBudget(e.target.value.replace(/[^0-9.]/g, ''))}
-                placeholder="—"
-                inputMode="decimal"
-                aria-label="Max dollars per turn"
-              />
-            </label>
-            <button className="btn btn-sm" onClick={() => setSlashMgrOpen(true)} title="Create and manage /commands">
-              / Commands
-            </button>
+            <span className="mp-icon" aria-hidden="true">◈</span>
+            <select
+              className="mp-select"
+              value={providerId}
+              onChange={(e) => {
+                setProviderId(e.target.value);
+                setModelId('');
+              }}
+              aria-label="Provider"
+            >
+              {providers.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                  {p.configured ? '' : ' (no key)'}
+                </option>
+              ))}
+            </select>
+            <span className="mp-sep" aria-hidden="true">/</span>
+            <select
+              className="mp-select mp-model"
+              value={modelId}
+              onChange={(e) => setModelId(e.target.value)}
+              aria-label="Model"
+            >
+              <option value="">(bot default)</option>
+              {modelOptions.map((m) => (
+                <option key={m.id} value={m.id}>
+                  {m.name}
+                </option>
+              ))}
+            </select>
+            <span className="mp-sep" aria-hidden="true">·</span>
+            <select
+              className="mp-select mp-sandbox"
+              value={sandboxMode}
+              onChange={(e) => setSandboxMode(e.target.value as SandboxMode)}
+              aria-label="Sandbox mode"
+              title="Sandbox: read-only blocks writes/exec · workspace-write is the default · danger-full-access lifts the cage (approvals still apply)"
+            >
+              <option value="workspace-write">🛡️ Workspace</option>
+              <option value="read-only">🔒 Read-only</option>
+              <option value="danger-full-access">⚠️ Full access</option>
+            </select>
           </div>
+          <select
+            className="select steer-select"
+            value={queueMode}
+            onChange={(e) => setQueueMode(e.target.value as QueueMode)}
+            aria-label="Steering mode"
+            title="Steering: Interrupt aborts the running turn; Queue waits for the turn boundary (Claude Code style)"
+          >
+            <option value="interrupt">⚡ Interrupt</option>
+            <option value="queue">⏳ Queue</option>
+          </select>
+          {queuedCount > 0 && (
+            <span className="queued-badge" title={`${queuedCount} message(s) queued for the turn boundary`}>
+              ⏳ {queuedCount} queued
+            </span>
+          )}
           <div className="spacer" style={{ flex: 1 }} />
           {autoApprove && <span className="mode-badge auto">AUTO-APPROVE ON</span>}
           {planMode && <span className="mode-badge plan">PLAN MODE</span>}
-          {botSessionUsage && (
-            <div
-              className="small muted mono"
-              title={`Session tokens: ${botSessionUsage.promptTokens} in / ${botSessionUsage.completionTokens} out`}
+          <div className="settings-wrap">
+            <button
+              className={`icon-btn${settingsOpen ? ' active' : ''}`}
+              onClick={() => setSettingsOpen((v) => !v)}
+              aria-label="Run settings"
+              aria-expanded={settingsOpen}
+              title="Run settings: approvals, plan mode, budget, slash commands"
             >
-              Σ {formatTokens(botSessionUsage.totalTokens)}
-              {botSessionCost !== undefined && (
-                <span title={COST_ESTIMATE_TOOLTIP}> · ≈{formatUsd(botSessionCost)}</span>
-              )}
-              {sessionMeter && (
-                <span className={sessionMeter.warn ? 'amber' : undefined}>
-                  {' '}· ctx {formatTokens(sessionMeter.used)}/{formatTokens(sessionMeter.limit)} (
-                  {Math.round(sessionMeter.pct)}%)
-                </span>
-              )}
-            </div>
-          )}
-          <button className="btn btn-sm" onClick={newConversation} disabled={sending}>
-            New conversation
-          </button>
+              ⚙️
+            </button>
+            {settingsOpen && (
+              <>
+                <div className="pop-scrim" onClick={() => setSettingsOpen(false)} aria-hidden="true" />
+                <div className="settings-pop" role="dialog" aria-label="Run settings">
+                  <h4>Run settings</h4>
+                  <ClayToggle
+                    checked={autoApprove}
+                    onChange={setAutoApprove}
+                    label="Auto-approve"
+                    title="Auto-approve this session: approval cards are skipped and tools run immediately (audited). Manual approval is the default."
+                  />
+                  <ClayToggle
+                    checked={planMode}
+                    onChange={setPlanMode}
+                    label="Plan mode"
+                    title="Plan mode: read-only exploration. File writes, shell commands and network calls are blocked."
+                  />
+                  <label className="budget-wrap" title="Fail-closed cap on estimated spend for one turn (USD).">
+                    Max $ / turn
+                    <input
+                      className="input"
+                      value={maxBudget}
+                      onChange={(e) => setMaxBudget(e.target.value.replace(/[^0-9.]/g, ''))}
+                      placeholder="—"
+                      inputMode="decimal"
+                      aria-label="Max dollars per turn"
+                    />
+                  </label>
+                  <button
+                    className="btn btn-sm"
+                    onClick={() => {
+                      setSettingsOpen(false);
+                      setSlashMgrOpen(true);
+                    }}
+                    title="Create and manage /commands"
+                  >
+                    / Commands
+                  </button>
+                </div>
+              </>
+            )}
+          </div>
         </div>
 
         <div className="chat-messages" ref={messagesRef}>
           {blocks.length === 0 && (
             <div className="empty-state">
-              <div className="empty-icon" aria-hidden="true">✨</div>
+              <LazyClayScene className="empty-3d" />
+              <div className="empty-pet">
+                <Pet pet={petChoice.id} size={140} mood={petMood} />
+              </div>
               <p>
-                <strong>{selectedBot ? selectedBot.name : 'Select a bot'}</strong>
+                <strong>Ask {petName} anything…</strong>
               </p>
+              <p className="small muted">{selectedBot ? `Chatting as ${selectedBot.name}` : 'Select a bot'}</p>
               <p className="small">
                 Send a message to start. Tool calls that need a human will pause here with an
                 approval card — approve or deny inline and the agent continues.
               </p>
+              <div className="chips" role="group" aria-label="Suggestions">
+                {SUGGESTIONS.map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    className="chip-btn"
+                    onClick={() => {
+                      setInput(s);
+                      inputRef.current?.focus();
+                    }}
+                  >
+                    {s}
+                  </button>
+                ))}
+              </div>
               <p className="small">
-                Tip: type <span className="mono">/</span> to invoke a slash command, flip on{' '}
-                <strong>Auto-approve</strong> for hands-free runs, or use <strong>Plan mode</strong>{' '}
-                to explore without changing anything.
+                Tip: type <span className="mono">/</span> for slash commands, <span className="mono">⌘↵</span> to
+                send, flip on <strong>Auto-approve</strong> (⚙️) for hands-free runs, or use{' '}
+                <strong>Plan mode</strong> to explore without changing anything.
               </p>
             </div>
           )}
@@ -799,30 +1197,54 @@ export default function ChatPage() {
             switch (b.kind) {
               case 'user':
                 return (
-                  <div key={b.id} className="msg user">
-                    {b.text}
+                  <div key={b.id} className="msg user" title={new Date(b.ts).toLocaleString()}>
+                    <div className="msg-head">
+                      <span className="avatar you" aria-hidden="true">
+                        You
+                      </span>
+                      <span className="msg-time">{fmtTime(b.ts)}</span>
+                      <CopyBtn text={b.text} />
+                    </div>
+                    <div className="msg-text">{b.text}</div>
                   </div>
                 );
-              case 'assistant':
+              case 'assistant': {
+                const botLabel = b.botName ?? selectedBot?.name ?? 'Assistant';
                 return (
-                  <div key={b.id} className="msg assistant">
-                    {b.streaming && b.text.length === 0 ? (
-                      <span className="typing-dots" aria-label="Thinking">
-                        <i />
-                        <i />
-                        <i />
+                  <div key={b.id} className="msg assistant" title={new Date(b.ts).toLocaleString()}>
+                    <div className="msg-head">
+                      <span className="avatar bot" aria-hidden="true">
+                        {botLabel.charAt(0).toUpperCase()}
                       </span>
-                    ) : (
-                      <>
-                        {b.text}
-                        {b.streaming && <span className="stream-caret" aria-hidden="true" />}
-                      </>
-                    )}
+                      <span className="msg-author">{botLabel}</span>
+                      <span className="msg-time">{fmtTime(b.ts)}</span>
+                      {b.text.length > 0 && <CopyBtn text={b.text} />}
+                    </div>
+                    <div className="msg-text">
+                      {b.streaming && b.text.length === 0 ? (
+                        <span>
+                          <span className="thinking-pet" aria-hidden="true">
+                            <Pet pet={petChoice.id} size={22} mood="thinking" label="" />
+                          </span>
+                          <span className="typing-dots" aria-label="Thinking">
+                            <i />
+                            <i />
+                            <i />
+                          </span>
+                        </span>
+                      ) : (
+                        <>
+                          {b.text}
+                          {b.streaming && <span className="stream-caret" aria-hidden="true" />}
+                        </>
+                      )}
+                    </div>
                     {b.usage && (
                       <UsageFooter usage={b.usage} contextLength={contextLength} costUsd={b.costUsd} />
                     )}
                   </div>
                 );
+              }
               case 'widget':
                 return (
                   <WidgetRenderer
@@ -918,10 +1340,20 @@ export default function ChatPage() {
             </div>
           )}
           <div className="chat-input">
-            <input
+            <button
+              type="button"
+              className="icon-btn placeholder-btn"
+              disabled
+              title="Attachments — coming soon"
+              aria-label="Attach a file (coming soon)"
+            >
+              📎
+            </button>
+            <textarea
               ref={inputRef}
-              className="input"
+              className="input composer"
               value={input}
+              rows={1}
               onChange={(e) => {
                 setInput(e.target.value);
                 setSlashHl(0);
@@ -941,7 +1373,7 @@ export default function ChatPage() {
                   pickSlash(slashMatches[slashHl] ?? slashMatches[0] ?? '');
                   return;
                 }
-                if (e.key === 'Enter' && !e.shiftKey) {
+                if (e.key === 'Enter' && (e.metaKey || e.ctrlKey || !e.shiftKey)) {
                   e.preventDefault();
                   void send();
                 }
@@ -950,6 +1382,15 @@ export default function ChatPage() {
               disabled={!selectedBot}
               aria-label="Chat message"
             />
+            <button
+              type="button"
+              className="icon-btn placeholder-btn"
+              disabled
+              title="Voice input — coming soon"
+              aria-label="Voice input (coming soon)"
+            >
+              🎙️
+            </button>
             {sending ? (
               <button className="btn btn-stop" onClick={stopTurn} title="Stop the running turn">
                 ⏹ Stop
@@ -958,6 +1399,32 @@ export default function ChatPage() {
               <button className="btn btn-primary" onClick={() => void send()} disabled={!input.trim()}>
                 Send
               </button>
+            )}
+          </div>
+          <div className="composer-footer">
+            <span className="mono" title="Rough estimate: ~4 characters per token">
+              ≈{formatTokens(estimateTokens(input))} tok
+            </span>
+            <span className="kbd-hint" title="Enter sends · Shift+Enter for a new line">
+              <kbd>↵</kbd> send · <kbd>⇧↵</kbd> newline
+            </span>
+            {botSessionUsage ? (
+              <span
+                className="mono"
+                title={`Session: ${botSessionUsage.promptTokens} in / ${botSessionUsage.completionTokens} out`}
+              >
+                Σ {formatTokens(botSessionUsage.totalTokens)}
+                {botSessionCost !== undefined && (
+                  <span title={COST_ESTIMATE_TOOLTIP}> · ≈{formatUsd(botSessionCost)}</span>
+                )}
+                {sessionMeter && (
+                  <span className={sessionMeter.warn ? 'amber' : undefined}>
+                    {' '}· ctx {Math.round(sessionMeter.pct)}%
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span className="muted">No usage yet</span>
             )}
           </div>
         </div>

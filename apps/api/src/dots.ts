@@ -31,6 +31,8 @@ export interface Dot {
   lastWakeAt?: number;
   /** Backing thread-schedule id (the wake mechanism). */
   threadScheduleId?: string;
+  /** Persistent E2B sandbox ID — the Dot's "own computer". */
+  environmentId?: string;
 }
 
 interface DotRow {
@@ -45,6 +47,7 @@ interface DotRow {
   created_at: number;
   last_wake_at: number | null;
   thread_schedule_id: string | null;
+  environment_id: string | null;
 }
 
 function rowToDot(r: DotRow): Dot {
@@ -60,6 +63,7 @@ function rowToDot(r: DotRow): Dot {
     createdAt: r.created_at,
     lastWakeAt: r.last_wake_at ?? undefined,
     threadScheduleId: r.thread_schedule_id ?? undefined,
+    environmentId: r.environment_id ?? undefined,
   };
 }
 
@@ -86,14 +90,37 @@ export class DotStore {
         enabled INTEGER NOT NULL DEFAULT 1,
         created_at INTEGER NOT NULL,
         last_wake_at INTEGER,
-        thread_schedule_id TEXT
+        thread_schedule_id TEXT,
+        environment_id TEXT
       );
     `);
+    // Migration for DBs created before environment_id existed.
+    try {
+      this.db.exec('ALTER TABLE dots ADD COLUMN environment_id TEXT');
+    } catch {
+      // Column already exists.
+    }
   }
 
   /** Link a backing thread schedule (the wake mechanism). */
   setThreadScheduleId(id: string, scheduleId: string): void {
     this.db.prepare('UPDATE dots SET thread_schedule_id = ? WHERE id = ?').run(scheduleId, id);
+  }
+
+  /** Set the Dot's persistent environment (E2B sandbox ID). */
+  setEnvironmentId(id: string, sandboxId: string): void {
+    this.db.prepare('UPDATE dots SET environment_id = ? WHERE id = ?').run(sandboxId, id);
+  }
+
+  /** Clear the Dot's persistent environment (after stop/expiry). */
+  clearEnvironmentId(id: string): void {
+    this.db.prepare('UPDATE dots SET environment_id = NULL WHERE id = ?').run(id);
+  }
+
+  /** Find a Dot by its working session ID (for routing wakes to its sandbox). */
+  getBySessionId(sessionId: string): Dot | undefined {
+    const row = this.db.prepare('SELECT * FROM dots WHERE session_id = ?').get(sessionId) as unknown as DotRow | undefined;
+    return row ? rowToDot(row) : undefined;
   }
 
   create(input: {

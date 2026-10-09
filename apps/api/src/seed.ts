@@ -22,6 +22,14 @@ export interface StdioMcpServer {
 
 export interface HttpMcpServer {
   url: string;
+  /**
+   * When true, the server requires OAuth 2.1 (authorization code + PKCE).
+   * The platform connects with the stored bearer token; if no valid token
+   * exists the connection fails with an "OAuth required" error pointing at
+   * GET /api/mcp/oauth/start?server=<id>. Connect it once via the API/UI,
+   * then restart or wait for reconnect.
+   */
+  oauth?: boolean;
 }
 
 export type McpServerConfig = StdioMcpServer | HttpMcpServer;

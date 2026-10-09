@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use client';
 
-// Modules hub: lists the Muse-parity modules with live stats. Each card links
+// Modules hub: lists the Sarviq modules with live stats. Each card links
 // to the module's dedicated web page under /modules/<key>.
 
 import { useCallback, useEffect, useState } from 'react';
@@ -28,6 +28,7 @@ interface Overview {
   calls: { count: number };
   research: { reports: number };
   social: { watchlist: number };
+  kb?: { documents: number; corpora: number };
 }
 
 const MODULES: ModuleDef[] = [
@@ -109,6 +110,12 @@ const MODULES: ModuleDef[] = [
     blurb: 'Social listening: keyword watchlist, mock social search, digest.',
     stat: (o) => (o ? `${o.social.watchlist} keywords watched` : '—'),
   },
+  {
+    key: 'kb',
+    name: 'Knowledge Base',
+    blurb: 'RAG over your documents — local embeddings, cited answers. Zero API keys.',
+    stat: (o) => (o?.kb ? `${o.kb.documents} documents · ${o.kb.corpora} corpora` : '—'),
+  },
 ];
 
 const api = (path: string): Promise<unknown> =>
@@ -143,7 +150,7 @@ export default function ModulesPage() {
         <div>
           <h1 className="page-title">Modules</h1>
           <p className="page-sub">
-            The 13 Muse-parity modules. Live counts come from the modules API; each card opens the
+            The 13 Sarviq modules. Live counts come from the modules API; each card opens the
             module&apos;s dedicated page.
           </p>
         </div>

@@ -23,6 +23,7 @@ import type {
 } from '@mvp/agent-runtime';
 import { DEFAULT_POLICY, GovernanceGateway as RealGovernanceGateway } from '@mvp/governance';
 import type { Policy } from '@mvp/governance';
+import { checkHardFloor } from '@mvp/governance';
 // bot-policy.ts is a new module not re-exported from the governance index
 // (index untouched); import the built subpath directly.
 import { mergeBotPolicy } from '@mvp/governance/dist/bot-policy.js';
@@ -84,6 +85,24 @@ export class GovernanceAdapter implements RuntimeGovernanceGateway {
   }
 
   async evaluate(call: ToolCall, ctx: ToolContext): Promise<GovernanceEvaluation> {
+    // Hard floors FIRST — before learned preferences, policy, always-allow.
+    // No mode can bypass these.
+    const floorHit = checkHardFloor(call.name, call.args);
+    if (floorHit) {
+      // Delegate to the real gateway so the approval is minted + audited
+      // with hard-floor-escalated provenance (gateway checks floors first).
+      const res = await this.real.evaluate(call.name, call.args, toEvalContext(ctx));
+      if (res.effect === 'require-approval' && res.approvalId) {
+        const runtimeId = randomUUID();
+        this.idMap.set(runtimeId, res.approvalId);
+        if (this.idMap.size > 1000) {
+          const first = this.idMap.keys().next();
+          if (!first.done) this.idMap.delete(first.value);
+        }
+        return { decision: 'require-approval', approvalId: runtimeId, reason: floorHit.reason };
+      }
+      return { decision: res.effect, reason: floorHit.reason };
+    }
     // Learned preferences (preference learning loop): check before policy.
     // If the user consistently denied this tool, deny immediately.
     // If consistently approved, allow immediately.

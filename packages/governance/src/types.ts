@@ -37,6 +37,8 @@ export interface ApprovalRecord {
   decidedAt?: number;
   decidedBy?: string;
   note?: string;
+  /** Where the approval came from (hard floor, reviewer escalation, etc.). */
+  provenance?: string;
 }
 
 /** Append-only audit entry. `detail` must NEVER contain secrets. */

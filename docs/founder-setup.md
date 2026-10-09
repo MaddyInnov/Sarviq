@@ -198,15 +198,47 @@ policy** (`computerUsePolicyRules()` → `require-approval`) and validation
 hardened (click bounds, key allowlist, type length cap) — none of that
 changes when you swap the OS layer.
 
-To drive a real screen, you must BOTH:
-- Inject a real `OSScreenLayer` implementation (robotjs, nut.js, or a
-  platform accessibility API) where the integrator constructs the tools —
-  `registerComputerUseTool(registry, { os: new RealOSScreenLayer() })`.
-  The default remains the mock, so this is an explicit opt-in.
-- Grant the OS-level permissions the deployment target requires, and run
-  computer use **only inside a sandboxed session** (dedicated VM/container
-  or explicit user-consent screenshare — never the founder's primary
-  desktop unattended):
+#### Enabling REAL foreground control (explicit opt-in)
+
+Set the env var — the mock stays the default, so real input is never
+accidental:
+
+```bash
+# Real OS foreground control (screenshot/click/type/key on the real screen)
+COMPUTER_USE_REAL=1
+
+# Real browser driver (Playwright Chromium instead of the mock)
+BROWSER_REAL=1
+```
+
+Install the optional native dependencies **on the machine whose
+screen/browser you want to control**:
+
+```bash
+npm install screenshot-desktop robotjs   # OS layer: screenshots + mouse/keyboard
+npm install playwright                   # browser driver
+npx playwright install chromium          # fetch the Chromium binary (~170MB)
+```
+
+Notes:
+- `@nut-tree/nut-js` was evaluated but is **no longer published on npm**
+  (404); `robotjs` is the supported input backend. robotjs needs a C++
+  toolchain (node-gyp) at install time.
+- Native modules load **lazily on first action** — the server boots fine
+  without them; the first real action throws a clear "not installed" error.
+- Every real input action is logged to the console (`[computer-real]`) AND
+  to the governance audit trail (`tool.computer_real_action`), on top of the
+  normal tool-call/approval audit entries.
+- `PLAYWRIGHT_HEADED=1` opens a visible browser window (default: headless).
+- The approval gate is orthogonal: `computer-use-require-approval` stays
+  `require-approval` and browser actions still go through the
+  request → approve → execute pipeline. Swapping the layer changes WHAT
+  executes, never WHETHER approval is required.
+
+You must ALSO grant the OS-level permissions the deployment target
+requires, and run computer use **only inside a sandboxed session**
+(dedicated VM/container or explicit user-consent screenshare — never the
+founder's primary desktop unattended):
   - **macOS:** System Settings → Privacy & Security → Accessibility (and
     Screen Recording for screenshots) for the node process / app bundle.
   - **Linux:** X11 (XTEST) or Wayland compositor remote-desktop portal
@@ -250,7 +282,7 @@ provision, no DLT/TRAI considerations arise from it.
 
 ---
 
-# Workstream E — Founder inputs for the 13 Muse-parity modules
+# Workstream E — Founder inputs for the 13 Sarviq modules
 
 Phase 4 build. All 13 modules ship **fully working with mocked providers** —
 zero paid usage, zero network calls in the default configuration. The table
@@ -324,3 +356,46 @@ CLA Assistant bot (`.github/workflows/cla.yml`, text in `CLA.md`).
 
 Without this secret the CLA workflow fails on external PRs — set it before
 accepting the first outside contribution.
+
+## 10. ACP delegation to external coding agents (Octop parity)
+
+The `delegate` tool accepts `via: 'acp'` to hand a subtask to an external
+coding agent (OpenCode, Claude Code, Codex, …) over the Agent Client
+Protocol (JSON-RPC over stdio) instead of the built-in subagent.
+
+**How to point a bot at an external agent** — add to the bot config:
+
+```json
+{ "acp": { "command": "opencode", "args": ["acp"] } }
+```
+
+Examples per tool (the command must speak ACP on stdin/stdout):
+
+- **OpenCode**: `{ "command": "opencode", "args": ["acp"] }`
+- **Claude Code** (if it exposes ACP): `{ "command": "claude", "args": ["--acp"] }`
+- **Any script**: `{ "command": "/path/to/agent", "args": [] }`
+
+**Trust guarantees (unchanged):**
+
+- `delegate` itself is approval-gated like every other tool.
+- The external agent spawns with its working directory confined to the
+  server workspace dir.
+- **Secrets are scrubbed** from the child's environment (`*_API_KEY`,
+  `*_TOKEN`, `*_SECRET`, …) — the external agent uses its own credentials
+  (e.g. its own CLI login), never the platform's.
+- The external agent's output is tagged untrusted, exactly like any tool
+  result, and labeled `[external ACP agent …]` in the returned text.
+- Timeouts: 120s per request (initialize/prompt); the process is killed on
+  close.
+
+No founder action is required — ACP is zero-config until a bot sets it.
+
+## 11. Ollama (fully local models, zero config)
+
+The `ollama` provider is built in — no API key, ever. Install Ollama from
+https://ollama.com/download, pull a model (`ollama pull llama3.1`), and it
+appears in the Providers page under "Local providers" with a live model
+list read from the Ollama instance. Override the host with `OLLAMA_HOST`
+(default `http://localhost:11434`). Tool calling works with tool-capable
+models (llama3.1, qwen2.5, …); other models return a clear error suggesting
+one. Local models are always treated as free ($0) for cost accounting.

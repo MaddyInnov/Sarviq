@@ -79,10 +79,33 @@ export function FilesPanel() {
   const [content, setContent] = useState<string | null>(null);
   const [truncated, setTruncated] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Bot workspace switcher: '' = shared global workspace, else a bot id.
+  const [bots, setBots] = useState<Array<{ id: string; name: string; workspace?: string }>>([]);
+  const [scope, setScope] = useState<string>('');
+
+  const listUrl = scope ? `/api/bots/${encodeURIComponent(scope)}/files` : '/api/files';
+  const contentUrl = (path: string) =>
+    scope
+      ? `/api/bots/${encodeURIComponent(scope)}/files/content?path=${encodeURIComponent(path)}`
+      : `/api/files/content?path=${encodeURIComponent(path)}`;
+
+  useEffect(() => {
+    fetch('/api/bots')
+      .then((r) => r.json())
+      .then((j) => {
+        if (Array.isArray(j)) setBots(j.map((b: { id: string; name: string; workspace?: string }) => ({ id: b.id, name: b.name, workspace: b.workspace })));
+      })
+      .catch(() => undefined);
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    fetch('/api/files')
+    setTree(null);
+    setError(null);
+    setSelected(null);
+    setContent(null);
+    setExpanded(new Set());
+    fetch(listUrl)
       .then((r) => r.json())
       .then((j) => {
         if (cancelled) return;
@@ -95,14 +118,14 @@ export function FilesPanel() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [listUrl]);
 
   const openFile = useCallback((node: FileNode) => {
     setSelected(node);
     setContent(null);
     setTruncated(false);
     setLoading(true);
-    fetch(`/api/files/content?path=${encodeURIComponent(node.path)}`)
+    fetch(contentUrl(node.path))
       .then((r) => r.json())
       .then((j) => {
         setLoading(false);
@@ -118,7 +141,7 @@ export function FilesPanel() {
         setLoading(false);
         setError(e instanceof Error ? e.message : String(e));
       });
-  }, []);
+  }, [scope]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const toggle = useCallback((path: string) => {
     setExpanded((prev) => {
@@ -136,6 +159,21 @@ export function FilesPanel() {
       <div className="files-tree glass">
         <div className="files-tree-head">
           <span className="label">Workspace files</span>
+          <select
+            className="select"
+            value={scope}
+            onChange={(e) => setScope(e.target.value)}
+            aria-label="Workspace scope"
+            title="Switch between the shared workspace and per-bot workspaces"
+            style={{ marginLeft: 8, fontSize: 12 }}
+          >
+            <option value="">Shared workspace</option>
+            {bots.map((b) => (
+              <option key={b.id} value={b.id}>
+                {b.name}{b.workspace ? ` (${b.workspace})` : ' (shared)'}
+              </option>
+            ))}
+          </select>
         </div>
         {error && <div className="error-text">{error}</div>}
         {!tree && !error && <div className="muted">Loading…</div>}

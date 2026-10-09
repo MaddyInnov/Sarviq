@@ -381,6 +381,10 @@ export function removeProviderKey(dataDir: string, providerId: string): boolean 
 
 function isConfigured(providerId: string): boolean {
   try {
+    const preset = getProviderPreset(providerId);
+    // Local providers (Ollama) need no key — they're "configured" by
+    // definition; reachability is checked live by listModels().
+    if (preset?.local) return true;
     return Boolean(resolveApiKey(providerId));
   } catch {
     return false;
@@ -439,6 +443,7 @@ export async function listProviders(dataDir: string): Promise<ProviderInfo[]> {
       // (null until the provider has served at least one request, or when it
       // sends no headers).
       rateLimit: getRateLimit(preset.id),
+      local: preset.local === true,
     };
     if (preset.bridge) {
       const detection = detections.get(preset.bridge);

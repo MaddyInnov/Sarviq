@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 
 import { createHash } from 'node:crypto';
-import { existsSync, readdirSync, readFileSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import matter from 'gray-matter';
 import type { SchemaDriftApprovalBroker } from './mcp.js';
@@ -111,6 +111,12 @@ interface RawSkill {
  */
 export class SkillLoader {
   private readonly pinStore: SkillPinStore | null;
+  /**
+   * Summary cache: skill name → { mtimeMs, size, summary }. getSummary is
+   * called per skill per turn; without this it's 2+ sync file ops per skill
+   * per turn. Invalidated on mtime/size change.
+   */
+  private readonly summaryCache = new Map<string, { mtimeMs: number; size: number; summary: SkillSummary }>();
 
   constructor(
     private readonly skillsDir: string,
@@ -143,6 +149,22 @@ export class SkillLoader {
    * means nothing but the summary enters the prompt.)
    */
   async getSummary(name: string): Promise<SkillSummary> {
+    const file = this.skillFile(name);
+    if (file) {
+      try {
+        const s = statSync(file);
+        const cached = this.summaryCache.get(name);
+        if (cached && cached.mtimeMs === s.mtimeMs && cached.size === s.size) {
+          return cached.summary;
+        }
+        const raw = this.readSkillFile(file, name);
+        const summary = { name: raw.name, description: raw.description };
+        this.summaryCache.set(name, { mtimeMs: s.mtimeMs, size: s.size, summary });
+        return summary;
+      } catch {
+        // fall through to the uncached path below
+      }
+    }
     const raw = this.readSkill(name);
     return { name: raw.name, description: raw.description };
   }
@@ -170,9 +192,18 @@ export class SkillLoader {
   }
 
   private readSkill(name: string): RawSkill {
-    const candidates = [join(this.skillsDir, name, 'SKILL.md'), join(this.skillsDir, `${name}.md`)];
-    const file = candidates.find((c) => existsSync(c));
+    const file = this.skillFile(name);
     if (!file) throw new Error(`Skill not found: "${name}" (looked in ${this.skillsDir})`);
+    return this.readSkillFile(file, name);
+  }
+
+  /** Resolve the skill file path without reading it (for cache validation). */
+  private skillFile(name: string): string | null {
+    const candidates = [join(this.skillsDir, name, 'SKILL.md'), join(this.skillsDir, `${name}.md`)];
+    return candidates.find((c) => existsSync(c)) ?? null;
+  }
+
+  private readSkillFile(file: string, name: string): RawSkill {
     const parsed = matter(readFileSync(file, 'utf8'));
     const data = parsed.data as Record<string, unknown>;
     return {

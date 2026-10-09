@@ -80,7 +80,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           tagName: ${{ github.ref_name }}
-          releaseName: 'Muse ${{ github.ref_name }}'
+          releaseName: 'Sarviq ${{ github.ref_name }}'
           releaseBody: |
             Desktop app installers (Windows .exe, Linux AppImage + .deb) and the
             standalone mvp-server binary. Desktop builds are DRAFT releases —

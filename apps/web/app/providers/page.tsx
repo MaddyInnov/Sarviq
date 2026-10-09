@@ -253,7 +253,9 @@ export default function ProvidersPage() {
 
   // Bridge providers (Claude/Codex subscriptions) are only surfaced when the
   // CLI or its credential file is detected on this machine.
-  const keyProviders = providers.filter((p) => !p.bridge);
+  // Local providers (Ollama) need no key — they get their own section.
+  const localProviders = providers.filter((p) => p.local);
+  const keyProviders = providers.filter((p) => !p.bridge && !p.local);
   const bridgeProviders = providers.filter((p) => p.bridge && p.detected);
 
   return (
@@ -308,6 +310,43 @@ export default function ProvidersPage() {
           ))}
         </>
       )}
+
+      <h2 className="page-sub" style={{ marginTop: 24 }}>
+        Local providers
+      </h2>
+      <p className="small muted">
+        Run on your own machine — no API key needed, ever. Models are read live
+        from the local instance.
+      </p>
+      {localProviders.map((p) => (
+        <div key={p.id} className="card">
+          <div className="row-between">
+            <div>
+              <strong>{p.name}</strong>{' '}
+              <span className="chip green">Local</span>{' '}
+              <span className="chip gray">no key needed</span>
+            </div>
+            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+              <span className="small muted mono">{p.id}</span>
+              <button
+                className="btn btn-sm"
+                disabled={saving === p.id}
+                onClick={() => void refresh()}
+                title="Re-read the model list from the local instance"
+              >
+                {saving === p.id ? 'Refreshing…' : '↻ Refresh models'}
+              </button>
+            </div>
+          </div>
+          <p className="small muted">
+            {shownModels(p).length > 0
+              ? `Models: ${shownModels(p).map((m) => modelLabel(m.id, m.free)).join(', ')}`
+              : 'No models found — is Ollama running? Start it and pull a model, e.g. "ollama pull llama3.1".'}
+          </p>
+          <RateLimitLine rateLimit={p.rateLimit} />
+        </div>
+      ))}
+      {localProviders.length === 0 && !error && <p className="muted">Loading…</p>}
 
       <h2 className="page-sub" style={{ marginTop: 24 }}>
         API keys
