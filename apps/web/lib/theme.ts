@@ -22,12 +22,12 @@ export interface ThemeDef {
 }
 
 export const THEMES: ThemeDef[] = [
-  { id: 'light', label: 'Light', hint: 'Daylight clay', swatch: ['#f6f4ef', '#4f46e5'] },
-  { id: 'dark', label: 'Dark', hint: 'Obsidian clay', swatch: ['#14161c', '#818cf8'] },
+  { id: 'light', label: 'Light', hint: 'Daylight clay', swatch: ['#f6f4ef', '#6d3fc4'] },
+  { id: 'dark', label: 'Dark', hint: 'Obsidian clay', swatch: ['#14161c', '#a179f2'] },
   { id: 'system', label: 'System', hint: 'Follows your OS', swatch: ['#f6f4ef', '#14161c'] },
   { id: 'midnight', label: 'Midnight Clay', hint: 'Deep indigo night', swatch: ['#0f1030', '#a78bfa'] },
-  { id: 'porcelain', label: 'Porcelain', hint: 'Warm cream ceramic', swatch: ['#faf6ef', '#c2410c'] },
-  { id: 'ocean', label: 'Ocean Glass', hint: 'Teal deep-sea glass', swatch: ['#062a33', '#22d3ee'] },
+  { id: 'porcelain', label: 'Porcelain', hint: 'Warm cream ceramic', swatch: ['#faf6ef', '#7e46c4'] },
+  { id: 'ocean', label: 'Ocean Glass', hint: 'Teal deep-sea glass', swatch: ['#062a33', '#9d72ef'] },
 ];
 
 const KEY = 'mvp:theme';

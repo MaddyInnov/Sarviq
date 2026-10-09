@@ -2,6 +2,7 @@
 
 import { useEffect, useState } from 'react';
 import { PetPicker } from '../../components/pet/PetPicker';
+import { AccentPicker } from '../../components/accent/AccentPicker';
 
 interface LearnedPreference {
   id: string;
@@ -81,6 +82,15 @@ export default function PreferencesPage() {
     <div className="page">
       <h1>Preferences & Recordings</h1>
       {error && <div className="error">{error}</div>}
+
+      <section className="card">
+        <h2>Brand accent</h2>
+        <p className="muted small">
+          Choose the jewel-tone accent that tints buttons, chat bubbles, nav highlights and
+          your companion's glow. It applies instantly and works across every theme.
+        </p>
+        <AccentPicker />
+      </section>
 
       <section className="card">
         <h2>Companion pet</h2>

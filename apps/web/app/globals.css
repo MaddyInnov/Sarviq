@@ -17,11 +17,11 @@
 
 /* ================= themes ================= */
 
-/* Light — Daylight Clay (default) */
+/* Light — Daylight Clay (default). Signature brand accent: Amethyst Crown. */
 :root,
 html[data-theme='light'] {
   --bg: #f4f1ea;
-  --bg-glow-1: rgba(99, 102, 241, 0.10);
+  --bg-glow-1: rgba(109, 63, 196, 0.10);
   --bg-glow-2: rgba(234, 88, 12, 0.06);
   --surface: #fbfaf7;
   --surface-2: #f1ede4;
@@ -33,9 +33,12 @@ html[data-theme='light'] {
   --text: #23211c;
   --text-2: #6b655a;
   --text-3: #a39c8d;
-  --accent: #4f46e5;
-  --accent-hover: #4338ca;
-  --accent-soft: #ecebff;
+  /* Signature 135° brand gradient: royal violet → luminous lavender */
+  --accent-from: #6d3fc4;
+  --accent-to: #b678e0;
+  --accent: #6d3fc4;
+  --accent-hover: #5a30ae;
+  --accent-soft: #f0e9fb;
   --accent-ink: #ffffff;
   --green: #15803d;
   --green-soft: #e9f9ef;
@@ -60,10 +63,10 @@ html[data-theme='light'] {
   --ease: cubic-bezier(0.22, 1, 0.36, 1);
 }
 
-/* Dark — Obsidian Clay */
+/* Dark — Obsidian Clay. Signature brand accent: Amethyst Crown (night luminance). */
 html[data-theme='dark'] {
   --bg: #12141a;
-  --bg-glow-1: rgba(129, 140, 248, 0.10);
+  --bg-glow-1: rgba(161, 121, 242, 0.10);
   --bg-glow-2: rgba(34, 211, 238, 0.05);
   --surface: #1b1e27;
   --surface-2: #222633;
@@ -75,10 +78,12 @@ html[data-theme='dark'] {
   --text: #eef0f6;
   --text-2: #a7adbd;
   --text-3: #6b7183;
-  --accent: #818cf8;
-  --accent-hover: #a5b4fc;
-  --accent-soft: #262a4a;
-  --accent-ink: #14161d;
+  --accent-from: #a179f2;
+  --accent-to: #d4aef8;
+  --accent: #a179f2;
+  --accent-hover: #bb93f7;
+  --accent-soft: #221d3d;
+  --accent-ink: #161130;
   --green: #4ade80;
   --green-soft: #16281d;
   --amber: #fbbf24;
@@ -98,10 +103,10 @@ html[data-theme='dark'] {
   --shadow-lg: 0 18px 48px rgba(0, 0, 0, 0.55);
 }
 
-/* Midnight Clay — deep indigo night */
+/* Midnight Clay — deep indigo night. Signature brand accent: Amethyst Crown. */
 html[data-theme='midnight'] {
   --bg: #0d0e28;
-  --bg-glow-1: rgba(167, 139, 250, 0.16);
+  --bg-glow-1: rgba(139, 92, 246, 0.16);
   --bg-glow-2: rgba(34, 211, 238, 0.08);
   --surface: #171941;
   --surface-2: #1e2152;
@@ -113,9 +118,11 @@ html[data-theme='midnight'] {
   --text: #f1efff;
   --text-2: #b3b0d8;
   --text-3: #77739e;
+  --accent-from: #8b5cf6;
+  --accent-to: #d8b4fe;
   --accent: #a78bfa;
   --accent-hover: #c4b5fd;
-  --accent-soft: #262258;
+  --accent-soft: #272159;
   --accent-ink: #12122b;
   --green: #4ade80;
   --green-soft: #152a22;
@@ -136,10 +143,10 @@ html[data-theme='midnight'] {
   --shadow-lg: 0 18px 48px rgba(2, 3, 16, 0.6);
 }
 
-/* Porcelain — warm cream ceramic */
+/* Porcelain — warm cream ceramic. Signature brand accent: Amethyst Crown (warm luminance). */
 html[data-theme='porcelain'] {
   --bg: #f7f2e8;
-  --bg-glow-1: rgba(234, 88, 12, 0.10);
+  --bg-glow-1: rgba(126, 70, 196, 0.10);
   --bg-glow-2: rgba(217, 119, 6, 0.07);
   --surface: #fffdf8;
   --surface-2: #f5efe2;
@@ -151,9 +158,11 @@ html[data-theme='porcelain'] {
   --text: #2b2118;
   --text-2: #7a6a58;
   --text-3: #ab9c86;
-  --accent: #c2410c;
-  --accent-hover: #9a3412;
-  --accent-soft: #fbeadb;
+  --accent-from: #7e46c4;
+  --accent-to: #c084fc;
+  --accent: #7e46c4;
+  --accent-hover: #6a38a8;
+  --accent-soft: #f3eafc;
   --accent-ink: #ffffff;
   --green: #15803d;
   --green-soft: #e9f9ef;
@@ -174,10 +183,10 @@ html[data-theme='porcelain'] {
   --shadow-lg: 0 18px 48px rgba(90, 60, 30, 0.18);
 }
 
-/* Ocean Glass — teal deep-sea glass */
+/* Ocean Glass — teal deep-sea glass. Signature brand accent: Amethyst Crown (night luminance). */
 html[data-theme='ocean'] {
   --bg: #052630;
-  --bg-glow-1: rgba(34, 211, 238, 0.14);
+  --bg-glow-1: rgba(157, 114, 239, 0.12);
   --bg-glow-2: rgba(52, 211, 153, 0.08);
   --surface: #0a3542;
   --surface-2: #0e4252;
@@ -189,10 +198,12 @@ html[data-theme='ocean'] {
   --text: #ecfeff;
   --text-2: #a5c8d2;
   --text-3: #5f8794;
-  --accent: #22d3ee;
-  --accent-hover: #67e8f9;
-  --accent-soft: #0c3f4d;
-  --accent-ink: #04222b;
+  --accent-from: #9d72ef;
+  --accent-to: #d0aef8;
+  --accent: #9d72ef;
+  --accent-hover: #b48df7;
+  --accent-soft: #1d2049;
+  --accent-ink: #0f1030;
   --green: #4ade80;
   --green-soft: #0f2e22;
   --amber: #fbbf24;
@@ -299,7 +310,8 @@ textarea {
   font-size: 16px;
   margin-right: 18px;
   letter-spacing: -0.02em;
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  /* Signature Sarviq 135° brand gradient. */
+  background: var(--brand-grad);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -349,7 +361,12 @@ html[data-ux='pro'] .navlink:hover {
 }
 
 .navlink.active {
-  background: var(--surface);
+  /* Subtle 135° brand tint marks the active destination. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-from, #6d3fc4) 12%, var(--surface)),
+    var(--surface)
+  );
   color: var(--accent);
   box-shadow: var(--clay-pressed);
 }
@@ -639,7 +656,8 @@ html[data-ux='pro'] .theme-opt:hover {
 .brand-mini {
   font-weight: 800;
   font-size: 16px;
-  background: linear-gradient(135deg, var(--accent), var(--accent-hover));
+  /* Signature Sarviq 135° brand gradient. */
+  background: var(--brand-grad);
   -webkit-background-clip: text;
   background-clip: text;
   color: transparent;
@@ -670,7 +688,12 @@ html[data-ux='pro'] .theme-opt:hover {
 }
 
 .drawer-link.active {
-  background: var(--surface);
+  /* Subtle 135° brand tint marks the active destination. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-from, #6d3fc4) 12%, var(--surface)),
+    var(--surface)
+  );
   color: var(--accent);
   box-shadow: var(--clay-pressed);
 }
@@ -736,7 +759,12 @@ html[data-ux='pro'] .theme-opt:hover {
 
 .mtab.active {
   color: var(--accent);
-  background: var(--surface);
+  /* Subtle 135° brand tint marks the active tab. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-from, #6d3fc4) 12%, var(--surface)),
+    var(--surface)
+  );
   box-shadow: var(--clay-pressed);
 }
 
@@ -827,7 +855,8 @@ h1.page-title {
 }
 
 .btn-primary {
-  background: linear-gradient(160deg, var(--accent), var(--accent-hover));
+  /* Signature Sarviq 135° brand gradient. */
+  background: var(--brand-grad);
   border-color: transparent;
   color: var(--accent-ink);
   box-shadow: 5px 5px 14px var(--clay-lo), -3px -3px 10px var(--clay-hi),
@@ -835,8 +864,8 @@ h1.page-title {
 }
 
 .btn-primary:hover {
-  background: linear-gradient(160deg, var(--accent-hover), var(--accent));
-  filter: brightness(1.05);
+  background: var(--brand-grad);
+  filter: brightness(1.07);
 }
 
 .btn-primary:active {
@@ -1148,7 +1177,8 @@ table.tbl tr:last-child td {
 
 .clay-toggle[aria-checked='true'] .knob {
   transform: translateX(19px);
-  background: linear-gradient(160deg, var(--accent), var(--accent-hover));
+  /* Signature Sarviq 135° brand gradient. */
+  background: linear-gradient(135deg, var(--accent-from, var(--accent)), var(--accent-to, var(--accent-hover)));
   box-shadow: 2px 2px 6px var(--clay-lo), inset 1px 1px 2px rgba(255, 255, 255, 0.4);
 }
 
@@ -1349,7 +1379,12 @@ html[data-ux='pro'] .msg {
 
 .msg.assistant {
   align-self: flex-start;
-  background: var(--surface);
+  /* Subtle 135° brand tint over the clay surface — premium, not gaudy. */
+  background: linear-gradient(
+    135deg,
+    color-mix(in srgb, var(--accent-from, #6d3fc4) 8%, var(--surface)),
+    var(--surface) 55%
+  );
   border: 1px solid var(--border);
   border-bottom-left-radius: 7px;
   box-shadow: var(--clay-shadow-sm);
@@ -2261,7 +2296,7 @@ html[data-theme='midnight'] .tk-fn { color: #67e8f9; }
 }
 .tag-pill.active {
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-ink, #fff);
   border-color: var(--accent);
 }
 .tag-pill .muted { opacity: 0.7; }

@@ -9,6 +9,22 @@
   filter: drop-shadow(0 6px 10px var(--clay-lo, rgba(31, 38, 90, 0.18)));
 }
 
+/* ---- brand glow ------------------------------------------------------
+   The companion picks up the active Sarviq brand accent as a soft glow while
+   it thinks or works. Static glow only (no motion) — it survives
+   prefers-reduced-motion intact, and the mood animations remain the ones
+   already disabled by the reduced-motion block below. */
+
+.pet-mood-thinking {
+  filter: drop-shadow(0 6px 10px var(--clay-lo, rgba(31, 38, 90, 0.18)))
+    drop-shadow(0 0 18px color-mix(in srgb, var(--accent-from, #6d3fc4) 55%, transparent));
+}
+
+.pet-mood-working {
+  filter: drop-shadow(0 6px 10px var(--clay-lo, rgba(31, 38, 90, 0.18)))
+    drop-shadow(0 0 10px color-mix(in srgb, var(--accent-from, #6d3fc4) 35%, transparent));
+}
+
 .pet-inner {
   display: inline-block;
   width: 100%;

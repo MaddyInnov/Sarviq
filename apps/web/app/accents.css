@@ -1,0 +1,245 @@
+/* SPDX-License-Identifier: Apache-2.0 */
+/* Sarviq brand accents.
+ *
+ * The signature "Amethyst Crown" identity lives in the five theme blocks in
+ * globals.css, so html[data-accent='amethyst'] needs no rules here. Each
+ * accent below overrides the accent variables with theme-appropriate
+ * luminance roles (see lib/accent.ts for the documented palette):
+ *
+ *   html[data-accent='<id>']                       → light-polarity roles
+ *   html[data-theme='dark|midnight|ocean'][data-accent='<id>']
+ *                                                  → dark-polarity roles
+ *
+ * Light + porcelain themes take the light set; dark, midnight and ocean take
+ * the dark set. The higher-specificity dark rule wins regardless of source
+ * order; the light rule wins over the theme block because this file is
+ * imported after globals.css. All motion rules, clay shadows, glass panels
+ * and prefers-reduced-motion handling are untouched — components consume the
+ * same variable names, just with jewel-toned values.
+ *
+ * No Octop colors are used anywhere in this file; the duotones below are
+ * original Sarviq "Jewels" (see the palette comment in lib/accent.ts).
+ */
+
+/* Convenience handle for the signature 135° brand gradient. Resolves against
+ * whichever --accent-from/--accent-to is active (theme default or override). */
+:root {
+  --brand-grad: linear-gradient(135deg, var(--accent-from, #6d3fc4), var(--accent-to, #b678e0));
+}
+
+/* ================= Emerald Court ================= */
+
+html[data-accent='emerald'] {
+  --accent-from: #0b6e5d;
+  --accent-to: #3ecf9a;
+  --accent: #0b6e5d;
+  --accent-hover: #0a5c4d;
+  --accent-soft: #e3f7ee;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(11, 110, 93, 0.10);
+}
+
+html[data-theme='dark'][data-accent='emerald'],
+html[data-theme='midnight'][data-accent='emerald'],
+html[data-theme='ocean'][data-accent='emerald'] {
+  --accent-from: #3dd9a4;
+  --accent-to: #8cf0c8;
+  --accent: #3dd9a4;
+  --accent-hover: #63e4b5;
+  --accent-soft: #12362a;
+  --accent-ink: #06231a;
+  --bg-glow-1: rgba(61, 217, 164, 0.10);
+}
+
+/* ================= Sapphire Dusk ================= */
+
+html[data-accent='sapphire'] {
+  --accent-from: #1d4fa8;
+  --accent-to: #5aa9e6;
+  --accent: #1d4fa8;
+  --accent-hover: #1a448f;
+  --accent-soft: #e7f1fc;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(29, 79, 168, 0.10);
+}
+
+html[data-theme='dark'][data-accent='sapphire'],
+html[data-theme='midnight'][data-accent='sapphire'],
+html[data-theme='ocean'][data-accent='sapphire'] {
+  --accent-from: #5aa0f0;
+  --accent-to: #9ccdf8;
+  --accent: #5aa0f0;
+  --accent-hover: #7db4f5;
+  --accent-soft: #16294a;
+  --accent-ink: #0c1a33;
+  --bg-glow-1: rgba(90, 160, 240, 0.10);
+}
+
+/* ================= Garnet Ember ================= */
+
+html[data-accent='garnet'] {
+  --accent-from: #9c2233;
+  --accent-to: #e0722d;
+  --accent: #9c2233;
+  --accent-hover: #851d2c;
+  --accent-soft: #faeae6;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(156, 34, 51, 0.10);
+}
+
+html[data-theme='dark'][data-accent='garnet'],
+html[data-theme='midnight'][data-accent='garnet'],
+html[data-theme='ocean'][data-accent='garnet'] {
+  --accent-from: #e5645f;
+  --accent-to: #f2a35c;
+  --accent: #e5645f;
+  --accent-hover: #ec837f;
+  --accent-soft: #3a1b1c;
+  --accent-ink: #2c100f;
+  --bg-glow-1: rgba(229, 100, 95, 0.10);
+}
+
+/* ================= Gilded Topaz ================= */
+
+html[data-accent='topaz'] {
+  --accent-from: #96620f;
+  --accent-to: #e8b44b;
+  --accent: #96620f;
+  --accent-hover: #7f5310;
+  --accent-soft: #faf0da;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(150, 98, 15, 0.10);
+}
+
+html[data-theme='dark'][data-accent='topaz'],
+html[data-theme='midnight'][data-accent='topaz'],
+html[data-theme='ocean'][data-accent='topaz'] {
+  --accent-from: #e3ae4a;
+  --accent-to: #f6d58a;
+  --accent: #e3ae4a;
+  --accent-hover: #e9be68;
+  --accent-soft: #3a2c12;
+  --accent-ink: #261c0a;
+  --bg-glow-1: rgba(227, 174, 74, 0.10);
+}
+
+/* ================= Copper Rose ================= */
+
+html[data-accent='copper'] {
+  --accent-from: #8f4426;
+  --accent-to: #e0956a;
+  --accent: #8f4426;
+  --accent-hover: #7c3a20;
+  --accent-soft: #faece2;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(143, 68, 38, 0.10);
+}
+
+html[data-theme='dark'][data-accent='copper'],
+html[data-theme='midnight'][data-accent='copper'],
+html[data-theme='ocean'][data-accent='copper'] {
+  --accent-from: #e08b5e;
+  --accent-to: #f4b896;
+  --accent: #e08b5e;
+  --accent-hover: #e7a27c;
+  --accent-soft: #382015;
+  --accent-ink: #2a150c;
+  --bg-glow-1: rgba(224, 139, 94, 0.10);
+}
+
+/* ================= Opal Mist ================= */
+
+html[data-accent='opal'] {
+  --accent-from: #52617a;
+  --accent-to: #aebccf;
+  --accent: #52617a;
+  --accent-hover: #455469;
+  --accent-soft: #edf0f4;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(82, 97, 122, 0.10);
+}
+
+html[data-theme='dark'][data-accent='opal'],
+html[data-theme='midnight'][data-accent='opal'],
+html[data-theme='ocean'][data-accent='opal'] {
+  --accent-from: #a9b7cc;
+  --accent-to: #dde5f0;
+  --accent: #a9b7cc;
+  --accent-hover: #bcc7da;
+  --accent-soft: #232c3b;
+  --accent-ink: #161c27;
+  --bg-glow-1: rgba(169, 183, 204, 0.10);
+}
+
+/* ================= Peacock Plume ================= */
+
+html[data-accent='peacock'] {
+  --accent-from: #0b5c63;
+  --accent-to: #35c9b4;
+  --accent: #0b5c63;
+  --accent-hover: #0a4d53;
+  --accent-soft: #e2f7f1;
+  --accent-ink: #ffffff;
+  --bg-glow-1: rgba(11, 92, 99, 0.10);
+}
+
+html[data-theme='dark'][data-accent='peacock'],
+html[data-theme='midnight'][data-accent='peacock'],
+html[data-theme='ocean'][data-accent='peacock'] {
+  --accent-from: #3ad6bd;
+  --accent-to: #8ef0d8;
+  --accent: #3ad6bd;
+  --accent-hover: #5de0c8;
+  --accent-soft: #0f3229;
+  --accent-ink: #06231c;
+  --bg-glow-1: rgba(58, 214, 189, 0.10);
+}
+
+/* ================= accent picker ================= */
+
+.accent-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+  margin: 12px 0;
+}
+
+@media (max-width: 640px) {
+  .accent-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.accent-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  padding: 14px 10px;
+  cursor: pointer;
+  text-align: center;
+  border: 2px solid transparent;
+  transition: transform 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.accent-card:hover {
+  transform: translateY(-2px);
+}
+
+.accent-card.selected {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--accent) 22%, transparent);
+}
+
+.accent-swatch {
+  width: 52px;
+  height: 52px;
+  border-radius: 50%;
+  box-shadow: inset 2px 2px 5px rgba(255, 255, 255, 0.45),
+    inset -3px -3px 6px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.2);
+}
+
+.accent-name {
+  font-weight: 700;
+  font-size: 13px;
+}
