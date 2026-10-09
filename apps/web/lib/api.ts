@@ -473,6 +473,8 @@ export interface ChatRequest {
   sessionId?: string;
   provider?: string;
   model?: string;
+  /** Sandbox mode: read-only | workspace-write | danger-full-access. */
+  sandboxMode?: 'read-only' | 'workspace-write' | 'danger-full-access';
   /** Session auto-approve: skip approval cards for this turn (audited). */
   autoApprove?: boolean;
   /** Plan mode: read-only exploration, mutating tools denied. */

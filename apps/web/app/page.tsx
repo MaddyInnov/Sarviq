@@ -192,6 +192,8 @@ export default function ChatPage() {
   const [selectedBotId, setSelectedBotId] = useState<string>('');
   const [providerId, setProviderId] = useState<string>('');
   const [modelId, setModelId] = useState<string>('');
+  type SandboxMode = 'read-only' | 'workspace-write' | 'danger-full-access';
+  const [sandboxMode, setSandboxMode] = useState<SandboxMode>('workspace-write');
   const [blocks, setBlocks] = useState<ChatBlock[]>([]);
   const [input, setInput] = useState('');
   const [sending, setSending] = useState(false);
@@ -220,6 +222,8 @@ export default function ChatPage() {
   providerIdRef.current = providerId;
   const modelIdRef = useRef(modelId);
   modelIdRef.current = modelId;
+  const sandboxModeRef = useRef(sandboxMode);
+  sandboxModeRef.current = sandboxMode;
   const modelPricesRef = useRef(modelPrices);
   modelPricesRef.current = modelPrices;
   const autoApproveRef = useRef(autoApprove);
@@ -448,6 +452,7 @@ export default function ChatPage() {
         sessionId: sessionIdFor(selectedBot.id),
         provider: providerIdRef.current || undefined,
         model: modelIdRef.current || undefined,
+        sandboxMode: sandboxModeRef.current,
         autoApprove: autoApproveRef.current,
         planMode: planModeRef.current,
         maxBudgetUsd: Number.isFinite(budget) && budget >= 0 ? budget : undefined,
@@ -707,6 +712,17 @@ export default function ChatPage() {
                 {m.name}
               </option>
             ))}
+          </select>
+          <select
+            className="select"
+            value={sandboxMode}
+            onChange={(e) => setSandboxMode(e.target.value as SandboxMode)}
+            aria-label="Sandbox mode"
+            title="Sandbox mode — read-only blocks all writes/exec; workspace-write is default; danger-full-access lifts the cage (approvals still apply)"
+          >
+            <option value="workspace-write">🛡️ Workspace</option>
+            <option value="read-only">🔒 Read-only</option>
+            <option value="danger-full-access">⚠️ Full access</option>
           </select>
           <div className="chat-modes">
             <ClayToggle

@@ -1,0 +1,153 @@
+'use client';
+
+import { useEffect, useState } from 'react';
+
+interface LearnedPreference {
+  id: string;
+  botId: string;
+  toolName: string;
+  preference: 'deny' | 'allow';
+  observations: number;
+  updatedAt: number;
+}
+
+interface Recording {
+  id: string;
+  name: string;
+  status: 'recording' | 'stopped' | 'converted';
+  events: Array<{ type: string; selector?: string; value?: string; url?: string; timestamp: number }>;
+  createdAt: number;
+}
+
+async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const res = await fetch(path, { ...init, headers: { 'content-type': 'application/json', ...(init?.headers || {}) } });
+  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  return res.json() as Promise<T>;
+}
+
+export default function PreferencesPage() {
+  const [prefs, setPrefs] = useState<LearnedPreference[]>([]);
+  const [recordings, setRecordings] = useState<Recording[]>([]);
+  const [recording, setRecording] = useState<Recording | null>(null);
+  const [recName, setRecName] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  const load = async () => {
+    try {
+      const [p, r] = await Promise.all([
+        api<{ ok: boolean; preferences: LearnedPreference[] }>('/api/preferences'),
+        api<{ ok: boolean; recordings: Recording[] }>('/api/recordings'),
+      ]);
+      setPrefs(p.preferences);
+      setRecordings(r.recordings);
+      setRecording(r.recordings.find((x) => x.status === 'recording') ?? null);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  const removePref = async (id: string) => {
+    await api(`/api/preferences/${id}`, { method: 'DELETE' });
+    load();
+  };
+
+  const startRecording = async () => {
+    const res = await api<{ ok: boolean; recording: Recording }>('/api/recordings', {
+      method: 'POST',
+      body: JSON.stringify({ name: recName }),
+    });
+    setRecording(res.recording);
+    setRecName('');
+    load();
+  };
+
+  const stopRecording = async () => {
+    if (!recording) return;
+    await api(`/api/recordings/${recording.id}/stop`, { method: 'POST' });
+    setRecording(null);
+    load();
+  };
+
+  const convertRecording = async (id: string) => {
+    const res = await api<{ ok: boolean; workflow: unknown }>(`/api/recordings/${id}/convert`, { method: 'POST' });
+    alert('Workflow generated with ' + (res.workflow as { steps: unknown[] }).steps.length + ' steps. Save it from the Workflows page.');
+    load();
+  };
+
+  return (
+    <div className="page">
+      <h1>Preferences & Recordings</h1>
+      {error && <div className="error">{error}</div>}
+
+      <section className="card">
+        <h2>Learned preferences</h2>
+        <p className="muted small">
+          The platform learns from your approve/deny decisions. Deny a tool 3 times and it's auto-denied;
+          approve it 5 times and it's auto-approved. Remove a preference to reset.
+        </p>
+        {prefs.length === 0 ? (
+          <p className="muted">No learned preferences yet. Approve or deny tool requests and patterns will appear here.</p>
+        ) : (
+          <table className="table">
+            <thead><tr><th>Bot</th><th>Tool</th><th>Learned</th><th>Decisions</th><th></th></tr></thead>
+            <tbody>
+              {prefs.map((p) => (
+                <tr key={p.id}>
+                  <td>{p.botId}</td>
+                  <td><code>{p.toolName}</code></td>
+                  <td>{p.preference === 'deny' ? '🚫 Auto-deny' : '✅ Auto-allow'}</td>
+                  <td>{p.observations}</td>
+                  <td><button className="btn small" onClick={() => removePref(p.id)}>Remove</button></td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>Teach by recording</h2>
+        <p className="muted small">
+          Record your clicks and form fills, then convert the recording into a reusable workflow.
+        </p>
+        {recording ? (
+          <div>
+            <p>🔴 Recording: <strong>{recording.name}</strong> ({recording.events.length} events)</p>
+            <button className="btn danger" onClick={stopRecording}>Stop recording</button>
+          </div>
+        ) : (
+          <div className="row">
+            <input
+              className="input"
+              placeholder="Recording name (e.g. Weekly report)"
+              value={recName}
+              onChange={(e) => setRecName(e.target.value)}
+            />
+            <button className="btn primary" onClick={startRecording}>Start recording</button>
+          </div>
+        )}
+        {recordings.filter((r) => r.status !== 'recording').length > 0 && (
+          <table className="table">
+            <thead><tr><th>Name</th><th>Events</th><th>Status</th><th></th></tr></thead>
+            <tbody>
+              {recordings.filter((r) => r.status !== 'recording').map((r) => (
+                <tr key={r.id}>
+                  <td>{r.name}</td>
+                  <td>{r.events.length}</td>
+                  <td>{r.status}</td>
+                  <td>
+                    {r.status === 'stopped' && (
+                      <button className="btn small" onClick={() => convertRecording(r.id)}>Convert to workflow</button>
+                    )}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        )}
+      </section>
+    </div>
+  );
+}
