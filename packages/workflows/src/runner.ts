@@ -5,6 +5,7 @@ import type {
   AgentRuntime,
   BotConfig,
   StreamEvent,
+  TelemetryCollector,
   ToolDefinition,
 } from '@mvp/agent-runtime';
 import type { GovernanceGateway } from '@mvp/governance';
@@ -25,6 +26,13 @@ export interface WorkflowRunnerOptions {
   governance: GovernanceGateway;
   tools: Map<string, ToolDefinition>;
   bots: Map<string, BotConfig>;
+  /**
+   * Runtime telemetry collector ("eyes for your AI"). When set, each
+   * workflow run gets a telemetry record keyed by runId (a paused run
+   * keeps its record open across the approval wait; resume reuses it),
+   * with one timed step per node. Metadata-tier fields only.
+   */
+  telemetry?: TelemetryCollector;
 }
 
 export type RunUpdateCallback = (run: WorkflowRun) => void;
@@ -71,12 +79,21 @@ export class WorkflowRunner {
    */
   private runCache = new Map<string, WorkflowRun>();
 
+  /**
+   * Telemetry run ids for workflow runs currently executing (runId →
+   * telemetry run id). Kept so executeNode can attach node steps to the
+   * right record without changing its signature chain.
+   */
+  private readonly telemetryRuns = new Map<string, string>();
+  private readonly telemetry?: TelemetryCollector;
+
   constructor(opts: WorkflowRunnerOptions) {
     this.store = new WorkflowStore(opts.dbPath);
     this.agentRuntime = opts.agentRuntime;
     this.governance = opts.governance;
     this.tools = opts.tools;
     this.bots = opts.bots;
+    this.telemetry = opts.telemetry;
   }
 
   close(): void {
@@ -298,6 +315,22 @@ export class WorkflowRunner {
     // re-assembling the run from SQLite (2 queries per call).
     const primed = this.store.getRun(runId);
     if (primed) this.runCache.set(runId, primed);
+    // Runtime telemetry: one record per workflow run, keyed by runId so a
+    // paused-then-resumed run reuses its record instead of double-counting.
+    // Only metadata-tier fields are recorded; the ingestion guard runs.
+    let telRunId: string | null = null;
+    try {
+      telRunId =
+        this.telemetry?.beginRun({
+          id: runId,
+          kind: 'workflow-run',
+          workflowId: primed?.workflowId,
+          sessionId: runId,
+        }) ?? null;
+      if (telRunId) this.telemetryRuns.set(runId, telRunId);
+    } catch {
+      telRunId = null;
+    }
     try {
       const run = this.getRunOrThrow(runId);
       const def = this.getWorkflow(run.workflowId);
@@ -330,6 +363,18 @@ export class WorkflowRunner {
       }
       this.setRunStatus(runId, 'succeeded');
     } finally {
+      // Telemetry: close the run record on terminal status only. A run
+      // paused for approval keeps its record open across the wait; the
+      // resume path reuses it via the id-keyed beginRun above.
+      try {
+        const final = this.store.getRun(runId)?.status;
+        if (telRunId && (final === 'succeeded' || final === 'failed')) {
+          this.telemetry?.endRun(telRunId, { status: final === 'succeeded' ? 'ok' : 'error' });
+          this.telemetryRuns.delete(runId);
+        }
+      } catch {
+        // Telemetry must never break execution.
+      }
       this.runCache.delete(runId);
       this.executing.delete(runId);
     }
@@ -341,16 +386,29 @@ export class WorkflowRunner {
     const node = def.nodes.find((n) => n.id === nodeId);
     if (!node) throw new Error(`unknown node ${nodeId} in workflow ${def.id}`);
 
-    this.updateNodeState(runId, nodeId, { status: 'running', startedAt: Date.now() });
+    // Telemetry: one timed step per node (latency + ok/error).
+    const telRunId = this.telemetryRuns.get(runId) ?? null;
+    const nodeStep = telRunId ? this.telemetry?.startStep(telRunId, node.id, 'node') : null;
+
+    // Attempt counting for run-health retry heuristics: re-execution of an
+    // already-attempted node (crash-resume, manual re-run) increments.
+    const priorAttempts = run.nodeStates[nodeId]?.attempts ?? 0;
+    this.updateNodeState(runId, nodeId, {
+      status: 'running',
+      startedAt: Date.now(),
+      attempts: priorAttempts + 1,
+    });
     try {
       const output = await this.runNodeLogic(runId, node);
       this.updateNodeState(runId, nodeId, { status: 'succeeded', output, endedAt: Date.now() });
       this.checkpoint(runId);
+      nodeStep?.end({ ok: true });
       // A node that paused for approval resumes the run once its decision lands.
       const current = this.getRunOrThrow(runId);
       if (current.status === 'paused') this.setRunStatus(runId, 'running');
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
+      nodeStep?.end({ ok: false, errorKind: err instanceof Error ? err.name : 'Error' });
       this.updateNodeState(runId, nodeId, {
         status: 'failed',
         error: message,

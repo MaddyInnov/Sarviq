@@ -149,9 +149,45 @@ export interface Briefing {
   calendar: BriefingItem[];
   approvals: BriefingItem[];
   summary?: string;
+  /**
+   * Health regression alerts (feature #5). Optional so the panel keeps
+   * working against briefing backends that do not emit it yet — the panel
+   * also falls back to GET /api/health/regressions directly.
+   */
+  regressions?: RegressionAlert[];
 }
 
 export const getBriefing = (): Promise<Briefing | null> => optionalJson('/api/briefing');
+
+// ---- Run health: regression alerts ----------------------------------------------
+
+export interface RegressionAlert {
+  id: string;
+  scopeKind: 'workflow' | 'bot';
+  scopeId: string;
+  metric: 'latency-p50' | 'error-rate' | 'cost-per-run';
+  metricLabel: string;
+  baseline: number;
+  current: number;
+  changePct: number;
+  changeUnit: 'percent' | 'points';
+  baselineSamples: number;
+  currentSamples: number;
+  windowStart: number;
+  windowEnd: number;
+  generatedAt: number;
+}
+
+export interface RegressionsPayload {
+  generatedAt: number;
+  windowDays: number;
+  thresholdPct: number;
+  minSamples: number;
+  regressions: RegressionAlert[];
+}
+
+export const getRegressions = (): Promise<RegressionsPayload | null> =>
+  optionalJson('/api/health/regressions');
 
 // ---- Omni rolling summary --------------------------------------------------------
 

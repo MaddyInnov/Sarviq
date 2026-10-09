@@ -11,6 +11,8 @@
 // Storage: <dataDir>/checkpoints.db (node:sqlite).
 
 import { randomUUID } from 'node:crypto';
+import { mkdirSync } from 'node:fs';
+import { join } from 'node:path';
 import type { DatabaseSync } from 'node:sqlite';
 
 const { DatabaseSync: DatabaseSyncImpl } = process.getBuiltinModule('node:sqlite');
@@ -53,8 +55,6 @@ export class CheckpointStore {
   private readonly db: DatabaseSync;
 
   constructor(dataDir: string) {
-    const { mkdirSync } = require('node:fs') as typeof import('node:fs');
-    const { join } = require('node:path') as typeof import('node:path');
     mkdirSync(dataDir, { recursive: true });
     this.db = new DatabaseSyncImpl(join(dataDir, 'checkpoints.db'));
     this.db.exec(`

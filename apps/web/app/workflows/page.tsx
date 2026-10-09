@@ -4,8 +4,8 @@
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { useCallback, useEffect, useState } from 'react';
-import { getRuns, getWorkflows, runWorkflow } from '../../lib/api';
-import type { WorkflowDefinition, WorkflowRun } from '../../lib/api';
+import { getRunHealth, getRuns, getWorkflows, runWorkflow } from '../../lib/api';
+import type { HealthScore, RunHealth, WorkflowDefinition, WorkflowRun } from '../../lib/api';
 
 function fmtTs(ts: number): string {
   return new Date(ts).toLocaleString();
@@ -17,6 +17,16 @@ function statusChip(status: WorkflowRun['status']) {
   return <span className={`chip ${cls}`}>{status}</span>;
 }
 
+/** Run-health verdict chip (feature #2): turns the runs log into a coach. */
+function healthChip(score?: HealthScore) {
+  if (!score) return <span className="chip gray">—</span>;
+  const cls = score === 'good' ? 'green' : score === 'needs-work' ? 'amber' : 'red';
+  const label = score === 'good' ? 'Good' : score === 'needs-work' ? 'Needs work' : 'Poor';
+  return <span className={`chip ${cls}`}>{label}</span>;
+}
+
+const SEVERITY_CLS: Record<string, string> = { critical: 'red', warning: 'amber', info: 'gray' };
+
 export default function WorkflowsPage() {
   const router = useRouter();
   const [defs, setDefs] = useState<WorkflowDefinition[]>([]);
@@ -26,6 +36,10 @@ export default function WorkflowsPage() {
   // Per-definition run form state.
   const [inputs, setInputs] = useState<Record<string, string>>({});
   const [idemKeys, setIdemKeys] = useState<Record<string, string>>({});
+  // Expandable health diagnosis per run (feature #2).
+  const [expanded, setExpanded] = useState<string | null>(null);
+  const [diagnoses, setDiagnoses] = useState<Record<string, RunHealth>>({});
+  const [diagLoading, setDiagLoading] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -44,8 +58,22 @@ export default function WorkflowsPage() {
     return () => clearInterval(t);
   }, [refresh]);
 
-  const start = async (def: WorkflowDefinition) => {
-    const rawInput = (inputs[def.id] ?? '').trim();
+  const toggleDiagnosis = (runId: string) => {
+    if (expanded === runId) {
+      setExpanded(null);
+      return;
+    }
+    setExpanded(runId);
+    if (!diagnoses[runId] && diagLoading !== runId) {
+      setDiagLoading(runId);
+      getRunHealth(runId)
+        .then((h) => setDiagnoses((d) => ({ ...d, [runId]: h })))
+        .catch((err) => setError(err instanceof Error ? err.message : String(err)))
+        .finally(() => setDiagLoading(null));
+    }
+  };
+
+  const start = async (def: WorkflowDefinition) => {    const rawInput = (inputs[def.id] ?? '').trim();
     let input: unknown;
     if (rawInput) {
       try {
@@ -129,25 +157,78 @@ export default function WorkflowsPage() {
               <th>Run</th>
               <th>Workflow</th>
               <th>Status</th>
+              <th>Health</th>
               <th>Created</th>
             </tr>
           </thead>
           <tbody>
-            {runs.map((r) => (
-              <tr key={r.id}>
-                <td>
-                  <Link href={`/workflows/${r.id}`} className="mono" style={{ color: 'var(--accent)' }}>
-                    {r.id.slice(0, 8)}…
-                  </Link>
-                </td>
-                <td className="mono">{r.workflowId}</td>
-                <td>{statusChip(r.status)}</td>
-                <td className="small muted">{fmtTs(r.createdAt)}</td>
-              </tr>
-            ))}
+            {runs.flatMap((r) => {
+              const isOpen = expanded === r.id;
+              const diag = diagnoses[r.id];
+              const rows = [
+                <tr key={r.id}>
+                  <td>
+                    <Link href={`/workflows/${r.id}`} className="mono" style={{ color: 'var(--accent)' }}>
+                      {r.id.slice(0, 8)}…
+                    </Link>
+                  </td>
+                  <td className="mono">{r.workflowId}</td>
+                  <td>{statusChip(r.status)}</td>
+                  <td>
+                    <button
+                      className="btn btn-sm"
+                      onClick={() => toggleDiagnosis(r.id)}
+                      aria-expanded={isOpen}
+                      aria-label={`Health diagnosis for run ${r.id.slice(0, 8)}`}
+                      title="Show diagnosis and suggested fixes"
+                    >
+                      {healthChip(r.healthScore)} {isOpen ? '▾' : '▸'}
+                    </button>
+                  </td>
+                  <td className="small muted">{fmtTs(r.createdAt)}</td>
+                </tr>,
+              ];
+              if (isOpen) {
+                rows.push(
+                  <tr key={`${r.id}-diag`}>
+                    <td colSpan={5} style={{ background: 'var(--bg-subtle, transparent)' }}>
+                      {diagLoading === r.id && !diag ? (
+                        <p className="small muted">Loading diagnosis…</p>
+                      ) : diag ? (
+                        <div>
+                          <strong className="small">Health diagnosis</strong>
+                          {diag.findings.length === 0 ? (
+                            <p className="small muted">Clean run — no issues detected.</p>
+                          ) : (
+                            <ul className="brief-list">
+                              {diag.findings.map((f, i) => (
+                                <li key={i} className="brief-item">
+                                  <div className="row gap">
+                                    <span className={`chip ${SEVERITY_CLS[f.severity] ?? 'gray'}`}>{f.severity}</span>
+                                    <strong className="small">{f.title}</strong>
+                                    {f.nodeId && <span className="small muted mono">{f.nodeId}</span>}
+                                  </div>
+                                  <div className="brief-item-detail small">{f.detail}</div>
+                                  <div className="brief-item-detail small">
+                                    <strong>Fix:</strong> {f.fix}
+                                  </div>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </div>
+                      ) : (
+                        <p className="small muted">Diagnosis unavailable.</p>
+                      )}
+                    </td>
+                  </tr>,
+                );
+              }
+              return rows;
+            })}
             {runs.length === 0 && (
               <tr>
-                <td colSpan={4} className="muted">
+                <td colSpan={5} className="muted">
                   No runs yet.
                 </td>
               </tr>

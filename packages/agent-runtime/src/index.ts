@@ -30,6 +30,7 @@ export * from './system1.js';
 export * from './mcp-server.js';
 export * from './mcp-scopes.js';
 export * from './pricing.js';
+export * from './telemetry.js';
 export * from './subagent-store.js';
 export * from './subagents.js';
 export * from './acp.js';

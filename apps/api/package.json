@@ -12,7 +12,8 @@
     "@mvp/protocols": "*",
     "@mvp/voice": "*",
     "@mvp/muse-modules": "*",
-    "@mvp/redteam": "*"
+    "@mvp/redteam": "*",
+    "@mvp/run-health": "*"
   },
   "devDependencies": {
     "@types/cors": "^2.8.17",

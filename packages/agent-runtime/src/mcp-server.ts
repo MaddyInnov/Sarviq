@@ -54,7 +54,11 @@ import { SSEServerTransport } from '@modelcontextprotocol/sdk/server/sse.js';
 import type { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import {
   CallToolRequestSchema,
+  ErrorCode,
+  ListResourcesRequestSchema,
   ListToolsRequestSchema,
+  McpError,
+  ReadResourceRequestSchema,
   type CallToolResult,
   type Tool,
 } from '@modelcontextprotocol/sdk/types.js';
@@ -62,6 +66,7 @@ import type { GovernanceGateway } from './governance.js';
 import { tagUntrustedToolOutput } from './runtime.js';
 import type { ToolCall, ToolContext, ToolDefinition } from './types.js';
 import { describeScope, requiredScopeForTool, type McpScopeStore } from './mcp-scopes.js';
+import type { TelemetryResourceProvider } from './telemetry.js';
 
 /** Minimal tool description the MCP server needs (a subset of ToolDefinition). */
 export interface PlatformToolDef {
@@ -124,6 +129,17 @@ export interface PlatformMcpServerOptions {
    * Unset → no scope enforcement (all tools behave as before).
    */
   scopes?: McpScopeStore;
+  /**
+   * Runtime telemetry ("eyes for your AI"). When set, the server exposes
+   * telemetry as READ-ONLY MCP resources under `sarviq://telemetry/*`
+   * (summary, runs, per-bot aggregates) so connected assistants — and the
+   * platform's own bots — can diagnose from real measurements instead of
+   * guessing. Read-only: only resources/list and resources/read are
+   * registered; no tools are added and nothing can mutate telemetry.
+   * This is distinct from MCP tool scopes (permissions); it is about
+   * telemetry data.
+   */
+  telemetry?: TelemetryResourceProvider;
 }
 
 export interface ServeHandle {
@@ -189,6 +205,7 @@ export class PlatformMcpServer {
   private readonly serverInfo: { name: string; version: string };
   private readonly approvalTtlMs: number;
   private readonly scopeStore?: McpScopeStore;
+  private readonly telemetry?: TelemetryResourceProvider;
   private readonly servers = new Set<Server>();
 
   /** approvalId → pending call awaiting a human decision. */
@@ -205,6 +222,7 @@ export class PlatformMcpServer {
     this.serverInfo = opts.serverInfo ?? { name: 'mvp-platform-mcp', version: '0.1.0' };
     this.approvalTtlMs = opts.approvalTtlMs ?? DEFAULT_APPROVAL_TTL_MS;
     this.scopeStore = opts.scopes;
+    this.telemetry = opts.telemetry;
   }
 
   /**
@@ -418,14 +436,113 @@ export class PlatformMcpServer {
 
   /** Build a fresh protocol Server per connection (SSE serves many clients). */
   private createProtocolServer(): Server {
-    const server = new Server(this.serverInfo, { capabilities: { tools: {} } });
+    const server = new Server(this.serverInfo, {
+      capabilities: { tools: {}, ...(this.telemetry ? { resources: {} } : {}) },
+    });
     server.setRequestHandler(ListToolsRequestSchema, async () => ({
       tools: await this.listMcpTools(),
     }));
     server.setRequestHandler(CallToolRequestSchema, async (request) =>
       this.handleCallTool(request.params.name, request.params.arguments),
     );
+    // Telemetry is exposed as READ-ONLY resources only — no tools, no
+    // mutation surface. Unset → no telemetry capability is advertised.
+    if (this.telemetry) {
+      server.setRequestHandler(ListResourcesRequestSchema, async () => this.listTelemetryResources());
+      server.setRequestHandler(ReadResourceRequestSchema, async (request) =>
+        this.readTelemetryResource(request.params.uri),
+      );
+    }
     return server;
+  }
+
+  /**
+   * The `sarviq://telemetry/*` resource surface: an aggregate summary, the
+   * recent-runs list, and per-bot aggregates, plus URI templates for
+   * addressing a single run or bot. All application/json, all read-only.
+   */
+  private listTelemetryResources(): {
+    resources: Array<{ uri: string; name: string; description: string; mimeType: string }>;
+    resourceTemplates: Array<{ uriTemplate: string; name: string; description: string; mimeType: string }>;
+  } {
+    const base = 'sarviq://telemetry';
+    return {
+      resources: [
+        {
+          uri: `${base}/summary`,
+          name: 'Runtime telemetry summary',
+          description:
+            'Aggregated runtime health: run counts, latency percentiles (p50/p95), error/retry rates, token totals and cost. Read-only.',
+          mimeType: 'application/json',
+        },
+        {
+          uri: `${base}/runs`,
+          name: 'Recent telemetry runs',
+          description:
+            'Newest-first bot turns and workflow runs with per-step latencies, error/retry counts, and token cost. Read-only.',
+          mimeType: 'application/json',
+        },
+        {
+          uri: `${base}/bots`,
+          name: 'Per-bot telemetry',
+          description:
+            'Aggregated runs, error rates, latency, tokens and cost per bot (workflow runs key as workflow:<id>). Read-only.',
+          mimeType: 'application/json',
+        },
+      ],
+      resourceTemplates: [
+        {
+          uriTemplate: `${base}/runs/{id}`,
+          name: 'Telemetry run detail',
+          description: 'Full step-level record for one run id. Read-only.',
+          mimeType: 'application/json',
+        },
+        {
+          uriTemplate: `${base}/bots/{id}`,
+          name: 'Bot telemetry detail',
+          description: 'Aggregated telemetry for one bot id. Read-only.',
+          mimeType: 'application/json',
+        },
+      ],
+    };
+  }
+
+  /** Read one `sarviq://telemetry/*` resource. Unknown URIs are errors. */
+  private readTelemetryResource(uri: string): {
+    contents: Array<{ uri: string; mimeType: string; text: string }>;
+  } {
+    const tel = this.telemetry;
+    if (!tel) {
+      throw new McpError(ErrorCode.InvalidRequest, 'telemetry is not configured on this server');
+    }
+    const base = 'sarviq://telemetry/';
+    if (!uri.startsWith(base)) {
+      throw new McpError(ErrorCode.InvalidParams, `unknown telemetry resource: ${uri}`);
+    }
+    const rest = uri.slice(base.length);
+    let payload: unknown;
+    if (rest === 'summary') {
+      payload = tel.summary();
+    } else if (rest === 'runs') {
+      payload = tel.listRuns(100);
+    } else if (rest === 'bots') {
+      payload = tel.listBots();
+    } else if (rest.startsWith('runs/')) {
+      payload = tel.getRun(decodeURIComponent(rest.slice('runs/'.length)));
+      if (payload === null || payload === undefined) {
+        throw new McpError(ErrorCode.InvalidParams, `unknown telemetry run: ${uri}`);
+      }
+    } else if (rest.startsWith('bots/')) {
+      payload = tel.getBotSummary(decodeURIComponent(rest.slice('bots/'.length)));
+      if (payload === null || payload === undefined) {
+        throw new McpError(ErrorCode.InvalidParams, `unknown telemetry bot: ${uri}`);
+      }
+    } else {
+      throw new McpError(ErrorCode.InvalidParams, `unknown telemetry resource: ${uri}`);
+    }
+    return {
+      contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(payload, null, 2) }],
+    };
   }
 
   /** Attach to any SDK transport (stdio, SSE, in-memory, ...). */

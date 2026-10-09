@@ -6,8 +6,10 @@ import {
   DEFAULT_TIER_BY_SOURCE,
   EgressGate,
   isPrivacyTier,
+  normalizeTelemetryName,
   PrivacyTierDeniedError,
   resolveTier,
+  sanitizeTelemetry,
   tierAtMost,
   tierRank,
 } from '../src/privacy-tiers.js';
@@ -99,5 +101,104 @@ describe('EgressGate', () => {
       { id: 'c', tier: 'cloud-ok' },
     ]);
     expect(kept.map((k) => k.id)).toEqual(['a', 'c']);
+  });
+});
+
+describe('telemetry ingestion guard', () => {
+  describe('normalizeTelemetryName', () => {
+    it('templates UUIDs, numeric path segments, and long hex ids', () => {
+      expect(normalizeTelemetryName('/api/bots/550e8400-e29b-41d4-a716-446655440000/chat')).toBe(
+        '/api/bots/:id/chat',
+      );
+      expect(normalizeTelemetryName('/api/bots/12345/chat')).toBe('/api/bots/:id/chat');
+      expect(normalizeTelemetryName('/api/sessions/deadbeefcafebabe1234/messages')).toBe(
+        '/api/sessions/:id/messages',
+      );
+    });
+
+    it('strips query strings entirely (query values never persist)', () => {
+      expect(normalizeTelemetryName('/api/bots/123/chat?session=abc&user=bob')).toBe('/api/bots/:id/chat');
+    });
+
+    it('leaves plain template names untouched', () => {
+      expect(normalizeTelemetryName('/api/health')).toBe('/api/health');
+      expect(normalizeTelemetryName('support-bot')).toBe('support-bot');
+    });
+  });
+
+  describe('sanitizeTelemetry', () => {
+    it('accepts clean payloads and normalizes route/screen/botName fields', () => {
+      const res = sanitizeTelemetry({
+        kind: 'bot-turn',
+        botId: 'support-bot',
+        botName: 'Support Bot 550e8400-e29b-41d4-a716-446655440000',
+        route: '/api/bots/12345/chat?session=abc',
+        screen: 'BotDetailScreen',
+        durationMs: 120,
+      });
+      expect(res.accepted).toBe(true);
+      expect(res.sanitized).toMatchObject({
+        kind: 'bot-turn',
+        botId: 'support-bot', // ids stay exact (needed for joins)
+        botName: 'Support Bot :id',
+        route: '/api/bots/:id/chat',
+        screen: 'BotDetailScreen',
+        durationMs: 120,
+      });
+    });
+
+    it('REFUSES payloads carrying bodies — never stored, warning logged', () => {
+      const warnings: Array<{ message: string; detail: Record<string, unknown> }> = [];
+      const payload = { kind: 'bot-turn', request: { body: { message: 'my secret text' } } };
+      const res = sanitizeTelemetry(payload, (message, detail) => warnings.push({ message, detail }));
+      expect(res.accepted).toBe(false);
+      expect(res.sanitized).toBeUndefined();
+      expect(res.droppedFields).toEqual(['request.body']);
+      expect(res.reason).toMatch(/body/);
+      // A warning was logged, carrying key paths only — never values.
+      expect(warnings).toHaveLength(1);
+      expect(warnings[0]!.message).toMatch(/refused/);
+      const warned = JSON.stringify(warnings[0]!.detail);
+      expect(warned).not.toContain('my secret text');
+    });
+
+    it('REFUSES headers, cookies, and query values — including nested and case variants', () => {
+      for (const payload of [
+        { headers: { authorization: 'Bearer x' } },
+        { Headers: { 'x-a': 'b' } },
+        { cookies: { session: 'abc' } },
+        { request: { cookie: 'a=b' } },
+        { query: { q: 'search terms' } },
+        { url: '/x', querystring: 'a=b' },
+        { auth: { token: 'sekret' } },
+      ]) {
+        const res = sanitizeTelemetry(payload, () => {});
+        expect(res.accepted).toBe(false);
+        expect(res.sanitized).toBeUndefined();
+        expect(res.droppedFields!.length).toBeGreaterThan(0);
+      }
+    });
+
+    it('refuses non-object payloads', () => {
+      for (const bad of [null, undefined, 42, 'x', [1, 2]]) {
+        const res = sanitizeTelemetry(bad, () => {});
+        expect(res.accepted).toBe(false);
+        expect(res.sanitized).toBeUndefined();
+      }
+    });
+
+    it('survives a throwing warn sink (refusal still stands)', () => {
+      const res = sanitizeTelemetry({ body: 'x' }, () => {
+        throw new Error('sink down');
+      });
+      expect(res.accepted).toBe(false);
+    });
+
+    it('handles cyclic payloads without hanging', () => {
+      const payload: Record<string, unknown> = { kind: 'bot-turn' };
+      payload['self'] = payload;
+      const res = sanitizeTelemetry(payload, () => {});
+      expect(res.accepted).toBe(true);
+    });
   });
 });

@@ -30,6 +30,8 @@ import { syncProviderKeysToEnv } from './providers.js';
 import { buildToolRegistry } from './tool-registry.js';
 import { registerDelegateTools } from './delegate-wiring.js';
 import { createSummarizer } from './summarizer.js';
+import { scanProject } from '@mvp/marketplace';
+import type { ScanResult } from '@mvp/marketplace';
 
 export const CHAT_USAGE = [
   'Usage: mvp-server chat --bot <id> [options]',
@@ -140,11 +142,145 @@ export interface ChatCliRuntime {
   close(): void | Promise<void>;
 }
 
+export const SCAN_USAGE = [
+  'Usage: mvp-server scan [dir] [options]',
+  '',
+  'sarviq scan: walk a project folder and recommend marketplace kits',
+  '(bots, skills, workflows, MCP servers) that fit the project.',
+  'Fully offline — no account, no key, no network call.',
+  '',
+  'Arguments:',
+  '  [dir]           Project folder to scan (default: current directory)',
+  '',
+  'Options:',
+  '  --json          Print a single JSON object with signals + recommendations',
+  '  --pretty        Human output: detected signals + recommended kits (default)',
+  '  --help          Show this help',
+  '',
+  'Examples:',
+  '  mvp-server scan',
+  '  mvp-server scan ~/projects/my-api --json',
+].join('\n');
+
+export interface ParsedScanArgs {
+  dir?: string;
+  json: boolean;
+  pretty: boolean;
+  help: boolean;
+}
+
+export class ScanArgError extends Error {}
+
+/** Parse `argv` where argv[0] === 'scan' (index.ts passes process.argv.slice(2)). */
+export function parseScanArgs(argv: string[]): ParsedScanArgs {
+  const args: ParsedScanArgs = { json: false, pretty: true, help: false };
+  const rest = argv[0] === 'scan' ? argv.slice(1) : argv;
+  for (let i = 0; i < rest.length; i++) {
+    const a = rest[i]!;
+    switch (a) {
+      case '--json':
+        args.json = true;
+        args.pretty = false;
+        break;
+      case '--pretty':
+        args.pretty = true;
+        args.json = false;
+        break;
+      case '--help':
+      case '-h':
+        args.help = true;
+        break;
+      default:
+        if (a.startsWith('--')) {
+          throw new ScanArgError(`unknown flag "${a}"\n\n${SCAN_USAGE}`);
+        }
+        if (args.dir !== undefined) {
+          throw new ScanArgError(`unexpected argument "${a}" (only one dir allowed)\n\n${SCAN_USAGE}`);
+        }
+        args.dir = a;
+    }
+  }
+  return args;
+}
+
+export interface ScanCliDeps {
+  scan?: (dir: string) => ScanResult;
+  cwd?: () => string;
+}
+
 export interface ChatCliDeps {
   findBot?: (botId: string) => Promise<BotConfig | undefined>;
   listBots?: () => Promise<BotConfig[]>;
   buildRuntime?: () => Promise<ChatCliRuntime>;
   readPipedPrompt?: () => Promise<string>;
+}
+
+function printScanPretty(result: ScanResult): void {
+  const s = result.signals;
+  console.log(`sarviq scan: ${result.dir}`);
+  console.log(`catalog: ${result.catalogSource} (${result.catalogSize} kits)`);
+  console.log('');
+  console.log('Detected');
+  const line = (label: string, value: string) => console.log(`  ${label}: ${value}`);
+  line('languages', s.languages.length > 0 ? s.languages.join(', ') : 'none');
+  if (s.typescript) line('typescript', 'yes');
+  if (s.apiServer) line('api server', 'yes');
+  if (s.frontend) line('frontend', 'yes');
+  if (s.hasDockerfile) line('docker', s.hasCompose ? 'Dockerfile + compose' : 'Dockerfile');
+  else if (s.hasCompose) line('docker', 'compose only');
+  if (s.hasCI) line('ci', 'yes');
+  if (s.hasGit) line('git', 'yes');
+  line('tests', s.hasTests ? 'yes' : 'no');
+  line('docs', s.hasDocs ? 'yes' : 'no');
+  if (s.hasDatabase) line('database', 'yes');
+  if (s.hasCsv) line('csv data', 'yes');
+  if (s.hasMakefile) line('makefile', 'yes');
+  console.log('');
+  if (result.recommendations.length === 0) {
+    console.log('No kit recommendations — nothing recognizable in this folder.');
+  } else {
+    console.log('Recommended kits');
+    for (const r of result.recommendations) {
+      console.log(`  • ${r.id} (${r.kind}) — ${r.reason}`);
+    }
+  }
+  console.log('');
+  console.log('(offline scan: no account, no key, no network call)');
+}
+
+/**
+ * Run the `scan` subcommand. Returns the process exit code (0 = success);
+ * index.ts calls process.exit with it. Never calls process.exit itself, so
+ * tests can invoke it directly with injected deps.
+ */
+export async function runScanCli(argv: string[], deps: ScanCliDeps = {}): Promise<number> {
+  let args: ParsedScanArgs;
+  try {
+    args = parseScanArgs(argv);
+  } catch (err) {
+    console.error(`[scan] ${err instanceof Error ? err.message : String(err)}`);
+    return 1;
+  }
+  if (args.help) {
+    console.log(SCAN_USAGE);
+    return 0;
+  }
+
+  const dir = args.dir ?? (deps.cwd ?? process.cwd)();
+  const resolved = path.isAbsolute(dir) ? dir : path.resolve((deps.cwd ?? process.cwd)(), dir);
+  if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
+    if (args.json) console.log(JSON.stringify({ error: `not a directory: ${dir}` }));
+    else console.error(`[scan] not a directory: ${dir}`);
+    return 1;
+  }
+
+  const result = (deps.scan ?? scanProject)(resolved);
+  if (args.json) {
+    console.log(JSON.stringify(result));
+  } else {
+    printScanPretty(result);
+  }
+  return 0;
 }
 
 /**

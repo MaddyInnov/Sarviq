@@ -39,6 +39,7 @@ interface NodeStateRow {
   started_at: number | null;
   ended_at: number | null;
   approval_id: string | null;
+  attempts: number | null;
 }
 
 /**
@@ -81,9 +82,12 @@ export class WorkflowStore {
     `);
     // Crash-resume checkpoint columns (added 2026-10-09). ALTER on existing
     // tables is a no-op when the column already exists — ignore that error.
+    // Per-node attempt counts for run-health retry heuristics (added
+    // 2026-10-09, same pattern).
     for (const ddl of [
       'ALTER TABLE runs ADD COLUMN current_step_index INTEGER',
       'ALTER TABLE runs ADD COLUMN step_outputs_json TEXT',
+      'ALTER TABLE node_states ADD COLUMN attempts INTEGER',
     ]) {
       try {
         this.db.exec(ddl);
@@ -140,7 +144,7 @@ export class WorkflowStore {
           run.updatedAt,
         );
       const stmt = this.db.prepare(
-        'INSERT INTO node_states (run_id, node_id, status, output_json, error, started_at, ended_at, approval_id) VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        'INSERT INTO node_states (run_id, node_id, status, output_json, error, started_at, ended_at, approval_id, attempts) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
       );
       for (const [nodeId, state] of Object.entries(run.nodeStates)) {
         stmt.run(
@@ -152,6 +156,7 @@ export class WorkflowStore {
           state.startedAt ?? null,
           state.endedAt ?? null,
           state.approvalId ?? null,
+          state.attempts ?? null,
         );
       }
       this.db.exec('COMMIT');
@@ -215,15 +220,16 @@ export class WorkflowStore {
   upsertNodeState(runId: string, nodeId: string, state: NodeState): void {
     this.db
       .prepare(
-        `INSERT INTO node_states (run_id, node_id, status, output_json, error, started_at, ended_at, approval_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO node_states (run_id, node_id, status, output_json, error, started_at, ended_at, approval_id, attempts)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(run_id, node_id) DO UPDATE SET
            status = excluded.status,
            output_json = excluded.output_json,
            error = excluded.error,
            started_at = excluded.started_at,
            ended_at = excluded.ended_at,
-           approval_id = excluded.approval_id`,
+           approval_id = excluded.approval_id,
+           attempts = excluded.attempts`,
       )
       .run(
         runId,
@@ -234,6 +240,7 @@ export class WorkflowStore {
         state.startedAt ?? null,
         state.endedAt ?? null,
         state.approvalId ?? null,
+        state.attempts ?? null,
       );
   }
 
@@ -249,6 +256,7 @@ export class WorkflowStore {
       if (s.started_at !== null) state.startedAt = s.started_at;
       if (s.ended_at !== null) state.endedAt = s.ended_at;
       if (s.approval_id !== null) state.approvalId = s.approval_id;
+      if (s.attempts !== null) state.attempts = s.attempts;
       nodeStates[s.node_id] = state;
     }
     const run: WorkflowRun = {

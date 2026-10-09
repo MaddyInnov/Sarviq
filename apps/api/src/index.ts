@@ -18,7 +18,8 @@ import os from 'node:os';
 import path from 'node:path';
 import { AgentRuntime } from '@mvp/agent-runtime';
 import type { BotConfig } from '@mvp/agent-runtime';
-import { DEFAULT_POLICY, GovernanceGateway } from '@mvp/governance';
+import { DEFAULT_POLICY, GovernanceGateway, sanitizeTelemetry } from '@mvp/governance';
+import { TelemetryCollector } from '@mvp/agent-runtime';
 import { Scheduler, TriggerStore, WorkflowRunner } from '@mvp/workflows';
 import type { WorkflowRun } from '@mvp/workflows';
 import { loadConfig } from './config.js';
@@ -31,13 +32,18 @@ import { buildToolRegistry } from './tool-registry.js';
 import { registerDelegateTools } from './delegate-wiring.js';
 import { createSummarizer } from './summarizer.js';
 import { createRouter } from './routes.js';
+import { renderSarviqMeter } from './sarviq-meter.js';
 import { createWebhookRouter } from './webhooks.js';
 import { mountWebAssets } from './web-assets.js';
-import { runChatCli } from './cli.js';
+import { runChatCli, runScanCli } from './cli.js';
 // Phase 3: scheduled workflows create tasks; the platform also serves its
 // own tools as an MCP server (two-way MCP).
 import { makeTaskCreator } from './tasks.js';
 import { McpScopeStore, PlatformMcpServer, toolProviderFromRegistry } from '@mvp/agent-runtime';
+import type { ToolProvider } from '@mvp/agent-runtime';
+import { AnnotationStore } from './annotations.js';
+import { createReadOnlyAssistantProvider } from './mcp-annotations.js';
+import type { McpConnectionClass } from './mcp-annotations.js';
 // Phase 4: computer-use + muse-module agent tools, policy rules, protocols,
 // and the reminders module (scheduler routing). The computer.ts subpath is
 // imported directly (not re-exported from the agent-runtime index — index
@@ -61,6 +67,14 @@ import type { Policy } from '@mvp/governance';
 // runChatCli returns the exit code; index.ts owns process.exit.
 if (process.argv[2] === 'chat') {
   const code = await runChatCli(process.argv.slice(2));
+  process.exit(code);
+}
+
+// sarviq scan: one-command offline project scanner — `mvp-server scan [dir]`.
+// Parsed at the very top, before boot(), so `scan` never starts the HTTP
+// server, loads no config, and makes no network calls.
+if (process.argv[2] === 'scan') {
+  const code = await runScanCli(process.argv.slice(2));
   process.exit(code);
 }
 
@@ -97,13 +111,34 @@ function buildPlatformMcpServer(opts: {
   bots: BotConfig[];
   /** Per-tool scope toggles; enforced in the tools/call path (mcp-scopes.ts). */
   scopes: import('@mvp/agent-runtime').McpScopeStore;
+  /**
+   * Connection class for external MCP clients (see mcp-annotations.ts).
+   * 'standard' (default) exposes the full tool surface; 'read-only-assistant'
+   * wraps the provider so clients can read telemetry freely but may only
+   * APPEND annotations (quarantined for human review) — every other
+   * write/egress tool is denied before governance runs.
+   */
+  connectionClass?: McpConnectionClass;
+  /** Annotation store backing `annotations.append` (required for read-only-assistant). */
+  annotationStore?: AnnotationStore;
+  /** Runtime telemetry collector → read-only sarviq://telemetry/* resources. */
+  telemetry: import('@mvp/agent-runtime').TelemetryCollector;
 }): PlatformMcpServer {
   const fallbackBot = opts.bots[0];
+  let tools: ToolProvider = toolProviderFromRegistry(opts.toolRegistry);
+  if (opts.connectionClass === 'read-only-assistant') {
+    if (!opts.annotationStore) {
+      throw new Error('read-only-assistant connection class requires an annotationStore');
+    }
+    tools = createReadOnlyAssistantProvider(tools, opts.annotationStore);
+    console.log('[mcp] connection class: read-only-assistant (reads allowed, only annotations.append may write)');
+  }
   return new PlatformMcpServer({
-    tools: toolProviderFromRegistry(opts.toolRegistry),
+    tools,
     governance: opts.governance,
     botId: 'mcp-gateway',
     scopes: opts.scopes,
+    telemetry: opts.telemetry,
     chat: fallbackBot
       ? {
           description: `Chat with the "${fallbackBot.id}" bot (one turn).`,
@@ -227,6 +262,20 @@ async function boot(): Promise<void> {
   const { CheckpointStore } = await import('./checkpoints.js');
   const checkpointStore = new CheckpointStore(config.dataDir);
 
+  // Runtime telemetry ("eyes for your AI"): in-memory, metadata-tier only.
+  // Every ingestion passes through the privacy-tiers guard — payloads
+  // carrying bodies/headers/cookies/query values are dropped with a
+  // warning and never stored; route/screen/bot names are normalized to
+  // id-templates. Shared by the agent runtime, the workflow runner, the
+  // platform MCP server (read-only sarviq://telemetry/* resources), and
+  // the /_sarviq/ meter page.
+  const telemetry = new TelemetryCollector({
+    guard: (payload) =>
+      sanitizeTelemetry(payload, (message, detail) =>
+        console.warn(`[telemetry-guard] ${message}`, detail),
+      ),
+  });
+
   const { DotStore } = await import('./dots.js');
   const dotStore = new DotStore(config.dataDir);
 
@@ -256,6 +305,9 @@ async function boot(): Promise<void> {
         label: `before ${info.toolName} ${info.path}`,
       });
     },
+    // Runtime telemetry ("eyes for your AI"): per-step latency, error/retry
+    // rates, and token cost per bot turn. Metadata-tier only, guarded.
+    telemetry,
   });
 
   // Phase 2: `delegate` subagent tool. The child runs under the same
@@ -277,7 +329,13 @@ async function boot(): Promise<void> {
     governance,
     tools: toolRegistry,
     bots: botsById,
+    // Runtime telemetry: one guarded record per workflow run + per-node steps.
+    telemetry,
   });
+  // Run health scoring + regression detection (features #2/#5): persisted
+  // scores and metric samples in <dataDir>/run-health.db.
+  const { RunHealthStore } = await import('@mvp/run-health');
+  const runHealth = new RunHealthStore(`${config.dataDir}/run-health.db`);
   for (const def of seed.workflows) {
     try {
       workflowRunner.register(def);
@@ -321,6 +379,18 @@ async function boot(): Promise<void> {
     agentRuntime,
     bots: seed.bots,
     scopes: mcpScopeStore,
+    // Runtime telemetry ("eyes for your AI") as READ-ONLY MCP resources
+    // (sarviq://telemetry/*): connected assistants diagnose from real
+    // measurements instead of guessing. No mutation surface.
+    telemetry,
+    // Operators serving external assistants over MCP can flip the whole
+    // server to the read-only-assistant connection class:
+    //   MCP_CONNECTION_CLASS=read-only-assistant mvp-server
+    // Reads stay open; the only permitted write is annotations.append
+    // (quarantined for human review). Default: standard (unchanged).
+    connectionClass:
+      process.env.MCP_CONNECTION_CLASS === 'read-only-assistant' ? 'read-only-assistant' : 'standard',
+    annotationStore: new AnnotationStore(config.dataDir),
   });
 
   // Phase 3: two-way MCP over stdio — serve the platform's tools to an
@@ -447,11 +517,30 @@ async function boot(): Promise<void> {
       chatQueueStore,
       mcpServers: seed.mcpServers,
       tieredMemoryStore: new (await import('@mvp/agent-runtime')).TieredMemoryStore(config.dataDir),
+      runHealth,
     }),
   );
   // Unknown /api paths → JSON 404 (before the SPA fallback claims them).
   app.use('/api', (_req, res) => {
     res.status(404).json({ error: 'Unknown API route' });
+  });
+  // Live runtime meter ("eyes for your AI"): human-readable, server-rendered,
+  // dependency-free health page — queue depth, latencies, error rates,
+  // per-bot activity. Mounted outside /api (it is not one of the app's nav
+  // destinations) and before the SPA fallback so the path isn't claimed.
+  // Counts and normalized names only — never secrets or message bodies.
+  app.get('/_sarviq/', (_req, res) => {
+    try {
+      res.type('html').send(
+        renderSarviqMeter({
+          version: '0.1.0',
+          queueDepth: chatQueueStore.list().length,
+          telemetry,
+        }),
+      );
+    } catch (err) {
+      res.status(500).type('text').send(`meter error: ${err instanceof Error ? err.message : String(err)}`);
+    }
   });
   mountWebAssets(app, config.webOutDir);
 

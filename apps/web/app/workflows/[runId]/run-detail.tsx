@@ -3,7 +3,7 @@
 
 import { useEffect, useState } from 'react';
 import { getRun, getWorkflows } from '../../../lib/api';
-import type { WorkflowDefinition, WorkflowRun } from '../../../lib/api';
+import type { HealthFinding, HealthScore, WorkflowDefinition, WorkflowRun } from '../../../lib/api';
 
 function fmtTs(ts?: number): string {
   return ts ? new Date(ts).toLocaleString() : '—';
@@ -18,6 +18,49 @@ function prettyJson(value: unknown): string {
 }
 
 const TERMINAL = new Set(['succeeded', 'failed']);
+
+function healthChip(score?: HealthScore) {  if (!score) return null;
+  const cls = score === 'good' ? 'green' : score === 'needs-work' ? 'amber' : 'red';
+  const label = score === 'good' ? 'Good' : score === 'needs-work' ? 'Needs work' : 'Poor';
+  return <span className={`chip ${cls}`}>{label}</span>;
+}
+
+function HealthCard({ run }: { run: WorkflowRun }) {
+  const health = run.health;
+  if (!health) return null;
+  return (
+    <div className="card mt">
+      <div className="row-between">
+        <h3 className="mt0">Run health {healthChip(health.score)}</h3>
+        <span className="small muted">
+          {health.failedNodes} failed node{health.failedNodes === 1 ? '' : 's'}
+          {health.latencyMs !== null ? ` · ${Math.round(health.latencyMs / 1000)}s total` : ''}
+        </span>
+      </div>
+      {health.findings.length === 0 ? (
+        <p className="small muted">Clean run — no issues detected.</p>
+      ) : (
+        <ul className="brief-list">
+          {health.findings.map((f: HealthFinding, i: number) => (
+            <li key={i} className="brief-item">
+              <div className="row gap">
+                <span className={`chip ${f.severity === 'critical' ? 'red' : f.severity === 'warning' ? 'amber' : 'gray'}`}>
+                  {f.severity}
+                </span>
+                <strong className="small">{f.title}</strong>
+                {f.nodeId && <span className="small muted mono">{f.nodeId}</span>}
+              </div>
+              <div className="brief-item-detail small">{f.detail}</div>
+              <div className="brief-item-detail small">
+                <strong>Fix:</strong> {f.fix}
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
 
 export default function RunDetail({ runId }: { runId: string }) {
   const [run, setRun] = useState<WorkflowRun | null>(null);
@@ -81,6 +124,8 @@ export default function RunDetail({ runId }: { runId: string }) {
         Workflow <span className="mono">{def ? def.name : run.workflowId}</span> · created{' '}
         {fmtTs(run.createdAt)} · updated {fmtTs(run.updatedAt)}
       </p>
+
+      <HealthCard run={run} />
 
       <h3>Nodes</h3>
       <div className="node-chips">

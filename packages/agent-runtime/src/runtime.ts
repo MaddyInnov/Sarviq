@@ -26,6 +26,7 @@ import {
   resolveApiKey,
 } from './providers/catalog.js';
 import { costOfUsage } from './pricing.js';
+import type { TelemetryCollector, TelemetryRunStatus } from './telemetry.js';
 import { SessionStore } from './sessions.js';
 import type { SessionStoreOptions } from './sessions.js';
 import { SkillLoader } from './skills.js';
@@ -61,6 +62,14 @@ export interface AgentRuntimeOptions {
     contentBefore: string | null;
     historyLength: number;
   }) => void | Promise<void>;
+  /**
+   * Runtime telemetry collector ("eyes for your AI"). When set, runTurn
+   * records per-step latency (LLM calls, tool executions), error/retry
+   * counts, and token cost for the turn. Only metadata-tier fields are
+   * recorded (ids, names, counts, timings); ingestion runs through the
+   * host-supplied privacy-tiers guard. Unset → no recording.
+   */
+  telemetry?: TelemetryCollector;
 }
 
 export interface RunTurnOptions {
@@ -231,6 +240,7 @@ export class AgentRuntime {
   private readonly toolRegistry: Map<string, ToolDefinition>;
   private readonly defaultProviderId: string;
   private readonly onBeforeFileMutate?: AgentRuntimeOptions['onBeforeFileMutate'];
+  private readonly telemetry?: TelemetryCollector;
   /** Provider instances cached per providerId (see resolveProvider). */
   private readonly providerCache = new Map<string, LLMProvider>();
   /**
@@ -247,6 +257,7 @@ export class AgentRuntime {
     this.toolRegistry = opts.toolRegistry;
     this.defaultProviderId = opts.defaultProviderId ?? 'groq';
     this.onBeforeFileMutate = opts.onBeforeFileMutate;
+    this.telemetry = opts.telemetry;
   }
 
   close(): void {
@@ -411,8 +422,21 @@ export class AgentRuntime {
     // (fail-closed) instead of leaving stale cards in the inbox.
     const turnApprovalIds: string[] = [];
 
+    // Runtime telemetry ("eyes for your AI"): one run record per turn with
+    // per-step latency, error/retry counts, and token cost. Metadata-tier
+    // fields only; the collector's ingestion guard normalizes names and
+    // refuses PII-bearing payloads. Never throws into the turn.
+    let telRunId: string | null = null;
+    let telIterations = 0;
+    try {
+      telRunId = this.telemetry?.beginRun({ kind: 'bot-turn', botId: opts.bot.id, sessionId }) ?? null;
+    } catch {
+      telRunId = null;
+    }
+
     try {
       for (let iteration = 0; iteration < maxIterations; iteration++) {
+        telIterations += 1;
         opts.signal?.throwIfAborted();
         // Privacy-tier gate: the provider call is a cloud egress. When the
         // host attached tier-tagged items, a single `local-only` item denies
@@ -423,13 +447,24 @@ export class AgentRuntime {
           where: 'provider.chat',
           iteration,
         });
-        const turn = await provider.chat(messages, tools, {
-          model,
-          onToken: (t) => {
-            void emit({ type: 'token', content: t });
-          },
-          signal: opts.signal,
-        });
+        const llmStep = telRunId ? this.telemetry?.startStep(telRunId, `llm:${model}`, 'llm') : null;
+        let turn: Awaited<ReturnType<LLMProvider['chat']>>;
+        try {
+          turn = await provider.chat(messages, tools, {
+            model,
+            onToken: (t) => {
+              void emit({ type: 'token', content: t });
+            },
+            signal: opts.signal,
+            onRetry: () => {
+              if (telRunId) this.telemetry?.noteRetry(telRunId);
+            },
+          });
+          llmStep?.end({ ok: true });
+        } catch (err) {
+          llmStep?.end({ ok: false, errorKind: err instanceof Error ? err.name : 'Error' });
+          throw err;
+        }
         totalUsage = addUsage(totalUsage, turn.usage);
 
         // Budget cap: stop fail-closed if the turn's accumulated cost
@@ -441,6 +476,7 @@ export class AgentRuntime {
             const msg = `Budget cap reached: $${cost.toFixed(4)} spent (cap $${opts.maxBudgetUsd.toFixed(4)}). Turn stopped.`;
             this.audit({ type: 'turn.budget_cap', sessionId, botId: ctx.botId, detail: { cost, cap: opts.maxBudgetUsd } });
             await emit({ type: 'error', message: msg });
+            this.finishTelemetryRun(telRunId, 'interrupted', totalUsage, providerId, model, telIterations);
             return totalUsage;
           }
         }
@@ -454,6 +490,7 @@ export class AgentRuntime {
 
         if (turn.toolCalls.length === 0) {
           await emit({ type: 'done', usage: totalUsage });
+          this.finishTelemetryRun(telRunId, 'ok', totalUsage, providerId, model, telIterations);
           return totalUsage;
         }
 
@@ -650,9 +687,27 @@ export class AgentRuntime {
           toExecute.push({ def, call, approvalId });
         }
 
-        // Execute allowed + approved calls in parallel.
+        // Execute allowed + approved calls in parallel. Each execution is a
+        // timed telemetry step (latency + ok/error per tool). executeTool
+        // converts handler throws into `{ error }` results (never throws),
+        // so detect that convention to keep error rates honest.
         const results = await Promise.allSettled(
-          toExecute.map(async ({ def, call }) => this.executeTool(def, call, ctx)),
+          toExecute.map(async ({ def, call }) => {
+            const toolStep = telRunId ? this.telemetry?.startStep(telRunId, `tool:${call.name}`, 'tool') : null;
+            try {
+              const out = await this.executeTool(def, call, ctx);
+              const failed =
+                out !== null &&
+                typeof out === 'object' &&
+                !Array.isArray(out) &&
+                typeof (out as { error?: unknown }).error === 'string';
+              toolStep?.end(failed ? { ok: false, errorKind: 'ToolError' } : { ok: true });
+              return out;
+            } catch (err) {
+              toolStep?.end({ ok: false, errorKind: err instanceof Error ? err.name : 'Error' });
+              throw err;
+            }
+          }),
         );
         for (let i = 0; i < toExecute.length; i++) {
           const { call } = toExecute[i]!;
@@ -679,6 +734,7 @@ export class AgentRuntime {
       }
 
       await emit({ type: 'error', message: `Max iterations (${maxIterations}) reached without a final answer` });
+      this.finishTelemetryRun(telRunId, 'error', totalUsage, providerId, model, telIterations);
       return totalUsage;
     } catch (err) {
       if (opts.signal?.aborted) {
@@ -691,11 +747,33 @@ export class AgentRuntime {
           } catch { /* already decided */ }
         }
         await emit({ type: 'interrupted', reason: 'A newer message superseded this turn.' });
+        this.finishTelemetryRun(telRunId, 'interrupted', totalUsage, providerId, model, telIterations);
         return totalUsage;
       }
       const message = err instanceof Error ? err.message : String(err);
       await emit({ type: 'error', message });
+      this.finishTelemetryRun(telRunId, 'error', totalUsage, providerId, model, telIterations);
       throw err;
+    }
+  }
+
+  /**
+   * Close a telemetry run record. Telemetry must never break a turn, so
+   * every failure here is swallowed (the guard already warned).
+   */
+  private finishTelemetryRun(
+    runId: string | null,
+    status: TelemetryRunStatus,
+    usage: TokenUsage,
+    providerId: string,
+    model: string,
+    iterations: number,
+  ): void {
+    if (runId === null) return;
+    try {
+      this.telemetry?.endRun(runId, { status, usage, providerId, model, iterations });
+    } catch {
+      // Telemetry must never break a turn.
     }
   }
 

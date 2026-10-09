@@ -105,7 +105,11 @@ export class OpenAICompatibleProvider implements LLMProvider {
     this.defaultModel = opts.defaultModel;
   }
 
-  private async fetchWithRetry(url: string, init: RequestInit): Promise<Response> {
+  private async fetchWithRetry(
+    url: string,
+    init: RequestInit,
+    onRetry?: (attempt: number, error: Error) => void,
+  ): Promise<Response> {
     let lastError: Error | null = null;
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt++) {
       if (attempt > 0) {
@@ -116,6 +120,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
         res = await fetch(url, init);
       } catch (err) {
         lastError = err instanceof Error ? err : new Error(String(err));
+        if (attempt < MAX_RETRIES) {
+          try {
+            onRetry?.(attempt + 1, lastError);
+          } catch {
+            // Retry notification must never break the retry loop.
+          }
+        }
         continue; // network error: retry
       }
       if (res.ok) return res;
@@ -126,6 +137,13 @@ export class OpenAICompatibleProvider implements LLMProvider {
         );
       }
       lastError = new Error(`Provider request failed: ${res.status}`);
+      if (attempt < MAX_RETRIES) {
+        try {
+          onRetry?.(attempt + 1, lastError);
+        } catch {
+          // Retry notification must never break the retry loop.
+        }
+      }
       await res.arrayBuffer().catch(() => undefined); // drain
     }
     throw lastError ?? new Error('Provider request failed after retries');
@@ -134,7 +152,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
   async chat(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    opts: { model: string; onToken?: (t: string) => void; signal?: AbortSignal },
+    opts: { model: string; onToken?: (t: string) => void; signal?: AbortSignal; onRetry?: (attempt: number, error: Error) => void },
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: TokenUsage }> {
     const body = {
       model: opts.model,
@@ -152,7 +170,7 @@ export class OpenAICompatibleProvider implements LLMProvider {
       },
       body: JSON.stringify(body),
       signal: opts.signal,
-    });
+    }, opts.onRetry);
 
     // Capture the provider's rate-limit/quota headers (Groq, OpenAI,
     // OpenRouter all send x-ratelimit-*). Missing headers → no snapshot.

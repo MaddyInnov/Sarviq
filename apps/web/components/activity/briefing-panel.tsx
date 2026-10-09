@@ -7,12 +7,59 @@
 
 import { useCallback, useEffect, useState } from 'react';
 import { EmptyState, ErrorBox } from '../../app/modules/lib';
-import { getBriefing } from '../../lib/sarviq-api';
-import type { Briefing, BriefingItem } from '../../lib/sarviq-api';
+import { getBriefing, getRegressions } from '../../lib/sarviq-api';
+import type { Briefing, BriefingItem, RegressionAlert, RegressionsPayload } from '../../lib/sarviq-api';
+import { useUxMode } from '../../lib/ux-mode';
 
 function fmtTs(ts?: number): string {
   if (!ts) return '';
   return new Date(ts).toLocaleString();
+}
+
+/** Human-readable metric value: ms/s for latency, % for error rate, $ for cost. */
+function fmtMetricValue(alert: RegressionAlert, v: number): string {
+  if (alert.metric === 'latency-p50') {
+    return v >= 1000 ? `${(v / 1000).toFixed(1)}s` : `${Math.round(v)}ms`;
+  }
+  if (alert.metric === 'error-rate') return `${(v * 100).toFixed(1)}%`;
+  return `$${v.toFixed(4)}`;
+}
+
+/**
+ * Regression alerts card (feature #5): "quietly got worse this week".
+ * Simple mode shows the headline + plain-language summary; Pro shows the
+ * full baseline/current/sample-count detail.
+ */
+function RegressionsCard({ payload }: { payload: RegressionsPayload }) {
+  const [mode] = useUxMode();
+  const alerts = payload.regressions ?? [];
+  if (alerts.length === 0) return null;
+  return (
+    <div className="card" style={{ borderColor: 'var(--amber, #b97f1f)' }}>
+      <h4 className="mt0">
+        ⚠️ Quietly got worse <span className="chip amber">{alerts.length}</span>
+      </h4>
+      <p className="small muted mt0">
+        Last {payload.windowDays} days vs the {payload.windowDays} before — flagged when &gt;{payload.thresholdPct}%
+        worse (min {payload.minSamples} samples per window).
+      </p>
+      <ul className="brief-list">
+        {alerts.map((a) => (
+          <li key={a.id} className="brief-item">
+            <div className="brief-item-title">
+              {a.scopeKind === 'bot' ? 'Bot' : 'Workflow'} <span className="mono">{a.scopeId}</span> —{' '}
+              {a.metricLabel} {a.changePct >= 0 ? 'up' : 'down'} {Math.abs(Math.round(a.changePct))}%
+            </div>
+            <div className="brief-item-detail small muted">
+              {fmtMetricValue(a, a.baseline)} → {fmtMetricValue(a, a.current)}
+              {mode === 'pro' &&
+                ` · ${a.currentSamples} recent / ${a.baselineSamples} baseline samples · window ${fmtTs(a.windowStart)} – ${fmtTs(a.windowEnd)}`}
+            </div>
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
 }
 
 function ItemList({ items }: { items: BriefingItem[] }) {
@@ -32,14 +79,28 @@ function ItemList({ items }: { items: BriefingItem[] }) {
 
 export function BriefingPanel() {
   const [briefing, setBriefing] = useState<Briefing | null>(null);
+  const [regressions, setRegressions] = useState<RegressionsPayload | null>(null);
   const [missing, setMissing] = useState(false);
   const [error, setError] = useState('');
 
   const load = useCallback(async () => {
     try {
-      const b = await getBriefing();
+      const [b, r] = await Promise.all([getBriefing(), getRegressions()]);
       setMissing(b === null);
       setBriefing(b);
+      // Prefer alerts embedded in the briefing payload when the briefing
+      // backend emits them; otherwise fall back to the standalone endpoint.
+      if (b?.regressions) {
+        setRegressions({
+          generatedAt: b.generatedAt,
+          windowDays: 7,
+          thresholdPct: 30,
+          minSamples: 10,
+          regressions: b.regressions,
+        });
+      } else {
+        setRegressions(r);
+      }
       setError('');
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -51,9 +112,14 @@ export function BriefingPanel() {
   }, [load]);
 
   if (error) return <ErrorBox error={error} />;
+  // Alerts reach the briefing surface even before the briefing backend
+  // exists: show them above the empty state when there is anything to show.
   if (missing || briefing === null) {
     return (
-      <EmptyState text="No briefing yet — the daily digest service is not available. Your morning summary will appear here once it is." />
+      <div>
+        {regressions && <RegressionsCard payload={regressions} />}
+        <EmptyState text="No briefing yet — the daily digest service is not available. Your morning summary will appear here once it is." />
+      </div>
     );
   }
 
@@ -65,6 +131,7 @@ export function BriefingPanel() {
           Generated {briefing.generatedAt ? fmtTs(briefing.generatedAt) : '—'}
         </span>
       </div>
+      {regressions && <RegressionsCard payload={regressions} />}
       {briefing.summary && <p className="brief-summary">{briefing.summary}</p>}
       <div className="grid-2">
         <div className="card">

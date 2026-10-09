@@ -241,7 +241,75 @@ export interface WorkflowRun {
   idempotencyKey?: string;
   createdAt: number;
   updatedAt: number;
+  /** Attached by GET /api/workflows/runs (list) for the health chip. */
+  healthScore?: HealthScore;
+  /** Attached by GET /api/workflows/runs/:runId (detail). */
+  health?: RunHealth;
 }
+
+// ---- Run health (features #2/#5) --------------------------------------------
+
+export type HealthScore = 'good' | 'needs-work' | 'poor';
+
+export interface HealthFinding {
+  signal: string;
+  severity: 'info' | 'warning' | 'critical';
+  title: string;
+  detail: string;
+  fix: string;
+  nodeId?: string;
+}
+
+export interface RunHealth {
+  runId: string;
+  workflowId: string;
+  score: HealthScore;
+  findings: HealthFinding[];
+  latencyMs: number | null;
+  failedNodes: number;
+  generatedAt: number;
+}
+
+export interface TurnHealth {
+  botId: string;
+  sessionId?: string;
+  score: HealthScore;
+  findings: HealthFinding[];
+  generatedAt: number;
+}
+
+export interface RegressionAlert {
+  id: string;
+  scopeKind: 'workflow' | 'bot';
+  scopeId: string;
+  metric: 'latency-p50' | 'error-rate' | 'cost-per-run';
+  metricLabel: string;
+  baseline: number;
+  current: number;
+  changePct: number;
+  changeUnit: 'percent' | 'points';
+  baselineSamples: number;
+  currentSamples: number;
+  windowStart: number;
+  windowEnd: number;
+  generatedAt: number;
+}
+
+export interface RegressionsPayload {
+  generatedAt: number;
+  windowDays: number;
+  thresholdPct: number;
+  minSamples: number;
+  regressions: RegressionAlert[];
+}
+
+export const getRunHealth = (runId: string): Promise<RunHealth> =>
+  apiJson(`/api/health/runs/${encodeURIComponent(runId)}`);
+
+export const getTurnHealth = (botId?: string): Promise<TurnHealth[]> =>
+  apiJson(`/api/health/turns${botId ? `?botId=${encodeURIComponent(botId)}` : ''}`);
+
+export const getRegressions = (): Promise<RegressionsPayload> => apiJson('/api/health/regressions');
 
 export interface PreviewResult {
   verdict: 'ready' | 'warning' | 'blocked';

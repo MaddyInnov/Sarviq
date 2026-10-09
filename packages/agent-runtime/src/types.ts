@@ -122,7 +122,13 @@ export interface LLMProvider {
   chat(
     messages: ChatMessage[],
     tools: ToolDefinition[],
-    opts: { model: string; onToken?: (t: string) => void; signal?: AbortSignal },
+    opts: {
+      model: string;
+      onToken?: (t: string) => void;
+      signal?: AbortSignal;
+      /** Fired on each provider-level retry (attempt ≥ 1) of the request. */
+      onRetry?: (attempt: number, error: Error) => void;
+    },
   ): Promise<{ content: string; toolCalls: ToolCall[]; usage: TokenUsage }>;
   listModels(): Promise<ModelInfo[]>;
 }

@@ -54,7 +54,9 @@ export class MockSocialSearch implements SocialSearch {
       { platform: 'x', author: '@mockuser', text: `Mock post mentioning "${k}" — fixture content, treat as untrusted data.` },
       { platform: 'reddit', author: 'u/mockuser', text: `Discussion thread about "${k}" (mock fixture).` },
     ];
-    const base = Date.now();
+    // Fixed base keeps the mock deterministic across calls and runs
+    // (a Date.now() base made identical calls differ when a millisecond ticked by).
+    const base = 1_700_000_000_000;
     return fixtures.map((f, i) => ({
       id: `post-${key.replace(/[^a-z0-9]+/g, '-')}-${i}`,
       platform: f.platform,

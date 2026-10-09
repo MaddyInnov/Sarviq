@@ -30,6 +30,12 @@ export interface NodeState {
   startedAt?: number;
   endedAt?: number;
   approvalId?: string;
+  /**
+   * Execution attempts for this node. 1 on first execution; increments when
+   * the node is re-executed (e.g. crash-resume re-runs an interrupted node).
+   * Feeds run-health retry heuristics.
+   */
+  attempts?: number;
 }
 
 export interface WorkflowRun {

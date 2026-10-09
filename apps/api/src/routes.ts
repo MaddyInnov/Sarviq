@@ -10,12 +10,14 @@
 
 import express from 'express';
 import { BotMemoryStore, SpaceStore, isFreeModel, listProviderPresets, resolveApiKey, resolveBotWorkspaceDir } from '@mvp/agent-runtime';
-import type { AgentRuntime, BotConfig, StreamEvent } from '@mvp/agent-runtime';
+import type { AgentRuntime, BotConfig, StreamEvent, TokenUsage } from '@mvp/agent-runtime';
 // pricing.ts is not re-exported from the agent-runtime index (index untouched);
 // import the built subpath directly.
 import { priceOfModel } from '@mvp/agent-runtime/dist/pricing.js';
 import type { ApprovalStatus, GovernanceGateway } from '@mvp/governance';
 import type { WorkflowRun, WorkflowRunner } from '@mvp/workflows';
+import { createHealthScoring, registerHealthRoutes } from './health-routes.js';
+import type { RunHealthStore } from '@mvp/run-health';
 import type { AppConfig } from './config.js';
 import type { GovernanceAdapter } from './governance-adapter.js';
 import type { McpConnection } from './tool-registry.js';
@@ -48,6 +50,7 @@ import { registerMcpOAuthRoutes } from './mcp-oauth.js';
 import type { McpServerConfig } from './seed.js';
 import { registerMessagingRoutes } from './messaging.js';
 import { registerNotesRoutes } from './notes.js';
+import { registerAnnotationRoutes } from './annotations.js';
 import { registerKnowledgeRoutes } from './knowledge.js';
 import { registerTasksRoutes } from './tasks.js';
 import { registerPagesRoutes } from './pages.js';
@@ -135,6 +138,8 @@ export interface RouteDeps {
   mcpServers: Record<string, McpServerConfig>;
   /** Tiered memory store (L0 events → L2 atoms → L3 entity pages). */
   tieredMemoryStore: TieredMemoryStore;
+  /** Run health scores + metric samples (features #2/#5). */
+  runHealth: RunHealthStore;
 }
 
 const TERMINAL_RUN_STATUSES: ReadonlySet<WorkflowRun['status']> = new Set(['succeeded', 'failed']);
@@ -176,7 +181,12 @@ function sseHeaders(res: express.Response): void {
 /** Normalize an optional model override: empty string falls back to undefined. */
 export function createRouter(deps: RouteDeps): express.Router {
   const router = express.Router();
-  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, mcpServer, mcpScopeStore } = deps;
+  const { config, bots, agentRuntime, governance, governanceAdapter, workflowRunner, threadScheduleStore, checkpointStore, dotStore, preferenceStore, recordingStore, chatQueueStore, mcpServers, tieredMemoryStore, runHealth, mcpServer, mcpScopeStore } = deps;
+
+  // ---- Run health scoring + regressions (features #2/#5) -------------------
+  // Helpers shared by the workflow run payloads below and the /chat turn
+  // hook; the /api/health/* routes are registered by registerHealthRoutes.
+  const { scoreAndPersistRun, recordTurnHealth } = createHealthScoring(runHealth);
 
   // Mid-turn interruption (Claude Code-style steering): at most one live turn
   // per session. A new message on a session aborts the previous turn — the
@@ -1046,26 +1056,53 @@ export function createRouter(deps: RouteDeps): express.Router {
       } catch {
         memoryContext = undefined; // memory must never break chat
       }
-      await agentRuntime.runTurn({
-        bot,
-        message: turnMessage,
-        sessionId: body.sessionId,
-        providerId: turnOpts.providerId,
-        // Spaces: an explicit call-site model wins; otherwise the space's
-        // model override applies (bot pin / smart routing as before when unset).
-        model: turnOpts.model ?? spaceCtx?.space.modelOverride,
-        taskType: turnOpts.taskType,
-        signal: turnController!.signal,
-        autoApprove: turnOpts.autoApprove,
-        planMode: turnOpts.planMode,
-        maxBudgetUsd: turnOpts.maxBudgetUsd,
-        sandboxMode: turnOpts.sandboxMode,
-        memoryContext,
-        // Spaces: per-turn workspace + API-key overrides.
-        workspaceOverride: spaceCtx?.space.workspaceOverride,
-        apiKeyOverride: spaceCtx?.apiKeyOverride,
-        onEvent,
-      });
+      // Run-health turn telemetry (features #2/#5): latency, tokens, errors
+      // are recorded for health scoring + regression detection. The
+      // try/finally guarantees a sample even when the turn throws, and the
+      // inner try/catch guarantees metrics never break chat.
+      const turnStart = Date.now();
+      let turnUsage: TokenUsage | null = null;
+      let turnError: string | null = null;
+      try {
+        turnUsage = await agentRuntime.runTurn({
+          bot,
+          message: turnMessage,
+          sessionId: body.sessionId,
+          providerId: turnOpts.providerId,
+          // Spaces: an explicit call-site model wins; otherwise the space's
+          // model override applies (bot pin / smart routing as before when unset).
+          model: turnOpts.model ?? spaceCtx?.space.modelOverride,
+          taskType: turnOpts.taskType,
+          signal: turnController!.signal,
+          autoApprove: turnOpts.autoApprove,
+          planMode: turnOpts.planMode,
+          maxBudgetUsd: turnOpts.maxBudgetUsd,
+          sandboxMode: turnOpts.sandboxMode,
+          memoryContext,
+          // Spaces: per-turn workspace + API-key overrides.
+          workspaceOverride: spaceCtx?.space.workspaceOverride,
+          apiKeyOverride: spaceCtx?.apiKeyOverride,
+          onEvent,
+        });
+      } catch (err) {
+        turnError = err instanceof Error ? err.message : String(err);
+        throw err;
+      } finally {
+        try {
+          recordTurnHealth({
+            botId: bot.id,
+            sessionId: sessionKey ?? undefined,
+            latencyMs: Date.now() - turnStart,
+            totalTokens: turnUsage?.totalTokens ?? 0,
+            errored: turnError !== null,
+            ...(turnError ? { errorMessage: turnError } : {}),
+            emptyResponse:
+              turnError === null && turnAssistantText.trim().length === 0 && turnToolCalls.length === 0,
+          });
+        } catch {
+          // Metrics must never break chat.
+        }
+      }
       // Tiered memory: ingest this turn (L0 events + async L2 distillation).
       // Fire-and-forget by design — ingestTurn never throws into the caller.
       tieredMemoryStore.ingestTurn(bot.id, sessionKey ?? 'default', turnMessage, turnAssistantText, turnToolCalls);
@@ -1385,7 +1422,10 @@ export function createRouter(deps: RouteDeps): express.Router {
     try {
       const runs = workflowRunner.listRuns();
       const sorted = [...runs].sort((a, b) => b.createdAt - a.createdAt);
-      res.json(sorted);
+      // Health chips for the Activity feed / runs table. Scores are cached
+      // after the first computation; terminal runs also feed regression
+      // history (see scoreAndPersistRun).
+      res.json(sorted.map((run) => ({ ...run, healthScore: scoreAndPersistRun(run).score })));
     } catch (err) {
       res.status(500).json(errorBody('Failed to list workflow runs', err instanceof Error ? err.message : String(err)));
     }
@@ -1398,7 +1438,7 @@ export function createRouter(deps: RouteDeps): express.Router {
         res.status(404).json(errorBody(`Unknown run "${req.params.runId}"`));
         return;
       }
-      res.json(run);
+      res.json({ ...run, health: scoreAndPersistRun(run) });
     } catch (err) {
       res.status(500).json(errorBody('Failed to get workflow run', err instanceof Error ? err.message : String(err)));
     }
@@ -1446,6 +1486,12 @@ export function createRouter(deps: RouteDeps): express.Router {
       }
     }
   });
+
+  // ---- Run health (features #2/#5): scores + written fixes + regressions ----
+  // Standalone module (testable without the full router): scores persist
+  // with the run records; terminal runs/turns also append metric samples
+  // that feed the 7-day regression detector.
+  registerHealthRoutes(router, { workflowRunner, runHealth });
 
   // ---- Dry run ------------------------------------------------------------
   router.post('/dry-run', async (req, res) => {
@@ -1519,6 +1565,16 @@ export function createRouter(deps: RouteDeps): express.Router {
   registerNotesRoutes(notesRouter, { dataDir: config.dataDir });
   router.use('/notes', notesRouter);
   registerTasksRoutes(router, { dataDir: config.dataDir });
+
+  // ---- External-assistant annotations (human review queue) ----------------
+  // Separate router at /api/annotations, structurally apart from every
+  // telemetry endpoint: read-only-assistant MCP connections may only APPEND
+  // here (see mcp-annotations.ts); humans approve/dismiss. Annotation
+  // records are labeled `record: 'annotation'` and never join telemetry
+  // responses, so assistant notes can never be mistaken for measurements.
+  const annotationsRouter = express.Router();
+  registerAnnotationRoutes(annotationsRouter, { dataDir: config.dataDir });
+  router.use('/annotations', annotationsRouter);
 
   // ---- Collaborative Pages --------------------------------------------------
   // ChatGPT "Space" Pages parity: humans + agents co-edit live markdown docs

@@ -177,3 +177,180 @@ export class EgressGate {
     return items.filter((i) => allowsCloudEgress(i.tier));
   }
 }
+
+// ---------------------------------------------------------------------------
+// Telemetry ingestion guard ("eyes for your AI", PII-safe).
+//
+// Runtime telemetry is metadata-tier by design (ids, counts, timings —
+// DEFAULT_TIER_BY_SOURCE['telemetry'] === 'metadata'), but telemetry
+// producers are sloppy: a route label can embed a user id, and a careless
+// payload can smuggle request bodies, headers, cookies, or query values.
+// This guard is the single choke point every telemetry payload passes
+// through BEFORE it is stored or served:
+//
+// 1. Name normalization — route/screen/path/url/botName fields are reduced
+//    to templates: UUIDs, numeric path segments, and long hex ids become
+//    `:id`, and query strings are stripped entirely. Cardinality stays
+//    bounded and raw identifiers never persist.
+// 2. PII refusal — any payload carrying request/response bodies, headers,
+//    cookies, or query values is REFUSED: the payload is dropped, a warning
+//    is logged (key paths only, never values), and nothing is stored.
+//    Fail closed: a guard that throws also refuses the payload.
+//
+// The collector in @mvp/agent-runtime takes this guard as an injected
+// callback so the runtime package keeps its type-only relationship with
+// governance; the API server wires `sanitizeTelemetry` in at boot.
+
+/** Telemetry fields whose string values are normalized to id-templates. */
+const TELEMETRY_NAME_FIELDS: ReadonlySet<string> = new Set([
+  'route',
+  'screen',
+  'path',
+  'url',
+  'endpoint',
+  'botName',
+  'name',
+]);
+
+/**
+ * Payload keys that are never allowed in telemetry. Bodies, headers,
+ * cookies, and query values are PII-bearing by construction; credential-ish
+ * keys are refused on the same fail-closed principle.
+ */
+const FORBIDDEN_TELEMETRY_KEYS: ReadonlySet<string> = new Set([
+  'body',
+  'requestbody',
+  'responsebody',
+  'headers',
+  'requestheaders',
+  'responseheaders',
+  'cookie',
+  'cookies',
+  'set-cookie',
+  'setcookie',
+  'query',
+  'querystring',
+  'queryparams',
+  'searchparams',
+  'authorization',
+  'password',
+  'passwd',
+  'secret',
+  'token',
+  'apikey',
+  'api_key',
+]);
+
+const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
+const LONG_HEX_RE = /\b[0-9a-f]{16,}\b/gi;
+const NUM_PATH_SEG_RE = /(?<=\/)\d+(?=\/|$)/g;
+
+/**
+ * Reduce a route/screen/bot name to a template: UUIDs, numeric path
+ * segments, and long hex ids become `:id`; query strings are stripped.
+ * `/api/bots/8f3a…/chat?session=abc` → `/api/bots/:id/chat`.
+ */
+export function normalizeTelemetryName(name: string): string {
+  if (typeof name !== 'string') return '';
+  const pathOnly = name.split('?')[0] ?? '';
+  return pathOnly
+    .replace(UUID_RE, ':id')
+    .replace(NUM_PATH_SEG_RE, ':id')
+    .replace(LONG_HEX_RE, ':id');
+}
+
+export interface SanitizeTelemetryResult {
+  accepted: boolean;
+  /** Name-normalized copy of the payload. Present only when accepted. */
+  sanitized?: Record<string, unknown>;
+  /** Why the payload was refused. Present only when !accepted. */
+  reason?: string;
+  /** Key paths that triggered refusal (names only, never values). */
+  droppedFields?: string[];
+}
+
+/** Warning sink for refused telemetry payloads. Receives names, never values. */
+export type TelemetryWarnFn = (message: string, detail: Record<string, unknown>) => void;
+
+const MAX_TELEMETRY_SCAN_DEPTH = 8;
+const MAX_TELEMETRY_SCAN_KEYS = 2000;
+
+function scanForbiddenKeys(
+  value: unknown,
+  path: string,
+  depth: number,
+  seen: WeakSet<object>,
+  hits: string[],
+  budget: { keys: number },
+): void {
+  if (hits.length > 0 || budget.keys > MAX_TELEMETRY_SCAN_KEYS || depth > MAX_TELEMETRY_SCAN_DEPTH) return;
+  if (value === null || typeof value !== 'object') return;
+  if (seen.has(value)) return;
+  seen.add(value);
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    budget.keys += 1;
+    if (budget.keys > MAX_TELEMETRY_SCAN_KEYS) return;
+    const childPath = path ? `${path}.${key}` : key;
+    if (FORBIDDEN_TELEMETRY_KEYS.has(key.toLowerCase())) {
+      hits.push(childPath);
+      return; // one hit is enough to refuse; no need to keep scanning
+    }
+    scanForbiddenKeys(child, childPath, depth + 1, seen, hits, budget);
+    if (hits.length > 0) return;
+  }
+}
+
+function normalizeNames(value: unknown, depth: number, seen: WeakSet<object>): unknown {
+  if (value === null || typeof value !== 'object' || depth > MAX_TELEMETRY_SCAN_DEPTH) return value;
+  if (seen.has(value)) return value;
+  seen.add(value);
+  if (Array.isArray(value)) return value.map((v) => normalizeNames(v, depth + 1, seen));
+  const out: Record<string, unknown> = {};
+  for (const [key, child] of Object.entries(value as Record<string, unknown>)) {
+    out[key] =
+      TELEMETRY_NAME_FIELDS.has(key) && typeof child === 'string'
+        ? normalizeTelemetryName(child)
+        : normalizeNames(child, depth + 1, seen);
+  }
+  return out;
+}
+
+/**
+ * Ingestion guard for telemetry payloads. Returns `{ accepted: true,
+ * sanitized }` for clean payloads (with route/screen/bot names reduced to
+ * templates) and `{ accepted: false, reason, droppedFields }` for payloads
+ * carrying bodies/headers/cookies/query values — those are dropped, never
+ * stored, and reported via `warn` (key paths only, never values).
+ */
+export function sanitizeTelemetry(
+  payload: unknown,
+  warn?: TelemetryWarnFn,
+): SanitizeTelemetryResult {
+  const report = (message: string, detail: Record<string, unknown>): void => {
+    try {
+      (warn ?? ((m, d) => console.warn(`[telemetry-guard] ${m}`, d)))(message, detail);
+    } catch {
+      // Warning must never break the refusal.
+    }
+  };
+  if (payload === null || typeof payload !== 'object' || Array.isArray(payload)) {
+    const reason = 'telemetry payload must be a plain object';
+    report('telemetry payload refused', { reason });
+    return { accepted: false, reason, droppedFields: [] };
+  }
+  const hits: string[] = [];
+  try {
+    scanForbiddenKeys(payload, '', 0, new WeakSet(), hits, { keys: 0 });
+  } catch {
+    const reason = 'telemetry guard scan failed';
+    report('telemetry payload refused', { reason });
+    return { accepted: false, reason, droppedFields: [] };
+  }
+  if (hits.length > 0) {
+    const reason = `telemetry payload carries forbidden PII-bearing field(s): ${hits.join(', ')}`;
+    report('telemetry payload refused', { reason, droppedFields: hits });
+    return { accepted: false, reason, droppedFields: hits };
+  }
+  const sanitized = normalizeNames(payload, 0, new WeakSet()) as Record<string, unknown>;
+  return { accepted: true, sanitized };
+}
