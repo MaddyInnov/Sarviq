@@ -82,7 +82,10 @@ describe('POST /api/prompts/refresh', () => {
     writeFileSync(file, 'Router prompt v1.');
     utimesSync(file, pinned, pinned);
     expect(store.resolve('router').text).toBe('Router prompt v1.');
-    expect(statSync(file).mtimeMs).toBe(pinned.getTime());
+    // Filesystem mtime granularity is platform-dependent (some CI runners
+    // round-trip with sub-millisecond error), so assert closeness, not exact
+    // equality — the test's intent is "mtime pinned ~2min in the past".
+    expect(Math.abs(statSync(file).mtimeMs - pinned.getTime())).toBeLessThan(5);
 
     // Rewrite the override but keep the pinned mtime: the mtime check in
     // resolve() cannot see this change (stale cache).
