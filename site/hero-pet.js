@@ -148,12 +148,25 @@ import * as THREE from './assets/vendor/three.module.min.js';
     camera.aspect = w / h;
     // Portrait phones: pull the camera back so the pet stays a cute
     // accent above the headline instead of swallowing it.
-    if (camera.aspect < 0.8) camera.position.set(0, 0.2, 11.5);
-    else camera.position.set(0, 0.6, 7.4);
+    if (camera.aspect < 0.8) { camera.position.set(0, 0.2, 11.5); camBaseY = 0.2; }
+    else { camera.position.set(0, 0.6, 7.4); camBaseY = 0.6; }
     camera.updateProjectionMatrix();
   }
+  var camBaseY = 0.6;
   window.addEventListener('resize', size);
   size();
+
+  // ---- scroll-reactive page background ----
+  // The canvas is fixed full-page: the pet belongs to the hero (drifts up
+  // and settles as you scroll past), particles flow everywhere and surge
+  // with scroll velocity, camera eases downward for parallax depth.
+  var heroEl = document.getElementById('hero');
+  var scrollY = 0, lastScrollY = window.scrollY || 0, scrollBoost = 0;
+  window.addEventListener('scroll', function () {
+    scrollY = window.scrollY || 0;
+    scrollBoost = Math.min(Math.abs(scrollY - lastScrollY) * 0.012, 1.6);
+    lastScrollY = scrollY;
+  }, { passive: true });
 
   // ---- animation ----
   var clock = new THREE.Clock();
@@ -167,9 +180,15 @@ import * as THREE from './assets/vendor/three.module.min.js';
     last = now;
     var t = clock.getElapsedTime();
 
+    // Pet: idle motion + scroll-away drift (stays fully visible in hero,
+    // floats up and gently shrinks as the hero leaves the viewport).
+    var heroH = (heroEl && heroEl.offsetHeight) || window.innerHeight;
+    var fade = Math.max(0, 1 - scrollY / (heroH * 0.85));
     var br2 = 1 + Math.sin(t * 2.1) * 0.028;
     body.scale.set(br2, 1 / Math.sqrt(br2), br2);
-    pet.position.y = PET_Y + Math.sin(t * 1.7) * 0.09;
+    pet.position.y = PET_Y + Math.sin(t * 1.7) * 0.09 + (1 - fade) * 2.2;
+    pet.scale.setScalar(0.8 * (0.55 + 0.45 * fade));
+    pet.visible = fade > 0.01;
     for (var i = 0; i < arms.length; i++) arms[i].rotation.y = Math.sin(t * 2.6 + i * 0.9) * 0.35;
 
     blinkT += dt;
@@ -186,14 +205,20 @@ import * as THREE from './assets/vendor/three.module.min.js';
     pet.rotation.y = mx * 0.35;
     pet.rotation.x = my * 0.18;
 
-    // Particles drift upward, wrap around.
+    // Particles drift upward, wrap around; scroll velocity gives them a
+    // visible surge so the background feels alive while scrolling.
+    scrollBoost = Math.max(0, scrollBoost - dt * 2.2);
+    var rise = dt * (0.14 + scrollBoost * 0.55);
     var arr = pGeo.attributes.position.array;
     for (var p = 0; p < P; p++) {
-      arr[p * 3 + 1] += dt * 0.14;
+      arr[p * 3 + 1] += rise;
       arr[p * 3] += Math.sin(t * 0.6 + p) * dt * 0.05;
       if (arr[p * 3 + 1] > 3.6) arr[p * 3 + 1] = -3.6;
     }
     pGeo.attributes.position.needsUpdate = true;
+
+    // Gentle camera parallax with scroll — the world eases downward.
+    camera.position.y += ((camBaseY - scrollY * 0.0011) - camera.position.y) * 0.06;
 
     renderer.render(scene, camera);
     requestAnimationFrame(animate);
@@ -206,15 +231,8 @@ import * as THREE from './assets/vendor/three.module.min.js';
     pet.rotation.y = 0.18;
     renderer.render(scene, camera);
   } else {
-    // Pause when offscreen or tab hidden.
-    var hero = document.getElementById('hero');
-    if ('IntersectionObserver' in window && hero) {
-      new IntersectionObserver(function (entries) {
-        var vis = entries[0].isIntersecting && !document.hidden;
-        if (vis && !running) { running = true; last = performance.now(); requestAnimationFrame(animate); }
-        else if (!vis) { running = false; }
-      }).observe(hero);
-    }
+    // The canvas is the full-page background: keep animating while the tab
+    // is visible, pause only when hidden.
     document.addEventListener('visibilitychange', function () {
       if (document.hidden) running = false;
       else if (running === false) { running = true; last = performance.now(); requestAnimationFrame(animate); }
