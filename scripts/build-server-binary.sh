@@ -8,7 +8,15 @@
 # Output: dist/mvp-server[-<target>]
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-TARGET="${1:-bun-linux-x64}"
+TARGET="bun-linux-x64"
+# Accept both "--target X" and bare "X".
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target) TARGET="${2:-bun-linux-x64}"; shift 2 ;;
+    --target=*) TARGET="${1#--target=}"; shift ;;
+    *) TARGET="$1"; shift ;;
+  esac
+done
 OUT="$ROOT/dist/mvp-server"
 
 echo "==> building workspace (web UI first, then API with embedded assets)"
