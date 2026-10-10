@@ -95,3 +95,33 @@ jobs:
             standalone mvp-server binary. Alpha release — expect rough edges.
           releaseDraft: false
           prerelease: true
+
+      # The linuxdeploy-built AppImage bundles the runner's libwebkit2gtk-4.1,
+      # which is now Skia-based and crashes on some systems' COLRv1 color fonts
+      # (window never opens). Strip the bundled WebKitGTK so the AppImage uses
+      # the system libwebkit2gtk-4.1 like the .deb does, then re-upload.
+      - name: Fix Linux AppImage (drop bundled WebKitGTK)
+        if: runner.os == 'Linux'
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          APPIMAGE=$(ls apps/desktop/src-tauri/target/release/bundle/appimage/*.AppImage | head -1)
+          echo "Post-processing $APPIMAGE"
+          work=$(mktemp -d)
+          "$APPIMAGE" --appimage-extract >/dev/null
+          mv squashfs-root "$work/appdir"
+          rm -f "$work/appdir"/usr/lib/libwebkit2gtk-4.1.so* \
+                "$work/appdir"/usr/lib/libjavascriptcoregtk-4.1.so*
+          wget -q -O "$work/ait.AppImage" https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
+          chmod +x "$work/ait.AppImage"
+          (cd "$work" && ./ait.AppImage --appimage-extract >/dev/null)
+          export PATH="$work/squashfs-root/usr/bin:$PATH"
+          APPNAME=$(basename "$APPIMAGE")
+          "$work/squashfs-root/usr/bin/appimagetool" "$work/appdir" "$work/$APPNAME" >/dev/null
+          # Replace the release asset with the fixed AppImage
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          ASSET_ID=$(gh api "repos/MaddyInnov/Sarviq/releases/tags/$TAG" --jq '.assets[] | select(.name | endswith(".AppImage")) | .id')
+          if [ -n "$ASSET_ID" ]; then gh api -X DELETE "repos/MaddyInnov/Sarviq/releases/assets/$ASSET_ID"; fi
+          gh release upload "$TAG" "$work/$APPNAME" --clobber
+          rm -rf "$work" squashfs-root
