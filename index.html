@@ -178,7 +178,7 @@
         <h3>Linux (.deb / AppImage) — first run</h3>
         <ol class="mini-steps">
           <li><strong>Install the .deb.</strong> <code>sudo dpkg -i Sarviq_0.1.0_amd64.deb</code> — or double-click it and open with Software Install. If it asks for missing packages, run <code>sudo apt-get install -f</code>.</li>
-          <li><strong>…or go portable.</strong> Prefer no install? <code>chmod +x Sarviq_0.1.0_amd64.AppImage &amp;&amp; ./Sarviq_0.1.0_amd64.AppImage</code> — runs from anywhere, leaves your system untouched.</li>
+          <li><strong>…or go portable.</strong> Prefer no install? <code>chmod +x Sarviq_0.1.0_amd64.AppImage &amp;&amp; ./Sarviq_0.1.0_amd64.AppImage</code> — runs from anywhere, leaves your system untouched. Needs the system WebKitGTK: <code>sudo apt install libwebkit2gtk-4.1-0</code> on Debian/Ubuntu.</li>
           <li><strong>Launch.</strong> Find <em>Sarviq</em> in your app menu. First screen is <strong>Chat</strong>; the sidebar holds the six destinations: Chat, Bots, Workflows, Marketplace, Workspace, Activity.</li>
           <li><strong>Add your AI key (BYOK).</strong> Open <strong>Accounts &amp; API keys</strong> (settings) and add any provider — <strong>Groq</strong> (free tier), <strong>OpenAI</strong>, <strong>OpenRouter</strong>, <strong>Anthropic</strong>, <strong>OpenCode Zen</strong>, or local <strong>Ollama</strong>. Keys stay on your machine.</li>
           <li><strong>Say hello, then make it yours.</strong> Chat with a bot (approval cards gate every tool call), then pick your theme, mode, language and 3D pet in <strong>Preferences</strong>.</li>
