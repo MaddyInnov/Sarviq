@@ -9,6 +9,12 @@ name: Release
 on:
   push:
     tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to attach desktop artifacts to'
+        required: true
+        default: 'v0.1.0-alpha'
 
 permissions:
   contents: write
@@ -27,6 +33,7 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       - run: npm ci
+      - run: bun install  # bun's bundler needs its own node_modules layout to resolve @mvp/* workspaces
       - run: bash scripts/build-server-binary.sh --target bun-linux-x64
 
       - uses: actions/upload-artifact@v4
@@ -66,6 +73,7 @@ jobs:
             libayatana-appindicator3-dev librsvg2-dev patchelf
 
       - run: npm ci
+      - run: bun install  # bun's bundler needs its own node_modules layout to resolve @mvp/* workspaces
 
       - name: Compile API sidecar for this OS
         shell: bash
@@ -79,11 +87,10 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
-          tagName: ${{ github.ref_name }}
-          releaseName: 'Sarviq ${{ github.ref_name }}'
+          tagName: ${{ github.event.inputs.tag || github.ref_name }}
+          releaseName: 'Sarviq ${{ github.event.inputs.tag || github.ref_name }}'
           releaseBody: |
             Desktop app installers (Windows .exe, Linux AppImage + .deb) and the
-            standalone mvp-server binary. Desktop builds are DRAFT releases —
-            review before publishing.
-          releaseDraft: true
-          prerelease: false
+            standalone mvp-server binary. Alpha release — expect rough edges.
+          releaseDraft: false
+          prerelease: true
