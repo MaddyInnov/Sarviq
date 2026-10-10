@@ -1,0 +1,210 @@
+<!-- SPDX-License-Identifier: Apache-2.0 -->
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Sarviq — universal intelligence · all-in-one AI agent platform</title>
+<meta name="description" content="Sarviq is the open-source, all-in-one AI agent platform: chat with 3D companion pets, bot teams, visual workflows, live code sessions, approvals, notes, computer use, Android companion apps, and 180+ models behind one key.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Cdefs%3E%3ClinearGradient id='g' x1='0' y1='0' x2='1' y2='1'%3E%3Cstop offset='0' stop-color='%232dd4bf'/%3E%3Cstop offset='.55' stop-color='%238b5cf6'/%3E%3Cstop offset='1' stop-color='%23e879f9'/%3E%3C/linearGradient%3E%3C/defs%3E%3Ccircle cx='16' cy='16' r='14' fill='url(%23g)'/%3E%3Ccircle cx='11' cy='14' r='2.4' fill='%230b0714'/%3E%3Ccircle cx='21' cy='14' r='2.4' fill='%230b0714'/%3E%3Cpath d='M11 21q5 4 10 0' stroke='%230b0714' stroke-width='2.2' fill='none' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="styles.css">
+<!-- three.js is vendored locally (assets/vendor/) so the 3D hero works offline and on GitHub Pages. -->
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+
+<!-- ============ NAV ============ -->
+<header class="nav" id="top">
+  <div class="nav-inner">
+    <a class="brand" href="#top" aria-label="Sarviq home">
+      <span class="brand-orb" aria-hidden="true"></span>
+      <span class="brand-name">Sarviq</span>
+    </a>
+    <nav class="nav-links" aria-label="Sections">
+      <a href="#product">Product</a>
+      <a href="#screenshots">Screenshots</a>
+      <a href="#downloads">Downloads</a>
+      <a href="#docs">Docs</a>
+      <a href="#blog">Blog</a>
+    </nav>
+    <a class="btn btn-github" href="https://github.com/MaddyInnov/Sarviq" target="_blank" rel="noopener">
+      <svg viewBox="0 0 16 16" width="16" height="16" fill="currentColor" aria-hidden="true"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z"/></svg>
+      <span class="star-count" data-stars>Star</span>
+    </a>
+    <button class="nav-burger" aria-label="Menu" aria-expanded="false"><span></span><span></span><span></span></button>
+  </div>
+</header>
+
+<main id="main">
+<!-- ============ HERO ============ -->
+<section class="hero" id="hero">
+  <canvas id="pet-canvas" aria-label="Animated 3D Sarviq companion pet" role="img"></canvas>
+  <div class="hero-glow" aria-hidden="true"></div>
+  <div class="hero-copy">
+    <p class="kicker">Open-source · Apache-2.0 · local-first ready</p>
+    <h1>Sarviq <span class="grad">— universal intelligence</span></h1>
+    <p class="lede">One platform for every AI agent you run. Chat with 3D companion pets, field bot teams, draw n8n-style workflows, watch agents write code live, gate every tool call with approvals — with 180+ models behind a single key.</p>
+    <div class="cta-row">
+      <a class="btn btn-primary" href="#downloads">Download Sarviq</a>
+      <a class="btn btn-ghost" href="https://github.com/MaddyInnov/Sarviq" target="_blank" rel="noopener">View on GitHub</a>
+    </div>
+    <p class="pronounce">Pronounced <strong>SAR-vik</strong> — from Sanskrit <em>Sarva</em> (all) + IQ.</p>
+  </div>
+  <div class="scroll-hint" aria-hidden="true">↓</div>
+</section>
+
+<!-- ============ STATS ============ -->
+<section class="stats" aria-label="Sarviq at a glance">
+  <div class="stat"><strong data-stars-num>–</strong><span>GitHub stars</span></div>
+  <div class="stat"><strong>180+</strong><span>models, one key</span></div>
+  <div class="stat"><strong>6</strong><span>3D companion pets</span></div>
+  <div class="stat"><strong>5</strong><span>hand-crafted themes</span></div>
+  <div class="stat"><strong>BYOK</strong><span>+ local models</span></div>
+</section>
+
+<!-- ============ PRODUCT / FEATURES ============ -->
+<section class="section" id="product">
+  <div class="wrap">
+    <p class="kicker">Product</p>
+    <h2>Everything agents do, in one calm place</h2>
+    <p class="section-lede">Six destinations. Zero tab-switching. Every feature is wired into the others — bots run workflows, workflows request approvals, notes feed your briefing.</p>
+    <div class="grid">
+      <article class="card"><div class="icon">💬</div><h3>Chat with 3D pets</h3><p>Six interactive WebGL companions — Sarviq, Ocky, Nubi, Plip, Bolt, Wisp — react to your conversation: thinking, working, happy, sleeping. Click one; it bounces.</p></article>
+      <article class="card"><div class="icon">🤖</div><h3>Bot teams</h3><p>Specialist bots (Coder, Scout, Reviewer…) with per-bot governance policies, team import/export, delegation with peer approval, and shared workspaces.</p></article>
+      <article class="card"><div class="icon">🔀</div><h3>Visual workflows</h3><p>n8n-style canvas with if/set/code nodes. Import n8n JSON directly — unmapped nodes are reported, never silently dropped.</p></article>
+      <article class="card"><div class="icon">⌨️</div><h3>Live code sessions</h3><p>Watch agents write code as it happens — animated diffs stream in line by line, green additions, red removals, per-file bot badges.</p></article>
+      <article class="card"><div class="icon">🛡️</div><h3>Approvals &amp; governance</h3><p>Deny-by-default tool registry, inline approval cards, full audit trail, encrypted credential vault, policy simulator.</p></article>
+      <article class="card"><div class="icon">🗒️</div><h3>Notes &amp; databases</h3><p>Notion-style notes with table and kanban views. Notion ZIP/HTML import. Notes attach to bot context and feed your morning briefing.</p></article>
+      <article class="card"><div class="icon">🖥️</div><h3>Computer use</h3><p>Per-bot live screen view — watch the agent drive, click and type yourself, or teach it by recording your own actions into reusable workflows.</p></article>
+      <article class="card"><div class="icon">📱</div><h3>Android companion</h3><p>Two apps: Companion (drive your PC from your phone) and Phone Agent (drive your phone from your PC). Pair in seconds with a QR code.</p></article>
+      <article class="card"><div class="icon">🧠</div><h3>180+ models, one key</h3><p>OpenRouter-style routing across frontier models plus local Ollama and BYO-CLI engines (Claude Code, Codex, Grok…). Cost-aware fast router included.</p></article>
+      <article class="card"><div class="icon">🎨</div><h3>5 themes</h3><p>Light, dark, midnight, porcelain, ocean — claymorphism + glassmorphism, subtle 135° gradients, Simple and Pro modes, reduced-motion respected.</p></article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ WATCH IT WRITE CODE ============ -->
+<section class="section section-alt" id="live-code">
+  <div class="wrap">
+    <p class="kicker">Live code sessions</p>
+    <h2>Watch it write code</h2>
+    <p class="section-lede">This is a live re-creation of Sarviq's code session view — the agent's edits stream in as animated diffs while it works.</p>
+    <div class="demo-window glass">
+      <div class="demo-bar"><span class="dot"></span><span class="dot"></span><span class="dot"></span><span class="demo-title">Live code session · greet.ts · <em>Sarviq</em></span></div>
+      <pre class="demo-code" id="demo-code" aria-label="Animated code writing demo"></pre>
+    </div>
+  </div>
+</section>
+
+<!-- ============ SCREENSHOTS ============ -->
+<section class="section" id="screenshots">
+  <div class="wrap">
+    <p class="kicker">Screenshots</p>
+    <h2>The real app, unretouched</h2>
+    <p class="section-lede">Captured live from the current build — midnight theme, real bots, real workflows.</p>
+    <div class="shots">
+      <figure class="shot"><img src="assets/screenshots/shot-chat.png" alt="Sarviq chat with the 3D Sarviq pet and bot roster" loading="lazy"><figcaption>Chat — 3D companion pet &amp; bot roster</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-code-session.png" alt="Live code session view with animated diff" loading="lazy"><figcaption>Live code session — animated diffs</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-workflows.png" alt="Workflow definitions with n8n import" loading="lazy"><figcaption>Workflows — n8n import/export</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-bots.png" alt="Bot governance policies and personas" loading="lazy"><figcaption>Bots — per-bot governance</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-marketplace.png" alt="Marketplace of bots and workflows" loading="lazy"><figcaption>Marketplace</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-workspace.png" alt="Workspace notes and databases" loading="lazy"><figcaption>Workspace — notes &amp; databases</figcaption></figure>
+      <figure class="shot"><img src="assets/screenshots/shot-activity.png" alt="Activity feed of agent runs" loading="lazy"><figcaption>Activity — run history</figcaption></figure>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DOWNLOADS ============ -->
+<section class="section section-alt" id="downloads">
+  <div class="wrap">
+    <p class="kicker">Downloads</p>
+    <h2>Get Sarviq</h2>
+    <p class="section-lede">Free and open-source. Desktop apps and Android APKs ship from GitHub Releases.</p>
+    <div class="dl-grid">
+      <article class="card dl-card">
+        <div class="icon">💻</div>
+        <h3>Sarviq Desktop</h3>
+        <p>Windows, macOS &amp; Linux — Tauri app with the full console: chat, bots, workflows, code sessions, computer use.</p>
+        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Get from GitHub Releases</a>
+      </article>
+      <article class="card dl-card">
+        <div class="icon">📱</div>
+        <h3>Android apps</h3>
+        <p><strong>Sarviq Companion</strong> — drive your PC from your phone.<br><strong>Phone Agent</strong> — drive your phone from your PC.</p>
+        <div class="dl-apks">
+          <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-companion.apk">Companion APK</a>
+          <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-phone-agent.apk">Phone Agent APK</a>
+        </div>
+        <p class="dl-note">APKs install directly (v0.1.0-alpha). Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Get them from GitHub Releases</a>.</p>
+      </article>
+    </div>
+  </div>
+</section>
+
+<!-- ============ DOCS ============ -->
+<section class="section" id="docs">
+  <div class="wrap">
+    <p class="kicker">Docs</p>
+    <h2>User guide</h2>
+    <p class="section-lede">From zero to your first autonomous run in five steps.</p>
+    <ol class="steps">
+      <li><h3>Install</h3><p>Grab the desktop app for your OS from <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">GitHub Releases</a>, or run the web console + API from source with <code>npm install</code> in <code>apps/api</code> and <code>apps/web</code>.</p></li>
+      <li><h3>Add a provider key (BYOK)</h3><p>Open <strong>Accounts &amp; API keys</strong> and paste your key — Groq, OpenRouter, or any OpenAI-compatible endpoint. Prefer local? Point Sarviq at Ollama or a BYO-CLI engine instead. No key ever leaves your machine except to the provider you chose.</p></li>
+      <li><h3>Create your first bot</h3><p>In <strong>Bots</strong>, pick a specialist (Coder, Scout, Reviewer…) or craft your own with a persona and per-bot tool policy. Chat with it in <strong>Chat</strong> — tool calls that need a human pause for an inline approval card.</p></li>
+      <li><h3>Run a workflow</h3><p>Open <strong>Workflows</strong>, run a built-in flow (try <em>Morning briefing</em>), or import your n8n JSON — common nodes map automatically. Bots can trigger workflows from chat, and workflows can call a bot turn as a node.</p></li>
+      <li><h3>Pair the Android app</h3><p>On desktop, open the companion panel to show the pairing QR code; scan it in the Android app. On your LAN it pairs directly; with <code>SARVIQ_PUBLIC_URL</code> set, it pairs over HTTPS from anywhere.</p></li>
+      <li><h3>Make it yours</h3><p><strong>Preferences</strong> holds five themes (light, dark, midnight, porcelain, ocean), Simple/Pro modes, English + Hindi UI, voice notes, and your pet picker — six 3D companions to choose from.</p></li>
+    </ol>
+  </div>
+</section>
+
+<!-- ============ BLOG ============ -->
+<section class="section section-alt" id="blog">
+  <div class="wrap">
+    <p class="kicker">Blog &amp; vlog</p>
+    <h2>Learn the Sarviq way</h2>
+    <div class="grid blog-grid">
+      <article class="card">
+        <div class="icon">🎬</div>
+        <h3>Video guide (9 min)</h3>
+        <p>A narrated walkthrough of the whole platform — chat, pets, bots, workflows, code sessions, and the Android apps.</p>
+        <a class="btn btn-ghost" href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Watch the guide</a>
+      </article>
+      <article class="card">
+        <div class="icon">✍️</div>
+        <h3>Why one platform for agents</h3>
+        <p>Chatbots, workflow tools, note apps, and device controllers each solve a slice. Sarviq's bet: the slices are the same agent wearing different hats — so they should share memory, approvals, and context.</p>
+      </article>
+      <article class="card">
+        <div class="icon">🎥</div>
+        <h3>Teach Sarviq by recording your screen</h3>
+        <p>Show the agent how you do a repetitive task once — Sarviq records the clicks, keystrokes, and decisions, then compiles them into a reusable workflow you can schedule, share, or hand to a bot.</p>
+      </article>
+    </div>
+  </div>
+</section>
+</main>
+
+<!-- ============ FOOTER ============ -->
+<footer class="footer">
+  <div class="wrap footer-inner">
+    <div class="footer-brand">
+      <span class="brand-orb" aria-hidden="true"></span>
+      <strong>Sarviq</strong>
+      <p>Universal intelligence, open-source.<br>Built with Apache-2.0 love.</p>
+    </div>
+    <nav aria-label="Footer">
+      <a href="https://github.com/MaddyInnov/Sarviq" target="_blank" rel="noopener">GitHub</a>
+      <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Releases</a>
+      <a href="#docs">Docs</a>
+      <a href="#blog">Blog</a>
+      <a href="#downloads">Downloads</a>
+    </nav>
+  </div>
+  <p class="fine">© 2026 Sarviq contributors · Apache-2.0 · “SAR-vik” — Sarva (all) + IQ</p>
+</footer>
+
+<script src="site.js" defer></script>
+<script type="module" src="hero-pet.js"></script>
+</body>
+</html>
