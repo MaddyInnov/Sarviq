@@ -34,7 +34,7 @@ jobs:
 
       - run: npm ci
       - run: bun install  # bun's bundler needs its own node_modules layout to resolve @mvp/* workspaces
-      - run: bash scripts/build-server-binary.sh --target bun-linux-x64
+      - run: bash scripts/build-server-binary.sh --target bun-linux-x64  # script runs npm run build internally
 
       - uses: actions/upload-artifact@v4
         with:
@@ -74,6 +74,7 @@ jobs:
 
       - run: npm ci
       - run: bun install  # bun's bundler needs its own node_modules layout to resolve @mvp/* workspaces
+      - run: npm run build  # workspace dist/ outputs (sidecar compile resolves @mvp/* via package main)
 
       - name: Compile API sidecar for this OS
         shell: bash

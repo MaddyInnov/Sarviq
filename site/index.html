@@ -25,6 +25,7 @@
       <a href="#screenshots">Screenshots</a>
       <a href="#downloads">Downloads</a>
       <a href="#docs">Docs</a>
+      <a href="#faq">FAQ</a>
       <a href="#blog">Blog</a>
     </nav>
     <a class="btn btn-github" href="https://github.com/MaddyInnov/Sarviq" target="_blank" rel="noopener">
@@ -119,24 +120,49 @@
   <div class="wrap">
     <p class="kicker">Downloads</p>
     <h2>Get Sarviq</h2>
-    <p class="section-lede">Free and open-source. Desktop apps and Android APKs ship from GitHub Releases.</p>
+    <p class="section-lede">Free and open-source (Apache-2.0). Pick your platform — every build is the full Sarviq: chat, bots, workflows, code sessions, approvals, computer use.</p>
     <div class="dl-grid">
       <article class="card dl-card">
-        <div class="icon">💻</div>
-        <h3>Sarviq Desktop</h3>
-        <p>Windows, macOS &amp; Linux — Tauri app with the full console: chat, bots, workflows, code sessions, computer use.</p>
-        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Get from GitHub Releases</a>
+        <div class="icon">🪟</div>
+        <h3>Windows</h3>
+        <p><strong>Sarviq Setup.exe</strong> — Windows 10/11, 64-bit. Double-click, install, launch.</p>
+        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/Sarviq_0.1.0_x64-setup.exe">Download .exe</a>
+        <p class="dl-note">Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">All files on GitHub Releases</a>.</p>
+      </article>
+      <article class="card dl-card">
+        <div class="icon">🐧</div>
+        <h3>Linux</h3>
+        <p><strong>sarviq .deb</strong> — Debian/Ubuntu (also ships as AppImage). <code>sudo dpkg -i</code> and you're in.</p>
+        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq_0.1.0_amd64.deb">Download .deb</a>
+        <p class="dl-note">Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">All files on GitHub Releases</a>.</p>
       </article>
       <article class="card dl-card">
         <div class="icon">📱</div>
-        <h3>Android apps</h3>
-        <p><strong>Sarviq Companion</strong> — drive your PC from your phone.<br><strong>Phone Agent</strong> — drive your phone from your PC.</p>
+        <h3>Android</h3>
+        <p><strong>Which one do I need?</strong> Want to <em>control your PC from your phone</em>? → <strong>Companion</strong>. Want your <em>PC to drive your phone</em>? → <strong>Phone Agent</strong>. Most people start with Companion.</p>
         <div class="dl-apks">
           <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-companion.apk">Companion APK</a>
           <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-phone-agent.apk">Phone Agent APK</a>
         </div>
-        <p class="dl-note">APKs install directly (v0.1.0-alpha). Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Get them from GitHub Releases</a>.</p>
+        <p class="dl-note">Android 8+. When installing, allow “Install unknown apps” for your browser — these are direct APKs, not from the Play Store. v0.1.0-alpha.</p>
       </article>
+    </div>
+    <p class="dl-note dl-macos">On macOS? The signed .dmg build is coming — meanwhile run from source (<code>npm install</code> in <code>apps/api</code> and <code>apps/web</code>) or watch the <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">releases page</a>.</p>
+  </div>
+</section>
+
+<!-- ============ FAQ ============ -->
+<section class="section" id="faq">
+  <div class="wrap">
+    <p class="kicker">FAQ</p>
+    <h2>No confusion, promise</h2>
+    <div class="grid faq-grid">
+      <article class="card"><h3>Is Sarviq free?</h3><p>Yes. The apps are free and open-source (Apache-2.0). You only ever pay your own AI provider for model usage — and you can dodge that entirely with free local models via Ollama.</p></article>
+      <article class="card"><h3>Do I need API keys?</h3><p>Only if you want cloud models. Paste a key once under Accounts &amp; API keys (Groq has a generous free tier; OpenRouter and OpenAI-compatible endpoints work too). Prefer zero keys? Point Sarviq at local Ollama or a BYO-CLI engine instead.</p></article>
+      <article class="card"><h3>Which download do I need?</h3><p><strong>Windows PC</strong> → the .exe. <strong>Linux PC</strong> → the .deb. <strong>Control your PC from your phone</strong> → Companion APK. <strong>Automate your phone from your PC</strong> → Phone Agent APK. Start with desktop + Companion.</p></article>
+      <article class="card"><h3>Is my data private?</h3><p>Sarviq is local-first: your keys, chats, and files live on your machine. Keys are only ever sent to the model provider you chose — never to us. Approvals gate every sensitive tool call.</p></article>
+      <article class="card"><h3>What does “alpha” mean?</h3><p>v0.1.0-alpha is an early build: the full feature set is there, but expect rough edges. Back up anything important, and report bugs on GitHub — every report shapes the beta.</p></article>
+      <article class="card"><h3>Where do I start after installing?</h3><p>Open the <a href="#docs">user guide</a> above: install → add a key (or Ollama) → create your first bot → run the Morning briefing workflow → pair your phone. Five minutes, end to end.</p></article>
     </div>
   </div>
 </section>
@@ -168,7 +194,7 @@
         <div class="icon">🎬</div>
         <h3>Video guide (9 min)</h3>
         <p>A narrated walkthrough of the whole platform — chat, pets, bots, workflows, code sessions, and the Android apps.</p>
-        <a class="btn btn-ghost" href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Watch the guide</a>
+        <a class="btn btn-ghost" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-video-guide.mp4" target="_blank" rel="noopener">Watch the guide</a>
       </article>
       <article class="card">
         <div class="icon">✍️</div>
@@ -197,6 +223,7 @@
       <a href="https://github.com/MaddyInnov/Sarviq" target="_blank" rel="noopener">GitHub</a>
       <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">Releases</a>
       <a href="#docs">Docs</a>
+      <a href="#faq">FAQ</a>
       <a href="#blog">Blog</a>
       <a href="#downloads">Downloads</a>
     </nav>
