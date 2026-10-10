@@ -100,7 +100,7 @@ function ConnectedAccounts() {
     try {
       setError(null);
       const summary = await api<AccountsSummary>('GET', '/api/accounts/summary');
-      setStatuses(summary.oauth);
+      setStatuses(summary.oauth ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }
@@ -216,7 +216,7 @@ function ComposioPanel() {
         `/api/composio/apps?botId=${encodeURIComponent(forBotId)}`,
       );
       if (data.error) throw new Error(data.error);
-      setApps(data.apps);
+      setApps(data.apps ?? []);
     },
     [],
   );
@@ -458,7 +458,7 @@ function VaultPanel() {
   const refresh = useCallback(async () => {
     try {
       setError(null);
-      setSecrets(await api<SecretMeta[]>('GET', '/api/vault'));
+      setSecrets((await api<SecretMeta[]>('GET', '/api/vault')) ?? []);
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     }

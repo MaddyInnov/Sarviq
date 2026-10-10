@@ -1,1 +1,50 @@
-{"$schema":"https://schema.tauri.app/config/2","app":{"security":{"csp":null},"windows":[{"height":860,"minHeight":640,"minWidth":960,"title":"Sarviq","width":1280}]},"build":{"beforeBuildCommand":"npm run build --workspace=@mvp/web","beforeDevCommand":"npm run dev --workspace=@mvp/web","devUrl":"http://localhost:3000","frontendDist":"../../web/out"},"bundle":{"active":true,"externalBin":["binaries/mvp-api"],"icon":["icons/32x32.png","icons/128x128.png","icons/128x128@2x.png","icons/icon.ico","icons/icon.png"],"targets":["nsis","appimage","deb"],"windows":{"nsis":{"installerIcon":"icons/icon.ico"}}},"identifier":"com.sarviq.desktop","productName":"Sarviq","version":"0.1.0"}
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "app": {
+    "security": {
+      "csp": null
+    },
+    "windows": [
+      {
+        "height": 860,
+        "minHeight": 640,
+        "minWidth": 960,
+        "title": "Sarviq",
+        "width": 1280
+      }
+    ],
+    "withGlobalTauri": true
+  },
+  "build": {
+    "beforeBuildCommand": "npm run build --workspace=@mvp/web",
+    "beforeDevCommand": "npm run dev --workspace=@mvp/web",
+    "devUrl": "http://localhost:3000",
+    "frontendDist": "../../web/out"
+  },
+  "bundle": {
+    "active": true,
+    "externalBin": [
+      "binaries/mvp-api"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.ico",
+      "icons/icon.png"
+    ],
+    "targets": [
+      "nsis",
+      "appimage",
+      "deb"
+    ],
+    "windows": {
+      "nsis": {
+        "installerIcon": "icons/icon.ico"
+      }
+    }
+  },
+  "identifier": "com.sarviq.desktop",
+  "productName": "Sarviq",
+  "version": "0.1.0"
+}
