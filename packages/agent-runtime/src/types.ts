@@ -28,7 +28,26 @@ export type StreamEvent =
   | { type: 'interrupted'; reason: string }
   | { type: 'approval_required'; approvalId: string; call: ToolCall }
   | { type: 'queued_turn_start'; queueId: string; message: string }
-  | { type: 'notice'; kind: string; message: string };
+  | { type: 'notice'; kind: string; message: string }
+  /**
+   * Live code-writing event for the code session view. Emitted AFTER a
+   * write_file tool executes successfully (approval gates already passed).
+   * The UI animates `after` streaming in as a diff against `before`.
+   */
+  | {
+      type: 'code_write';
+      call: ToolCall;
+      /** Workspace-relative path. */
+      file: string;
+      /** Content before the write, or null for a new file. */
+      before: string | null;
+      /** Full new content (server-truncated to 256KB). */
+      after: string;
+      /** Always true today (single-shot per write); reserved for chunked streaming. */
+      done: boolean;
+      botId: string;
+      botName: string;
+    };
 
 export interface ToolContext {
   sessionId: string;

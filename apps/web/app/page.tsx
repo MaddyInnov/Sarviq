@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 'use client';
 
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   allowTool,
   branchChatThread,
@@ -37,6 +37,9 @@ import { getWebSTTProvider, getWebTTSProvider } from '../lib/voice-http';
 import { VOICE_NOTE_PERSIST_LIMIT, type VoiceNote } from '../lib/voice-notes';
 import { CallPanel, VoiceNoteBubble, VoiceNoteRecorder } from '../components/voice';
 import { NoteAttachButton } from '../components/chat/note-attach-button';
+import { useCodeSession } from '../components/code/useCodeSession';
+import { CodeSessionView } from '../components/code/CodeSessionView';
+import { CodingSessionStrip } from '../components/code/CodingSessionStrip';
 
 type ChatBlock =
   | { kind: 'user'; id: string; text: string; ts: number }
@@ -392,6 +395,22 @@ function ChatPageInner() {
   // Chat vs live voice-call mode (the call panel lives inside the Chat
   // destination — the top-level nav stays exactly six destinations).
   const [chatMode, setChatMode] = useState<'chat' | 'call'>('chat');
+  // Live code session (Amoeba-style): file tabs + animated diffs while the
+  // agent writes code. Lives inside Chat — never a 7th destination.
+  const codeSession = useCodeSession();
+  const codeSessionRef = useRef(codeSession);
+  codeSessionRef.current = codeSession;
+  const [codeViewOpen, setCodeViewOpen] = useState(false);
+  const [codeLayout, setCodeLayout] = useState<'inline' | 'side'>('inline');
+  const dismissedThisTurn = useRef(false);
+  /** Pending approval cards, for the inline session strip. */
+  const pendingApprovals = useMemo(
+    () =>
+      blocks
+        .filter((b): b is Extract<ChatBlock, { kind: 'approval' }> => b.kind === 'approval' && b.status === 'pending')
+        .map((b) => ({ approvalId: b.approvalId, blockId: b.id, call: b.call })),
+    [blocks],
+  );
   const messagesRef = useRef<HTMLDivElement>(null);
   const abortRef = useRef<AbortController | null>(null);
   const turnSeq = useRef(0);
@@ -627,6 +646,12 @@ function ChatPageInner() {
   };
 
   const applyEvent = useCallback((event: StreamEvent) => {
+    // Live code session: feed every event; auto-open the session view when
+    // the agent starts writing code (unless the user dismissed it this turn).
+    codeSessionRef.current.handleEvent(event);
+    if (event.type === 'code_write' && !dismissedThisTurn.current) {
+      setCodeViewOpen(true);
+    }
     if (event.type === 'done') {
       const bid = botIdRef.current;
       const usage = event.usage;
@@ -750,6 +775,10 @@ function ChatPageInner() {
     // A new message supersedes any in-flight turn on this session
     // (backend aborts the previous turn; we drop our old reader).
     stopTurn();
+    // Fresh code session per turn — tabs show what THIS turn touches.
+    codeSessionRef.current.reset();
+    dismissedThisTurn.current = false;
+    setCodeViewOpen(false);
     const seq = ++turnSeq.current;
     const controller = new AbortController();
     abortRef.current = controller;
@@ -1322,6 +1351,40 @@ function ChatPageInner() {
           </div>
         ) : (
           <>
+            <CodingSessionStrip
+              files={codeSession.files}
+              active={codeSession.active}
+              pendingApprovals={pendingApprovals}
+              onDecide={decide}
+              onOpenSession={() => {
+                dismissedThisTurn.current = false;
+                setCodeViewOpen(true);
+              }}
+            />
+            {codeViewOpen && codeLayout === 'inline' && codeSession.files.length > 0 && (
+              <CodeSessionView
+                files={codeSession.files}
+                layout="inline"
+                onToggleLayout={() => setCodeLayout('side')}
+                onClose={() => {
+                  dismissedThisTurn.current = true;
+                  setCodeViewOpen(false);
+                }}
+                onFileDone={codeSession.markFileDone}
+              />
+            )}
+            {codeViewOpen && codeLayout === 'side' && codeSession.files.length > 0 && (
+              <CodeSessionView
+                files={codeSession.files}
+                layout="side"
+                onToggleLayout={() => setCodeLayout('inline')}
+                onClose={() => {
+                  dismissedThisTurn.current = true;
+                  setCodeViewOpen(false);
+                }}
+                onFileDone={codeSession.markFileDone}
+              />
+            )}
         <div className="chat-messages" ref={messagesRef}>
           {blocks.length === 0 && (
             <div className="empty-state">

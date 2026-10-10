@@ -859,14 +859,14 @@ export class AgentRuntime {
           toExecute.map(async ({ def, call }) => {
             const toolStep = telRunId ? this.telemetry?.startStep(telRunId, `tool:${call.name}`, 'tool') : null;
             try {
-              const out = await this.executeTool(def, call, ctx);
+              const { result: out, contentBefore } = await this.executeTool(def, call, ctx);
               const failed =
                 out !== null &&
                 typeof out === 'object' &&
                 !Array.isArray(out) &&
                 typeof (out as { error?: unknown }).error === 'string';
               toolStep?.end(failed ? { ok: false, errorKind: 'ToolError' } : { ok: true });
-              return out;
+              return { out, contentBefore };
             } catch (err) {
               toolStep?.end({ ok: false, errorKind: err instanceof Error ? err.name : 'Error' });
               throw err;
@@ -876,11 +876,40 @@ export class AgentRuntime {
         for (let i = 0; i < toExecute.length; i++) {
           const { call } = toExecute[i]!;
           const settled = results[i]!;
-          const result =
-            settled.status === 'fulfilled'
-              ? settled.value
-              : { error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason) };
+          let result: unknown;
+          let codeBefore: string | null = null;
+          if (settled.status === 'fulfilled') {
+            result = settled.value.out;
+            codeBefore = settled.value.contentBefore;
+          } else {
+            result = { error: settled.reason instanceof Error ? settled.reason.message : String(settled.reason) };
+          }
           await emit({ type: 'tool_result', call, result });
+          // Live code session view: after a SUCCESSFUL write_file, emit the
+          // before/after so the UI can animate the edit streaming in.
+          // Approval gates are untouched — this fires only after the
+          // (possibly approved) execution completes.
+          const failedResult =
+            result !== null &&
+            typeof result === 'object' &&
+            !Array.isArray(result) &&
+            typeof (result as { error?: unknown }).error === 'string';
+          if (call.name === 'write_file' && settled.status === 'fulfilled' && !failedResult) {
+            const file = typeof call.args?.path === 'string' ? call.args.path : '';
+            const afterRaw = typeof call.args?.content === 'string' ? call.args.content : '';
+            if (file) {
+              await emit({
+                type: 'code_write',
+                call,
+                file,
+                before: codeBefore,
+                after: afterRaw.slice(0, 256 * 1024),
+                done: true,
+                botId: ctx.botId,
+                botName: opts.bot.name,
+              });
+            }
+          }
           const toolMsg: ChatMessage = {
             role: 'tool',
             // Injection floor: tag the raw tool output with its origin before
@@ -1015,18 +1044,31 @@ export class AgentRuntime {
     def: ToolDefinition,
     call: ToolCall,
     ctx: ToolContext,
-  ): Promise<unknown> {
+  ): Promise<{ result: unknown; contentBefore: string | null }> {
+    // Pre-write snapshot (also feeds the live code_write stream event).
+    // Same relative-path read the checkpoint hook has always used.
+    let contentBefore: string | null = null;
+    const filePath = typeof call.args?.path === 'string' ? call.args.path : null;
+    if (filePath && def.name === 'write_file') {
+      try {
+        const { readFileSync, existsSync } = await import('node:fs');
+        contentBefore = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
+      } catch {
+        contentBefore = null;
+      }
+    }
     // Checkpoint hook: snapshot the file BEFORE a mutating tool runs, so
     // the user can rewind (Claude Code Esc+Esc style).
     if (this.onBeforeFileMutate && /^(write_file|edit_file|create_file|delete_file|remove_file)$/.test(def.name)) {
-      const filePath = typeof call.args?.path === 'string' ? call.args.path : null;
       if (filePath) {
-        let contentBefore: string | null = null;
-        try {
-          const { readFileSync, existsSync } = await import('node:fs');
-          contentBefore = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
-        } catch {
-          contentBefore = null;
+        // write_file already read it above; other tools read here.
+        if (def.name !== 'write_file') {
+          try {
+            const { readFileSync, existsSync } = await import('node:fs');
+            contentBefore = existsSync(filePath) ? readFileSync(filePath, 'utf-8') : null;
+          } catch {
+            contentBefore = null;
+          }
         }
         try {
           await this.onBeforeFileMutate({
@@ -1062,7 +1104,7 @@ export class AgentRuntime {
           call,
           detail: { hookCancelled: true, reason },
         });
-        return { cancelled: true, reason };
+        return { result: { cancelled: true, reason }, contentBefore };
       }
     }
     let result: unknown;
@@ -1085,7 +1127,7 @@ export class AgentRuntime {
       await this.hooks.emit('tool.after', afterPayload).catch(() => undefined);
     }
     this.audit({ type: 'tool.executed', sessionId: ctx.sessionId, botId: ctx.botId, call });
-    return result;
+    return { result, contentBefore };
   }
 
   /**

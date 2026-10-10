@@ -139,7 +139,25 @@ export type StreamEvent =
    * schema (components/widgets) — invalid payloads render as an error block,
    * never raw.
    */
-  | { type: 'widget'; widget: unknown };
+  | { type: 'widget'; widget: unknown }
+  /**
+   * Live code-writing event for the code session view. Emitted after a
+   * write_file tool executes successfully. The UI animates `after`
+   * streaming in as a diff against `before`.
+   */
+  | {
+      type: 'code_write';
+      call: ToolCall;
+      /** Workspace-relative path. */
+      file: string;
+      /** Content before the write, or null for a new file. */
+      before: string | null;
+      /** Full new content (server-truncated to 256KB). */
+      after: string;
+      done: boolean;
+      botId: string;
+      botName: string;
+    };
 
 export interface ApprovalRecord {
   id: string;
