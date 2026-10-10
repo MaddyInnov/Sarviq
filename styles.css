@@ -86,11 +86,11 @@ a { color: inherit; }
   display: flex; align-items: center; gap: 28px;
 }
 .brand { display: flex; align-items: center; gap: 10px; text-decoration: none; font-weight: 800; font-size: 1.25rem; }
-.brand-orb {
-  width: 30px; height: 30px; border-radius: 50%;
-  background: var(--grad);
-  box-shadow: 0 4px 14px rgba(139,92,246,0.55), inset -4px -6px 10px rgba(0,0,0,0.35), inset 4px 6px 10px rgba(255,255,255,0.35);
+.brand-logo {
+  width: 34px; height: 34px; display: block;
+  filter: drop-shadow(0 4px 10px rgba(43,80,200,0.5));
 }
+.footer-brand .brand-logo { width: 30px; height: 30px; }
 .nav-links { display: flex; gap: 4px; margin-left: 8px; }
 .nav-links a {
   text-decoration: none; color: var(--ink-dim); font-weight: 550; font-size: 0.95rem;
