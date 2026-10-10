@@ -5,9 +5,10 @@
 // need no SEED_DIR on disk. The API extracts them to a temp dir at boot
 // when SEED_DIR does not exist.
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
-import { join, relative } from 'node:path';
+import { join, relative, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = dirname(fileURLToPath(new URL('.', import.meta.url)));
 const SEED_DIR = join(ROOT, 'seed');
 const GEN_DIR = join(ROOT, 'apps/api/src/generated');
 const GEN_FILE = join(GEN_DIR, 'seed.ts');

@@ -3,10 +3,11 @@
 // as gzipped base64, so `bun build --compile` produces a SINGLE binary serving API + UI.
 // In dev (file absent) the API falls back to express.static('../web/out').
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, statSync, existsSync } from 'node:fs';
-import { join, relative, extname } from 'node:path';
+import { join, relative, extname, dirname } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { gzipSync } from 'node:zlib';
 
-const ROOT = new URL('..', import.meta.url).pathname;
+const ROOT = dirname(fileURLToPath(new URL('.', import.meta.url)));
 const OUT_DIR = join(ROOT, 'apps/web/out');
 const GEN_DIR = join(ROOT, 'apps/api/src/generated');
 const GEN_FILE = join(GEN_DIR, 'web-assets.ts');
