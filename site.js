@@ -127,4 +127,55 @@
       render(); schedule();
     }
   }
+
+  /* ---- screenshot lightbox ---- */
+  (function lightbox() {
+    var shots = Array.prototype.slice.call(document.querySelectorAll('.shot'));
+    if (!shots.length) return;
+    var box = document.getElementById('lightbox');
+    var img = document.getElementById('lb-img');
+    var cap = document.getElementById('lb-cap');
+    var idx = 0, lastFocus = null;
+
+    function show(i) {
+      idx = (i + shots.length) % shots.length;
+      var im = shots[idx].querySelector('img');
+      var fc = shots[idx].querySelector('figcaption');
+      img.src = im.getAttribute('src');
+      img.alt = im.getAttribute('alt') || '';
+      cap.textContent = fc ? fc.textContent : '';
+    }
+    function open(i, opener) {
+      lastFocus = opener || document.activeElement;
+      box.hidden = false;
+      document.body.style.overflow = 'hidden';
+      show(i);
+      document.getElementById('lb-close').focus();
+    }
+    function close() {
+      box.hidden = true;
+      document.body.style.overflow = '';
+      img.removeAttribute('src');
+      if (lastFocus && lastFocus.focus) lastFocus.focus();
+    }
+    shots.forEach(function (fig, i) {
+      fig.setAttribute('tabindex', '0');
+      fig.setAttribute('role', 'button');
+      fig.setAttribute('aria-label', 'Enlarge screenshot: ' + ((fig.querySelector('figcaption') || {}).textContent || '').trim());
+      fig.addEventListener('click', function () { open(i, fig); });
+      fig.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); open(i, fig); }
+      });
+    });
+    document.getElementById('lb-close').addEventListener('click', close);
+    document.getElementById('lb-prev').addEventListener('click', function (e) { e.stopPropagation(); show(idx - 1); });
+    document.getElementById('lb-next').addEventListener('click', function (e) { e.stopPropagation(); show(idx + 1); });
+    box.addEventListener('click', function (e) { if (e.target === box) close(); });
+    document.addEventListener('keydown', function (e) {
+      if (box.hidden) return;
+      if (e.key === 'Escape') close();
+      else if (e.key === 'ArrowLeft') show(idx - 1);
+      else if (e.key === 'ArrowRight') show(idx + 1);
+    });
+  })();
 })();
