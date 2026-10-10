@@ -25,6 +25,7 @@
       <a href="#product">Product</a>
       <a href="#screenshots">Screenshots</a>
       <a href="#downloads">Downloads</a>
+      <a href="#first-run">First run</a>
       <a href="#docs">Docs</a>
       <a href="#faq">FAQ</a>
       <a href="#blog">Blog</a>
@@ -126,14 +127,17 @@
         <div class="icon">🪟</div>
         <h3>Windows</h3>
         <p><strong>Sarviq Setup.exe</strong> — Windows 10/11, 64-bit. Double-click, install, launch.</p>
+        <p class="dl-note">First time? <a href="#first-run">Follow the Windows first-run guide</a>.</p>
         <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/Sarviq_0.1.0_x64-setup.exe">Download .exe</a>
         <p class="dl-note">Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">All files on GitHub Releases</a>.</p>
       </article>
       <article class="card dl-card">
         <div class="icon">🐧</div>
         <h3>Linux</h3>
-        <p><strong>sarviq .deb</strong> — Debian/Ubuntu (also ships as AppImage). <code>sudo dpkg -i</code> and you're in.</p>
-        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq_0.1.0_amd64.deb">Download .deb</a>
+        <p><strong>Sarviq .deb</strong> — Debian/Ubuntu (also ships as AppImage). <code>sudo dpkg -i</code> and you're in.</p>
+        <p class="dl-note">First time? <a href="#first-run">Follow the Linux first-run guide</a>.</p>
+        <a class="btn btn-primary" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/Sarviq_0.1.0_amd64.deb">Download .deb</a>
+        <a class="btn btn-ghost" href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/Sarviq_0.1.0_amd64.AppImage">AppImage (portable)</a>
         <p class="dl-note">Prefer browsing? <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">All files on GitHub Releases</a>.</p>
       </article>
       <article class="card dl-card">
@@ -148,6 +152,40 @@
       </article>
     </div>
     <p class="dl-note dl-macos">On macOS? The signed .dmg build is coming — meanwhile run from source (<code>npm install</code> in <code>apps/api</code> and <code>apps/web</code>) or watch the <a href="https://github.com/MaddyInnov/Sarviq/releases" target="_blank" rel="noopener">releases page</a>.</p>
+  </div>
+</section>
+
+<!-- ============ FIRST RUN ============ -->
+<section class="section" id="first-run">
+  <div class="wrap">
+    <p class="kicker">First run</p>
+    <h2>New to Sarviq? Start here</h2>
+    <p class="section-lede">Install the desktop app, add a free AI key, and have your first agentic conversation in under five minutes. No account, no subscription.</p>
+    <div class="grid first-run-grid">
+      <article class="card">
+        <div class="icon">🪟</div>
+        <h3>Windows (.exe) — first run</h3>
+        <ol class="mini-steps">
+          <li><strong>Install.</strong> Double-click <code>Sarviq_0.1.0_x64-setup.exe</code> and follow the wizard. If SmartScreen says “unknown publisher”, click <em>More info → Run anyway</em> (alpha builds aren’t code-signed yet).</li>
+          <li><strong>Launch.</strong> Open <em>Sarviq</em> from the Start menu. You’ll land in <strong>Chat</strong> — the sidebar holds the six destinations: Chat, Bots, Workflows, Marketplace, Workspace, Activity.</li>
+          <li><strong>Add a free AI key.</strong> Open <strong>Accounts &amp; API keys</strong> (settings) and paste a free Groq key from <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>. The key stays on your machine — it only goes to the provider you chose.</li>
+          <li><strong>Say hello.</strong> Type in Chat and pick a bot (try Scout). When the bot wants to run a tool, an <strong>approval card</strong> appears — approve or deny inline. Nothing runs without your say-so.</li>
+          <li><strong>Make it yours.</strong> In <strong>Preferences</strong>: five themes, Simple/Pro modes, English + Hindi UI, and your 3D companion pet.</li>
+        </ol>
+      </article>
+      <article class="card">
+        <div class="icon">🐧</div>
+        <h3>Linux (.deb / AppImage) — first run</h3>
+        <ol class="mini-steps">
+          <li><strong>Install the .deb.</strong> <code>sudo dpkg -i Sarviq_0.1.0_amd64.deb</code> — or double-click it and open with Software Install. If it asks for missing packages, run <code>sudo apt-get install -f</code>.</li>
+          <li><strong>…or go portable.</strong> Prefer no install? <code>chmod +x Sarviq_0.1.0_amd64.AppImage &amp;&amp; ./Sarviq_0.1.0_amd64.AppImage</code> — runs from anywhere, leaves your system untouched.</li>
+          <li><strong>Launch.</strong> Find <em>Sarviq</em> in your app menu. First screen is <strong>Chat</strong>; the sidebar holds the six destinations: Chat, Bots, Workflows, Marketplace, Workspace, Activity.</li>
+          <li><strong>Add a free AI key.</strong> Open <strong>Accounts &amp; API keys</strong> (settings) and paste a free Groq key from <a href="https://console.groq.com" target="_blank" rel="noopener">console.groq.com</a>. The key stays on your machine.</li>
+          <li><strong>Say hello, then make it yours.</strong> Chat with a bot (approval cards gate every tool call), then pick your theme, mode, language and 3D pet in <strong>Preferences</strong>.</li>
+        </ol>
+      </article>
+    </div>
+    <p class="dl-note">Want the full tour first? <a href="https://github.com/MaddyInnov/Sarviq/releases/download/v0.1.0-alpha/sarviq-video-guide.mp4" target="_blank" rel="noopener">Watch the 9-minute video guide</a> — it walks through chat, pets, bots, workflows, code sessions and the Android apps.</p>
   </div>
 </section>
 

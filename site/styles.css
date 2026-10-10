@@ -263,6 +263,13 @@ main#main, footer.footer { position: relative; z-index: 1; }
 .dl-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); gap: 22px; }
 .dl-card .btn { margin-top: 20px; }
 .dl-apks { display: flex; gap: 12px; flex-wrap: wrap; }
+
+/* ---------- first run ---------- */
+.first-run-grid { grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+.mini-steps { margin: 6px 0 0; padding-left: 22px; display: grid; gap: 14px; }
+.mini-steps li { color: var(--ink-dim); font-size: 0.95rem; line-height: 1.55; }
+.mini-steps li strong { color: var(--ink); }
+.mini-steps code { font-size: 0.85em; }
 .dl-apks .btn { padding: 12px 20px; font-size: 0.9rem; }
 .dl-note { margin-top: 16px !important; font-size: 0.85rem; color: var(--ink-faint); }
 .dl-note a { color: var(--teal); }
